@@ -41,6 +41,8 @@ VRAM. Everything the launcher does is visible with `--dry-run`.
 
 ## How it fits in a small machine
 
+<p align="center"><img src="docs/media/how-it-fits.svg" width="860" alt="Where the model lives: the 10,240 experts are read in place from the file in the RAM page cache and the SSD, the CPU computes 8 of them per layer, and the attention, the recurrent layers, the shared expert and the q8 K/V cache sit on the 4 GB GPU"></p>
+
 The model is a mixture of experts: 256 experts per layer, 8 used per token. The attention, the recurrent layers and the
 shared expert (2 GB) sit in VRAM. The routed experts (18.7 GB) are **not** copied anywhere: the CPU computes them straight
 from the memory-mapped GGUF with AVX-512 kernels that give the same bits as ggml, so the host holds only the page cache,
