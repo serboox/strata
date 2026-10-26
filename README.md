@@ -13,6 +13,26 @@ laptop with an RTX 3050 Ti (4 GB of VRAM), 31 GB of RAM and an NVMe SSD.
 - **`tools/spi`**, which runs pi in a sandbox: only the folder you start it in is writable, no `sudo`, no secrets, no network
   except the local server.
 
+## How it fits in a small machine
+
+<p align="center"><img src="docs/media/how-it-fits.svg" width="860" alt="Where the model lives: the 10,240 experts are read in place from the file in the RAM page cache and the SSD, the CPU computes 8 of them per layer, and the attention, the recurrent layers, the shared expert and the q8 K/V cache sit on the 4 GB GPU"></p>
+
+The model is a mixture of experts: 256 experts per layer, 8 used per token. The attention, the recurrent layers and the
+shared expert (2 GB) sit in VRAM. The routed experts (18.7 GB) are **not** copied anywhere: the CPU computes them straight
+from the memory-mapped GGUF with AVX-512 kernels that give the same bits as ggml, so the host holds only the page cache,
+which the kernel trims under the memory budget. Long prompts are processed in chunks, and each chunk streams the experts
+once through the page cache into the GPU, where the prompt kernels run (int8 matrix multiply), while the CPU computes 96 of
+the 256 experts of each layer next to the card. Decoding uses the model's own MTP block for speculative drafting when the
+request is greedy.
+
+The K/V cache is stored as 8-bit blocks (ggml's q8_0 layout, 53% of FP16), which is what makes a 64K-token window fit in
+the VRAM that is left.
+The default window is 65,536 tokens, with about 0.15 GiB of VRAM left (0.49 GiB at 32K): 69,391 is the most this card holds, and
+128K needs the K/V cache out of VRAM or at lower precision (see "Long context and video memory" in
+[docs/TUNING.md](docs/TUNING.md)). If another program holds VRAM, start with `--context 32768`.
+
+The long-form explanation with charts, in Russian and English, is `docs/index.html`; `docs/TUNING.md` has the tables and `docs/PI.md` the agent setup.
+
 ## What it needs
 
 - Linux x86-64 with AVX2 (AVX-512 is used when present), an NVIDIA GPU with 4 GB of VRAM or more
@@ -38,26 +58,6 @@ experts that are not in the cache come from the SSD: roughly 10, 17, 25 and 33 t
 measured before the AVX-512 kernels (see [docs/TUNING.md](docs/TUNING.md)).
 `--context` and `--chunk` change the context window and the prompt chunk, the two things that compete for the 4 GB of
 VRAM. Everything the launcher does is visible with `--dry-run`.
-
-## How it fits in a small machine
-
-<p align="center"><img src="docs/media/how-it-fits.svg" width="860" alt="Where the model lives: the 10,240 experts are read in place from the file in the RAM page cache and the SSD, the CPU computes 8 of them per layer, and the attention, the recurrent layers, the shared expert and the q8 K/V cache sit on the 4 GB GPU"></p>
-
-The model is a mixture of experts: 256 experts per layer, 8 used per token. The attention, the recurrent layers and the
-shared expert (2 GB) sit in VRAM. The routed experts (18.7 GB) are **not** copied anywhere: the CPU computes them straight
-from the memory-mapped GGUF with AVX-512 kernels that give the same bits as ggml, so the host holds only the page cache,
-which the kernel trims under the memory budget. Long prompts are processed in chunks, and each chunk streams the experts
-once through the page cache into the GPU, where the prompt kernels run (int8 matrix multiply), while the CPU computes 96 of
-the 256 experts of each layer next to the card. Decoding uses the model's own MTP block for speculative drafting when the
-request is greedy.
-
-The K/V cache is stored as 8-bit blocks (ggml's q8_0 layout, 53% of FP16), which is what makes a 64K-token window fit in
-the VRAM that is left.
-The default window is 65,536 tokens, with about 0.15 GiB of VRAM left (0.49 GiB at 32K): 69,391 is the most this card holds, and
-128K needs the K/V cache out of VRAM or at lower precision (see "Long context and video memory" in
-[docs/TUNING.md](docs/TUNING.md)). If another program holds VRAM, start with `--context 32768`.
-
-The long-form explanation with charts, in Russian and English, is `docs/index.html`; `docs/TUNING.md` has the tables and `docs/PI.md` the agent setup.
 
 ## Layout
 
