@@ -1,12 +1,17 @@
-# Strata, Qwen3.6-35B-A3B edition
+# Strata: Qwen3.6-35B-A3B on a 4 GB GPU
 
-A trimmed copy of [Strata](https://github.com/Niko1221/Strata) that does one thing: serve **Qwen3.6-35B-A3B** (UD-Q4_K_XL,
-22.9 GB) on a PC with a small GPU and a modest RAM budget, through an OpenAI- and Anthropic-compatible HTTP API, so that a
-console agent such as [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) can work with it locally.
+Strata serves **Qwen3.6-35B-A3B** (UD-Q4_K_XL, 22.9 GB) on a PC with a small GPU and a modest RAM budget, through an OpenAI-
+and Anthropic-compatible HTTP API on `127.0.0.1:8080`, so that a console agent such as
+[pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) can work with it locally. It is built and measured on a
+laptop with an RTX 3050 Ti (4 GB of VRAM), 31 GB of RAM and an NVMe SSD.
 
-The upstream repository ships many models, a desktop control panel, Windows and macOS builds and a lot of tooling. Here
-only the Qwen3.6 path is kept: the C++/CUDA engine (`strata-q36`), the HTTP server with its metrics collectors, a launcher
-and a pi profile.
+- **About 37 tokens per second** when generating, with 23 GB of RAM free for the page cache; the speed falls gradually, not
+  to zero, when memory is short.
+- **A 64K-token window** (65,536 by default, 69,391 at most) in 4 GB of VRAM, with a q8 K/V cache.
+- **About 200 tokens per second** when reading a prompt, and **checkpoints** of the conversation start, so a new agent
+  session reads about 20 tokens instead of 1,500.
+- **`tools/spi`**, which runs pi in a sandbox: only the folder you start it in is writable, no `sudo`, no secrets, no network
+  except the local server.
 
 ## What it needs
 
@@ -22,7 +27,7 @@ tools/setup_venv.sh        # .venv from requirements.lock (hash-pinned)
 tools/build.sh             # build/strata-q36 and build/libstrata_kq.so, for the installed GPU
 tools/fetch_model.sh       # the pinned GGUF into models/qwen3.6-35b-a3b, size and SHA-256 checked
 bin/strata-serve           # the server on http://127.0.0.1:8080, no memory limit: the page cache grows as far as free memory allows
-tools/spi             # pi on that server inside a sandbox: only the current folder is writable (setup: docs/PI.md)
+tools/spi                  # pi on that server inside a sandbox: only the current folder is writable (setup: docs/PI.md)
 ```
 
 The default profile `auto` sets no memory limit: the kernel keeps the model's experts in the page cache while memory is
@@ -38,9 +43,10 @@ VRAM. Everything the launcher does is visible with `--dry-run`.
 
 The model is a mixture of experts: 256 experts per layer, 8 used per token. The attention, the recurrent layers and the
 shared expert (2 GB) sit in VRAM. The routed experts (18.7 GB) are **not** copied anywhere: the CPU computes them straight
-from the memory-mapped GGUF, so the host holds only the page cache, which the kernel trims under the memory budget. Long
-prompts are processed in chunks, and each chunk streams the experts once through O_DIRECT reads into the GPU, where the
-prompt kernels run (int8 matrix multiply). Decoding uses the model's own MTP block for speculative drafting when the
+from the memory-mapped GGUF with AVX-512 kernels that give the same bits as ggml, so the host holds only the page cache,
+which the kernel trims under the memory budget. Long prompts are processed in chunks, and each chunk streams the experts
+once through the page cache into the GPU, where the prompt kernels run (int8 matrix multiply), while the CPU computes 96 of
+the 256 experts of each layer next to the card. Decoding uses the model's own MTP block for speculative drafting when the
 request is greedy.
 
 The K/V cache is stored as 8-bit blocks (ggml's q8_0 layout, 53% of FP16), which is what makes a 64K-token window fit in
@@ -60,7 +66,9 @@ The long-form explanation with charts, in Russian and English, is `docs/index.ht
 | `third_party/llama.cpp/` | the part of ggml the engine links (CPU backend, quantization, MMQ kernels); see `VERSION.txt` |
 | `serve/` | the HTTP server, the web chat page, telemetry and Prometheus collectors |
 | `strata_control/`, `strata_cli/` | server helpers (config, tokenizer packs, benchmark client) |
-| `tools/` | build, setup, model download, launcher, GGUF and tokenizer tools |
+| `tools/` | build, setup, model download, launcher, GGUF and tokenizer tools; `tools/spi` is the pi sandbox |
+| `bin/strata-serve` | the server launcher |
+| `docs/` | `index.html` (the explanation, Russian and English), `TUNING.md` (tables), `PI.md` (pi setup and safety) |
 
 `tools/vendor_ggml.sh <llama.cpp checkout>` refreshes `third_party/llama.cpp`. A newer ggml may need small changes in
 `src/prefill/` (the MMQ entry points change between releases).
@@ -75,9 +83,8 @@ part of the experts next to the card). Details in [docs/PI.md](docs/PI.md) and
 
 ## Metrics
 
-The server keeps its request accounting, the telemetry module and the two endpoints from upstream: `GET /metrics` (JSON,
-the slots and the last requests) and `GET /metrics/prometheus` (Prometheus text format). They are kept on purpose for
-later use.
+The server keeps request accounting and exposes two endpoints: `GET /metrics` (JSON: the slots and the last requests) and
+`GET /metrics/prometheus` (Prometheus text format).
 
 ## Tests
 
@@ -85,6 +92,10 @@ later use.
 tools/run_tests.sh         # every serve/test_*.py module, one process each
 ```
 
-## License
+## Credits and license
 
-See `LICENSE`. The vendored ggml sources keep their own MIT license (`third_party/llama.cpp/LICENSE`).
+Strata is based on [Strata](https://github.com/Niko1221/Strata) by Niko1221 (MIT), cut down to the Qwen3.6-35B-A3B path and
+extended for a small GPU. The vendored ggml sources come from [llama.cpp](https://github.com/ggml-org/llama.cpp) and keep
+their own MIT license (`third_party/llama.cpp/LICENSE`). The model is Qwen3.6-35B-A3B by the Qwen team; `tools/fetch_model.sh`
+downloads [Unsloth's](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF) UD-Q4_K_XL GGUF with the MTP layer. The license
+of this repository is in `LICENSE`.
