@@ -455,7 +455,8 @@ def _cpu_topology(root: str = "/sys/devices/system"):
         packages = set()
         for f in glob.glob(os.path.join(root, "cpu", "cpu[0-9]*", "topology", "physical_package_id")):
             try:
-                packages.add(open(f, encoding="utf-8").read().strip())
+                with open(f, encoding="utf-8") as handle:
+                    packages.add(handle.read().strip())
             except OSError:
                 continue
         nodes = len(glob.glob(os.path.join(root, "node", "node[0-9]*")))

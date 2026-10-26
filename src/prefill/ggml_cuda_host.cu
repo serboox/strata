@@ -140,7 +140,7 @@ struct CachingPool : ggml_cuda_pool {
 };
 }  // namespace
 
-std::unique_ptr<ggml_cuda_pool> ggml_backend_cuda_context::new_pool_for_device(int, int) {
+std::unique_ptr<ggml_cuda_pool> ggml_backend_cuda_context::new_pool_for_device(ggml_backend_cuda_context &, int, int) {
     return std::unique_ptr<ggml_cuda_pool>(new CachingPool());
 }
 

@@ -7,6 +7,7 @@
 #include "strata/kernels/cpu/iq_avx2.hpp"
 #include "strata/kernels/cpu/iq_avx1.hpp"
 #include "strata/kernels/cpu/kq_avx2.hpp"
+#include "strata/kernels/cpu/kq_avx512.hpp"
 #include "strata/kernels/cpu/nvfp4_avx2.hpp"
 #include "strata/kernels/cpu/nvfp4_avx512.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
@@ -30,6 +31,13 @@ namespace strata::kernels::cpu {
 namespace {
 
 const ggml_type_traits_cpu* traits(int type) { return ggml_get_type_traits_cpu((ggml_type) type); }
+
+// The dot products stream expert weights from memory, and a core's own hardware prefetcher restarts at every 4 KB page:
+// asking for the rows a few steps ahead keeps the memory pipe full (about 15% more bandwidth with four threads).
+constexpr int kPrefetchRows = 3;
+inline void prefetch_row(const uint8_t* row, size_t bytes) {
+    for (size_t o = 0; o < bytes; o += 64) __builtin_prefetch(row + o, 0, 3);
+}
 
 // Do the trellis rows take Strata's own kernels (tq_cpu.hpp)?  Always, unless STRATA_NO_TQ_KERNELS=1 asks for ggml-cpu's
 // vec_dot AND this ggml has the type (the agentionai fork; an upstream ggml does not, and must never be asked about it).
@@ -356,10 +364,24 @@ void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* 
         nvfp4_256_gu_rows(blob, f.gu_row, f.up_off, n, act, nt, ff, r0, r1, sg, su);
         return;
     }
+    // Q4_K gate/up on AVX-512: the same bits as ggml-cpu's dot, the weights unpacked once for all the tokens
+    static const bool kq512 = cpu_avx512_ok() && std::getenv("STRATA_NO_KQ512") == nullptr;
+    if (kq512 && f.tail_off == 0 && kq512_gu_supported(f.gu_type, n)) {
+        kq512_gu_rows(blob, f.gu_row, f.up_off, n, act, nt, ff, r0, r1);
+        return;
+    }
     const ggml_vec_dot_t dot = traits(f.gu_type)->vec_dot;
+    for (int r = r0; r < (std::min)(r1, r0 + kPrefetchRows); ++r) {
+        prefetch_row(blob + (size_t) r * f.gu_row, f.gu_row);
+        prefetch_row(blob + f.up_off + (size_t) r * f.gu_row, f.gu_row);
+    }
     for (int r = r0; r < r1; ++r) {
         const uint8_t* gr = blob + (size_t) r * f.gu_row;
         const uint8_t* ur = blob + f.up_off + (size_t) r * f.gu_row;
+        if (r + kPrefetchRows < r1) {
+            prefetch_row(gr + (size_t) kPrefetchRows * f.gu_row, f.gu_row);
+            prefetch_row(ur + (size_t) kPrefetchRows * f.gu_row, f.gu_row);
+        }
         for (int t = 0; t < nt; ++t) {
             float g = 0.f, u = 0.f;
             dot(n, &g, 0, gr, 0, act[t], 0, 1);
@@ -412,9 +434,16 @@ void native_down_rows(const NativeFmt& f, const uint8_t* blob, const void* const
         nvfp4_256_rows(blob + f.down_off, f.d_row, n, hq, nt, out, r0, r1, sd);
         return;
     }
+    static const bool kq512_down = cpu_avx512_ok() && std::getenv("STRATA_NO_KQ512") == nullptr;
+    if (kq512_down && f.tail_off == 0 && kq512_down_supported(f.d_type, n)) {
+        kq512_down_rows(blob + f.down_off, f.d_row, n, hq, nt, out, r0, r1);
+        return;
+    }
     const ggml_vec_dot_t dot = traits(f.d_type)->vec_dot;
+    for (int r = r0; r < (std::min)(r1, r0 + kPrefetchRows); ++r) prefetch_row(blob + f.down_off + (size_t) r * f.d_row, f.d_row);
     for (int r = r0; r < r1; ++r) {
         const uint8_t* dr = blob + f.down_off + (size_t) r * f.d_row;
+        if (r + kPrefetchRows < r1) prefetch_row(dr + (size_t) kPrefetchRows * f.d_row, f.d_row);
         for (int t = 0; t < nt; ++t) {
             float s = 0.f;
             dot(n, &s, 0, dr, 0, hq[t], 0, 1);

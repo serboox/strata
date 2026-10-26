@@ -367,6 +367,18 @@ private:
     };
     const NativeFmt* nfmt_ = nullptr;
     std::vector<SplitBufMulti> split_multi_;
+    // Mode 7, the native experts as one batch with no barrier between gate/up and down: an expert's rows are cut into
+    // chunks, the thread that finishes the last gate/up chunk quantizes the hidden values, and the down chunks of that
+    // expert wait only for it.  Tasks are claimed in order (every gate/up chunk before any down chunk), so a waiting
+    // down chunk always has its gate/up chunks running on other threads.
+    static constexpr int kFusedGuChunks = 2, kFusedDownChunks = 4;
+    struct alignas(64) FusedState {
+        std::atomic<int32_t> gu_done{0};
+        std::atomic<int32_t> ready{0};
+    };
+    std::vector<FusedState> fused_;
+    int fused_experts_ = 0;
+    void fused_task(uint32_t i);
     // STRATA_NUMA_SPLIT=1 (opt-in, Linux, exactly 2 nodes): in the native row phases (modes 5/6) every expert's rows
     // are cut into one slice per NUMA node (slice k = rows [per*k/2, per*(k+1)/2) of the gate/up or down matrix, the
     // part the resident complement places on node k in step B), and each node's threads claim and count on their own

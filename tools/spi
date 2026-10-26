@@ -1,0 +1,86 @@
+#!/bin/bash
+# pi on the local Strata model inside a bubblewrap sandbox. The model's commands see the current folder (read-write), a
+# read-only system and an empty home: no sudo, no keys or tokens, no network except a bridge to the local Strata server.
+set -euo pipefail
+
+PORT=${STRATA_PORT:-8080}
+AGENT_DIR=${SPI_AGENT_DIR:-$HOME/.pi/agent-local}
+CWD=$(pwd -P)
+
+for tool in bwrap socat curl node pi; do
+    command -v "$tool" >/dev/null 2>&1 || { echo "spi: $tool is not installed" >&2; exit 1; }
+done
+NODE_DIR=$(dirname "$(dirname "$(readlink -f "$(command -v node)")")")
+case "$(readlink -f "$(command -v pi)")" in
+    "$NODE_DIR"/*) ;;
+    *) echo "spi: pi is not inside the node prefix $NODE_DIR" >&2; exit 1 ;;
+esac
+
+case "$CWD" in
+    "$HOME"/*) ;;
+    *) echo "spi: start it in a folder inside $HOME, not in $CWD" >&2; exit 1 ;;
+esac
+first=${CWD#"$HOME"/}
+first=${first%%/*}
+case "$first" in
+    .*) echo "spi: refusing a hidden folder of the home directory ($CWD)" >&2; exit 1 ;;
+esac
+
+[ -f "$AGENT_DIR/models.json" ] && [ -f "$AGENT_DIR/settings.json" ] || { echo "spi: $AGENT_DIR needs models.json and settings.json (the local profile)" >&2; exit 1; }
+mkdir -p "$AGENT_DIR/sessions"
+# spi --shell [command]: the same sandbox with a shell (or the command) instead of pi, to see what the model sees
+if [ "${1:-}" = "--shell" ]; then
+    shift
+    RUN=("${@:-bash}")
+else
+    curl -fsS -m 3 "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1 || { echo "spi: no Strata server on port $PORT, start it with bin/strata-serve" >&2; exit 1; }
+    RUN=(pi "$@")
+fi
+
+SOCK=${XDG_RUNTIME_DIR:-/tmp}/spi-$$.sock
+socat UNIX-LISTEN:"$SOCK",fork,mode=600 TCP:127.0.0.1:"$PORT" &
+BRIDGE=$!
+trap 'kill "$BRIDGE" 2>/dev/null || true; rm -f "$SOCK"' EXIT
+for _ in $(seq 1 30); do [ -S "$SOCK" ] && break; sleep 0.1; done
+
+ARGS=(
+    --die-with-parent --new-session
+    --unshare-user --unshare-pid --unshare-ipc --unshare-uts --unshare-cgroup-try --unshare-net
+    --cap-drop ALL
+    --ro-bind /usr /usr
+    --symlink usr/bin /bin --symlink usr/sbin /sbin --symlink usr/lib /lib --symlink usr/lib64 /lib64
+    --proc /proc --dev /dev --tmpfs /tmp --tmpfs "$HOME" --tmpfs "$HOME/.cache" --tmpfs "$HOME/.pi/agent"
+    --ro-bind "$NODE_DIR" "$NODE_DIR"
+    --ro-bind "$AGENT_DIR/models.json" "$HOME/.pi/agent/models.json"
+    --ro-bind "$AGENT_DIR/settings.json" "$HOME/.pi/agent/settings.json"
+    --bind "$AGENT_DIR/sessions" "$HOME/.pi/agent/sessions"
+    --bind "$CWD" "$CWD"
+    --bind "$SOCK" /tmp/strata.sock
+    --chdir "$CWD"
+    --clearenv
+    --setenv PATH "$NODE_DIR/bin:/usr/local/bin:/usr/bin"
+    --setenv HOME "$HOME" --setenv USER "$(id -un)" --setenv LOGNAME "$(id -un)" --setenv SHELL /bin/bash
+    --setenv TERM "${TERM:-xterm-256color}" --setenv LANG "${LANG:-C.UTF-8}"
+    --setenv PI_OFFLINE 1
+)
+for f in passwd group nsswitch.conf hosts localtime ssl pki ld.so.cache ld.so.conf ld.so.conf.d alternatives os-release profile profile.d bashrc inputrc; do
+    ARGS+=(--ro-bind-try "/etc/$f" "/etc/$f")
+done
+[ -n "${COLORTERM:-}" ] && ARGS+=(--setenv COLORTERM "$COLORTERM")
+# SPI_RO=/path/a:/path/b: more directories, read-only (toolchains the project needs); PATH entries stay yours to set
+if [ -n "${SPI_RO:-}" ]; then
+    IFS=: read -ra extra <<< "$SPI_RO"
+    for dir in "${extra[@]}"; do ARGS+=(--ro-bind "$dir" "$dir"); done
+fi
+
+# a git hook or the repository config written by the model would run later on the host, outside the sandbox
+if [ -d "$CWD/.git" ]; then
+    [ -d "$CWD/.git/hooks" ] && ARGS+=(--ro-bind "$CWD/.git/hooks" "$CWD/.git/hooks")
+    [ -f "$CWD/.git/config" ] && ARGS+=(--ro-bind "$CWD/.git/config" "$CWD/.git/config")
+fi
+# everything above the folder is read-only too: the directories on the way down are empty and cannot be written
+ARGS+=(--remount-ro "$HOME" --remount-ro /)
+
+status=0
+bwrap "${ARGS[@]}" /bin/sh -c 'socat TCP-LISTEN:'"$PORT"',bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:/tmp/strata.sock & exec "$@"' sh "${RUN[@]}" || status=$?
+exit "$status"

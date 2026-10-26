@@ -853,6 +853,7 @@ ExpertPool::ExpertPool(int n_workers, bool pin, bool host_works, PoolAffinity af
     strata::core::diag_pool_fn().store(&diag_active_pool);
     split_.resize((size_t) kMaxSplit);
     split_multi_.resize((size_t) kMaxSplitMulti);
+    fused_ = std::vector<FusedState>((size_t) kMaxSplitMulti);
     // STRATA_NUMA_SPLIT: decided here, before any worker starts (a worker counts into its slice's `parked` from its
     // first instruction), and never revised.  Unset: the plan stays empty and nothing below runs.
     NumaSplitPlan plan;
@@ -1196,6 +1197,8 @@ void ExpertPool::drain(int id, ExpertScratch& scratch, uint32_t epoch) {
             const int e = (int) i / parts_b_, part = (int) i % parts_b_;
             const int r0 = H * part / parts_b_, r1 = H * (part + 1) / parts_b_;
             s2_expert_down_rows(jobs_[e].blob, split_[(size_t) e].a2, jobs_[e].out, r0, r1);
+        } else if (mode_ == 7) {
+            fused_task(i);
         } else if (mode_ >= 5) {
             // plan v0.3 P6: native layers, 5 = gate/up rows, 6 = down rows (the layer's own n_ff / n_embd: Flash-Next's
             // FF / H, or another family's smaller expert)
@@ -1274,6 +1277,34 @@ void ExpertPool::drain(int id, ExpertScratch& scratch, uint32_t epoch) {
         } else {
             done_.fetch_add(1, std::memory_order_release);
         }
+    }
+}
+
+void ExpertPool::fused_task(uint32_t i) {
+    const int gu_tasks = fused_experts_ * kFusedGuChunks;
+    const bool gate_up = (int) i < gu_tasks;
+    const int k = gate_up ? (int) i : (int) i - gu_tasks;
+    const int e = k / (gate_up ? kFusedGuChunks : kFusedDownChunks);
+    const int chunk = k % (gate_up ? kFusedGuChunks : kFusedDownChunks);
+    const int chunks = gate_up ? kFusedGuChunks : kFusedDownChunks;
+    ExpertJobMulti& job = mjobs_[e];
+    SplitBufMulti& sb = split_multi_[(size_t) e];
+    const NativeFmt* const nfmt = job.fmt != nullptr ? job.fmt : nfmt_;
+    if (gate_up) {
+        const int rows = (int) nfmt->n_ff;
+        float* ff[MAXT];
+        for (int t = 0; t < job.nt; ++t) ff[t] = sb.ff[t];
+        native_gu_rows(*nfmt, job.blob, job.nact, job.nt, ff, rows * chunk / chunks, rows * (chunk + 1) / chunks);
+        if (fused_[(size_t) e].gu_done.fetch_add(1, std::memory_order_acq_rel) + 1 == kFusedGuChunks) {
+            for (int t = 0; t < job.nt; ++t) native_quant_h(*nfmt_, sb.ff[t], sb.hq[t]);
+            fused_[(size_t) e].ready.store(1, std::memory_order_release);
+        }
+    } else {
+        while (fused_[(size_t) e].ready.load(std::memory_order_acquire) == 0) _mm_pause();
+        const int rows = (int) nfmt->n_embd;
+        const void* hq[MAXT];
+        for (int t = 0; t < job.nt; ++t) hq[t] = sb.hq[t];
+        native_down_rows(*nfmt, job.blob, hq, job.nt, job.out, rows * chunk / chunks, rows * (chunk + 1) / chunks);
     }
 }
 
@@ -1360,10 +1391,22 @@ void ExpertPool::run_split_multi_native(const NativeFmt& f, ExpertJobMulti* jobs
     if (n <= 0) return;
     const auto t0 = std::chrono::steady_clock::now();
     // more distinct experts than buffers: run them in batches
+    static const bool fused_batches = std::getenv("STRATA_NO_FUSED") == nullptr;
     for (int b0 = 0; b0 < n; b0 += kMaxSplitMulti) {
         const int nb = (std::min)(kMaxSplitMulti, n - b0);
         mjobs_ = jobs + b0;
         nfmt_ = &f;
+        if (fused_batches && numa_n_ == 0 && !q2_native_kernels(f.gu_type) && !q2_native_kernels(f.d_type)) {
+            fused_experts_ = nb;
+            for (int e = 0; e < nb; ++e) {
+                fused_[(size_t) e].gu_done.store(0, std::memory_order_relaxed);
+                fused_[(size_t) e].ready.store(0, std::memory_order_relaxed);
+            }
+            const auto a = std::chrono::steady_clock::now();
+            run_phase(7, nb * (kFusedGuChunks + kFusedDownChunks));
+            ms_multi_gu += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - a).count();
+            continue;
+        }
         mrows_ = (int64_t) nb * f.n_ff;
         mtasks_ = numa_n_ > 0 ? numa_plan_phase((int) f.n_ff, nb) : phase_tasks(mrows_);
         const auto a = std::chrono::steady_clock::now();
