@@ -157,6 +157,67 @@ Without a network it cannot install packages. If you start a plain `pi` while th
   draft ahead (about 90% of the drafts are accepted). A request that sets its own temperature or penalties is decoded
   without drafts. `bin/strata-serve --sampling card` uses the model card's sampling for everything instead.
 
+## The Strata extension for pi
+
+`tools/pi-strata` is a pi extension for this server. A long recorded pi session (128 turns) showed where a 64K local model
+loses its time, and none of it is the decoding speed:
+
+- 67 calls in a row returned the same output (a `git diff | grep | head -N` with a different N each time): 51% of all
+  tool-output tokens, and half of the session.
+- Each compaction cost about nine minutes: the summary request reads its text from scratch (a different prompt, nothing
+  in the cache), the summary is written token by token, and the next turn reads the kept tail again from scratch. pi
+  keeps `keepRecentTokens` by its own estimate (about 4 characters per token); code is 2.8 characters per token, so
+  12,000 kept tokens were about 22,000 to read.
+- `read` returns the file without line numbers, so the model guesses `file:LINE` (1 of 27 references exact in the test below).
+
+| Hook | What it does |
+| --- | --- |
+| `tool_result`, `tool_call` | Loop guard: an output identical to an earlier one of the same tool in the window is replaced by a two-line stub; after three identical results in a row from one command (numbers in its arguments ignored, `file1` and `file2` still differ) that command is refused, and after three refusals the run is stopped. `edit` and `write` are exempt, and an edit ends a run. |
+| `tool_result` | Output cap: `bash` and other tools keep the head and the tail of a result over 6,000 characters, with the omitted line count and the command to get more. Escape codes and progress-bar rewrites are removed; whitespace and line endings (CRLF included) are never touched, so text copied into an edit still matches. |
+| `tool_result` (`read`) | Lines are numbered from the real file line (`42<TAB>text`). A file over 24,000 characters keeps both ends and lists the definitions of the omitted part with their line numbers. |
+| `tool_call` (`edit`) | Line-number prefixes are removed from `oldText` only when every line matches a line that a numbered read of that file showed (a TSV whose own lines start with a number and a tab is left alone), and then from `newText` too. |
+| `session_before_compact` | Keeps about 2,500 estimated tokens instead of 12,000 (the cut moves only across plain messages; with a branch summary, a custom message or a context edit in between pi's own cut stays), builds a deterministic digest of the dropped part (the request, each action with the first line of its result, the model's notes), asks the model for a note of at most 300 words from that digest, and appends pi's `read-files` and `modified-files` lists. If the model gives nothing, the digest itself becomes the summary. |
+| `before_agent_start` | Adds a short section to the system prompt: narrow commands, no repeated reads, numbered lines, batch independent lookups. |
+
+Install (the sandbox of `tools/spi` mounts the folder read-only; plain `pi` can load it with `pi -e tools/pi-strata/index.ts`):
+
+```sh
+mkdir -p ~/.pi/agent-local/extensions
+cp -r tools/pi-strata ~/.pi/agent-local/extensions/strata
+install -m 755 tools/spi ~/.local/bin/spi        # the copy that mounts extensions
+```
+
+Settings go in an optional `config.json` next to `index.ts`: `guard` (`minChars`, `window`, `nudgeAt`, `blockAt`,
+`abortAfterBlocks`, `exempt`), `output` (`bashChars`, `otherChars`), `read` (`lineNumbers`, `maxChars`), `compaction` (`enabled`,
+`keepRecentEstimatedTokens`, `digestChars`, `summaryMaxTokens`), `promptGuidance`. Each part can be switched off alone, for
+example `{"read": {"lineNumbers": false}}`.
+
+Measured on this server (window 40,000, the task "review nine modules one at a time and append a paragraph to `notes.md`
+for each", same model, greedy):
+
+| Run | Model time | Prompt read | Generated | Exact `file:LINE` references |
+| --- | --- | --- | --- | --- |
+| pi alone | 776 s | 64.7K tokens | 3,850 | 1 of 27 |
+| extension, compaction only | 775 s | 59.9K | 3,610 | 0 of 27 |
+| extension, all parts | 651 s | 52.8K | 3,367 | 26 of 27 |
+
+Compaction alone: the summary request read 992 tokens instead of 3,953 and the first turn after it 5,369 instead of 8,708
+(6.4K against 12.6K tokens read in total). The loop guard, replayed over the recorded 128-turn session, refuses the first
+repeat at turn 66 and stops the run at turn 68; the 60 turns after it would not have happened. What the numbers do not show:
+how a different model behaves, and the loop guard has only been run on that one recording plus unit tests.
+
+Live check of the loop guard: seven commands that return the same output. pi alone returned seven full copies; with the
+extension the first was full, the next three became stubs, the next two were refused and the seventh stopped the run. Two
+more tasks (six questions about the code, a constant rename with `edit`) gave the same answers and a correct edit with and
+without the extension.
+
+Trade-offs: line numbers add about 3 tokens per line, 19% more tokens on the six files measured (13% to 30%), to every
+read; the cap and the refusal can hide something the model wanted (the marker says how to get it); a note of 300 words
+keeps less than a long summary.
+
+Checks: `cd tools/pi-strata && node --test test/*.test.ts` (unit tests), `node scripts/replay-guard.ts session.jsonl`
+(what the guard would do to a recorded session, totals only).
+
 ## Troubleshooting
 
 | Symptom | Cause |

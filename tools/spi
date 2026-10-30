@@ -54,6 +54,7 @@ ARGS=(
     --ro-bind "$AGENT_DIR/models.json" "$HOME/.pi/agent/models.json"
     --ro-bind "$AGENT_DIR/settings.json" "$HOME/.pi/agent/settings.json"
     --bind "$AGENT_DIR/sessions" "$HOME/.pi/agent/sessions"
+    --ro-bind-try "$AGENT_DIR/extensions" "$HOME/.pi/agent/extensions"
     --bind "$CWD" "$CWD"
     --bind "$SOCK" /tmp/strata.sock
     --chdir "$CWD"
