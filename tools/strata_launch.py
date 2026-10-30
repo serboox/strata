@@ -1,5 +1,6 @@
 import argparse
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -7,6 +8,8 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from serve.thermal import MAX_LIMIT_C, MIN_LIMIT_C  # noqa: E402
 MODEL_DIR = ROOT / "models" / "qwen3.6-35b-a3b"
 MODEL_FILE = MODEL_DIR / "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
 MODEL_NAME = "qwen3.6-35b-a3b"
@@ -55,13 +58,27 @@ def engine_args(profile: dict) -> list:
 GREEDY_SAMPLING = {"temperature": 0, "presence_penalty": 0, "frequency_penalty": 0, "repetition_penalty": 1}
 
 
-def build_config(profile: dict, port: int, sampling: str) -> dict:
+def build_config(profile: dict, port: int, sampling: str, max_temp: float = 0) -> dict:
     config = {"exe": "build/strata-q36", "args": engine_args(profile), "cwd": str(ROOT),
               "tokenizer": str(MODEL_DIR / "pack" / "tokenizer"), "model_name": MODEL_NAME, "arch": "qwen35moe",
               "log": str(ROOT / "logs" / "strata-qwen36.log"), "host": "127.0.0.1", "port": port}
     if sampling == "greedy":
         config["sampling"] = GREEDY_SAMPLING
+    if max_temp > 0:
+        config["thermal"] = {"max_temp_c": max_temp}
     return config
+
+
+def apply_turbo(mode: str, dry_run: bool) -> None:
+    """Switch the CPU turbo boost the way the launcher was asked to; "keep" leaves it alone. A failure is a warning only."""
+    if mode == "keep":
+        return
+    if dry_run:
+        print(f"strata-launch: turbo {mode} (not applied in a dry run)", file=sys.stderr)
+        return
+    result = subprocess.run([str(ROOT / "tools" / "turbo"), mode, "--no-sudo", "--quiet"], capture_output=True, text=True)
+    if result.returncode != 0:
+        print(f"strata-launch: could not switch turbo {mode}: {result.stderr.strip() or 'see tools/turbo status'}", file=sys.stderr)
 
 
 def ensure_tokenizer() -> None:
@@ -81,10 +98,17 @@ def main() -> int:
                         help="greedy: MTP drafts speed decoding up (default); card: the model card's sampling, no drafts")
     parser.add_argument("--mtp", type=int, help="MTP drafts per speculative step (0 turns drafting off)")
     parser.add_argument("--workers", type=int, help="CPU expert worker threads (the main thread computes too)")
+    parser.add_argument("--max-temp", type=float, default=80.0, metavar="C",
+                        help="pause the engine for part of the time whenever the CPU package or the GPU reaches this many "
+                             "degrees Celsius (default 80, 0 turns the limit off)")
+    parser.add_argument("--turbo", choices=("off", "on", "keep"), default="off",
+                        help="CPU turbo boost at start: off (default), on, or keep what it is (tools/turbo does the same on its own)")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--no-limit", action="store_true", help="do not run the server in a memory-limited cgroup")
     parser.add_argument("--dry-run", action="store_true", help="write the config and print the command, start nothing")
     args = parser.parse_args()
+    if not (args.max_temp == 0 or (math.isfinite(args.max_temp) and MIN_LIMIT_C <= args.max_temp <= MAX_LIMIT_C)):
+        parser.error(f"--max-temp must be 0 (off) or from {MIN_LIMIT_C:g} to {MAX_LIMIT_C:g} degrees Celsius, not {args.max_temp:g}")
 
     profile = dict(PROFILES[args.profile])
     if args.ram:
@@ -104,7 +128,7 @@ def main() -> int:
     RUN_DIR.mkdir(exist_ok=True)
     (ROOT / "logs").mkdir(exist_ok=True)
     config_path = RUN_DIR / "qwen36.json"
-    config_path.write_text(json.dumps(build_config(profile, args.port, args.sampling), indent=1) + "\n", encoding="utf-8")
+    config_path.write_text(json.dumps(build_config(profile, args.port, args.sampling, args.max_temp), indent=1) + "\n", encoding="utf-8")
 
     server = [str(ROOT / ".venv" / "bin" / "python"), str(ROOT / "serve" / "server.py"), "--engine", "strata", "--config",
               str(config_path), "--port", str(args.port)]
@@ -117,7 +141,9 @@ def main() -> int:
     elif not args.no_limit:
         print("strata-launch: systemd-run is not available, the memory budget is not enforced", file=sys.stderr)
     print(f"strata-launch: profile {args.profile}, memory budget {profile['ram'] or 'none (elastic page cache)'}, context {profile['context']}, "
-          f"port {args.port}", file=sys.stderr)
+          f"port {args.port}, temperature limit {f'{args.max_temp:g} C' if args.max_temp > 0 else 'none'}, turbo {args.turbo}",
+          file=sys.stderr)
+    apply_turbo(args.turbo, args.dry_run)
     if args.dry_run:
         print(" ".join(command))
         return 0

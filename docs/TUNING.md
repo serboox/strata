@@ -38,11 +38,35 @@ same thermal state.
 | `--workers` | 3 | CPU expert threads besides the main one; 4 is slower, 7 is half the speed |
 | `--mtp` | 2 | drafts per step, about 90% accepted; 3 and 4 were not faster |
 | `--sampling` | greedy | drafting runs only for greedy requests, `card` turns it off |
+| `--max-temp` | 80 | while the CPU package or the GPU is at this many degrees or hotter, the engine is paused for a share of every half second, a bigger share the hotter it is; 0 turns the limit off |
+| `--turbo` | off | the CPU turbo boost at start: `off`, `on` or `keep`; `tools/turbo on|off|status` switches it at any time |
 | `--prefetch` | on | read-ahead of an expert's ranges, issued only when the range is not cached |
 | `--stream-io` | direct | O_DIRECT reads for prompt chunks, so they do not push the hot experts out of the cache |
 
 `STRATA_POOL_SPIN_US` (how long idle workers spin before sleeping, 20 ms by default) was tried at 100 and 300 us: no
 gain from a cool start.
+
+## Heat and turbo
+
+The laptop heats up quickly under the model, and a hot CPU slows itself down in uneven steps. Two settings keep that under control.
+
+**The temperature limit.** The server reads the CPU package temperature (`coretemp` or `k10temp` in sysfs) and the GPU's, once
+a second. At the limit (80 C by default) it stops the engine process with SIGSTOP for a part of every half second and
+resumes it with SIGCONT: a stopped process draws no CPU and starts no GPU work, so both cool. The share is 10% plus 4 points
+per degree over the limit, added each second, up to 85%; below the limit minus 3 degrees it shrinks by 5 points a second, and
+inside that band it holds. Each change of 20 points and each start and end of the pausing is one line in the log
+(`[strata] thermal: cpu 83 C ...`), and the share and the temperature are in the `hardware` series of `GET /metrics`
+(`thermal_duty`, `thermal_temp`). The engine is resumed when the server stops, and the kernel kills it if the server is
+killed (`PR_SET_PDEATHSIG`), stopped or not. Where a process cannot be paused (Windows) the limit is not enforced and the
+server says so. Checked with unit tests, with a busy process (it got less than half the CPU time and ran freely again after the
+stop) and with the server's config wiring on the mock engine; not yet with the real engine under a real load.
+
+**The turbo boost.** `tools/turbo status|on|off` reads and writes `intel_pstate/no_turbo` (or `cpufreq/boost` on other drivers).
+On this machine the CPU runs at up to 4800 MHz with the boost and 3300 MHz without. The switch belongs to root; a tmpfiles rule
+(kept in the machine's restore repository) turns the boost off at boot and makes the file group-writable for `wheel`, so
+neither `tools/turbo` nor `strata-serve --turbo` needs sudo. Without that rule `tools/turbo` asks for sudo, and the launcher only
+warns. The boost is a machine-wide setting, not the model's: every program is slower without it. Speeds in this document were
+measured with the boost on.
 
 ## What fits in 4 GB of VRAM
 

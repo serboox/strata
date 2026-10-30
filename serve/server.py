@@ -3836,6 +3836,7 @@ class Service:
         self.shared_path = None                       # where they are kept between starts (next to the config)
         self.config_effort = None                     # #1641: the config's "reasoning_effort": the level for requests with none
         self.keep_awake = None                        # #1727 (opt-in): serve.keepawake.KeepAwake, the config's "prevent_sleep"
+        self.thermal = None                           # serve.thermal.Governor, the config's "thermal": {"max_temp_c": N}
         self.fifo = threading.Lock()
         self.slot_save_path = None                    # --slot-save-path: /slots/0?action=save|restore (off when None)
         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
@@ -4514,12 +4515,37 @@ class Service:
                     req["output_config"] = {"effort": effort}
         return req
 
+    def engine_pid(self):
+        """The running engine's pid, or None: an exited engine's pid may already belong to another process."""
+        proc = getattr(getattr(self, "engine", None), "proc", None)
+        poll = getattr(proc, "poll", None)
+        if proc is None or (poll is not None and poll() is not None):
+            return None
+        return getattr(proc, "pid", None)
+
+    def thermal_readings(self):
+        """The temperatures the limit is held against: the CPU package and the GPU the telemetry reads."""
+        from serve.thermal import cpu_package_temp_c
+        telemetry = getattr(self, "telemetry", None)
+        gpu = telemetry.snapshot()["now"].get("gpu_temp") if telemetry is not None else None
+        return {"cpu": cpu_package_temp_c(), "gpu": gpu}
+
+    def _thermal_series(self):
+        governor = self.thermal
+        if governor is None:
+            return {}
+        series = {"thermal_duty": governor.duty}
+        if governor.temp_c is not None:
+            series["thermal_temp"] = governor.temp_c
+        return series
+
     def start_telemetry(self):
         """The hardware sampler behind GET /metrics (serve/telemetry.py), recording this server's tok/s too."""
         if getattr(self, "telemetry", None) is None:
             from serve.telemetry import Telemetry
             self.telemetry = Telemetry(extra=lambda: {"tok_s": self._tok_s(), "tok_s_mean": self._tok_s_mean(),
-                                                    "prefill_tok_s_mean": self._prefill_tok_s_mean()},
+                                                    "prefill_tok_s_mean": self._prefill_tok_s_mean(),
+                                                    **self._thermal_series()},
                                        gpu_index=int(getattr(self, "gpu_index", 0) or 0),
                                        gpu_indices=getattr(self, "gpu_indices", None),
                                        amd=getattr(self, "backend", None) == "hip")
@@ -8479,6 +8505,15 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         raise SystemExit(f"[strata] config \"prevent_sleep\" must be true or false, not {cfg['prevent_sleep']!r}")
     from serve.keepawake import KeepAwake
     svc.keep_awake = KeepAwake.create(cfg.get("prevent_sleep") is True)      # #1727: opt-in, Windows only
+    from serve import thermal
+    try:
+        svc.thermal = thermal.create(cfg.get("thermal"), svc.thermal_readings, svc.engine_pid)
+    except ValueError as e:
+        raise SystemExit(f"[strata] config {e}")
+    if svc.thermal is not None:
+        svc.thermal.start()
+        print(f"[strata] thermal: the engine is paused for part of the time whenever the CPU or the GPU reaches "
+              f"{svc.thermal.limit_c:.0f} C", flush=True)
     if cfg.get("reasoning_effort") is not None:         # #1641: the thinking level of requests that name none
         try:
             svc.config_effort = clean_shared_defaults({"reasoning_effort": cfg["reasoning_effort"]}).get("reasoning_effort")
