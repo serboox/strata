@@ -87,6 +87,7 @@ push with your keys.
 | an empty home: no `~/.ssh`, no other projects, no tokens, no `auth.json` of your own pi | a temporary home directory |
 | everything above the folder, `/` and the home included: only the empty chain of directories down to it, read-only, so nothing can be read, created or changed there | `--remount-ro` on `/` and on the home |
 | `.git/hooks` and `.git/config` of the folder: read-only | a hook or a config written by the model would run later on the host, outside the sandbox |
+| no controlling terminal: the model's commands cannot type into your shell | `--new-session`; because of it the kernel sends no SIGWINCH, so `spi` polls the window size and forwards each change to pi by hand |
 | an empty environment: no `SSH_AUTH_SOCK`, no tokens in variables | `--clearenv` |
 | no `sudo` (the "no new privileges" flag is set) and no capabilities | `--cap-drop ALL` |
 | no network, except a bridge to the Strata server on `127.0.0.1:8080` | `--unshare-net` plus `socat` over a socket |

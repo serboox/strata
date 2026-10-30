@@ -84,5 +84,21 @@ fi
 ARGS+=(--remount-ro "$HOME" --remount-ro /)
 
 status=0
-bwrap "${ARGS[@]}" /bin/sh -c 'socat TCP-LISTEN:'"$PORT"',bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:/tmp/strata.sock & exec "$@"' sh "${RUN[@]}" || status=$?
+# --new-session leaves the sandbox without a controlling terminal, so the kernel never sends it SIGWINCH: the window
+# size is polled through the inherited terminal (fd 3) and a change is forwarded to the program by hand
+INNER='exec 3<&0
+socat TCP-LISTEN:'"$PORT"',bind=127.0.0.1,fork,reuseaddr UNIX-CONNECT:/tmp/strata.sock &
+if [ -t 3 ]; then
+    pid=$$
+    (
+        last=$(stty size <&3 2>/dev/null)
+        while kill -0 "$pid" 2>/dev/null; do
+            sleep 0.2
+            now=$(stty size <&3 2>/dev/null)
+            [ "$now" = "$last" ] || { last=$now; kill -WINCH "$pid" 2>/dev/null; }
+        done
+    ) &
+fi
+exec "$@" 3<&-'
+bwrap "${ARGS[@]}" /bin/sh -c "$INNER" sh "${RUN[@]}" || status=$?
 exit "$status"
