@@ -27,6 +27,7 @@ case "$first" in
 esac
 
 [ -f "$AGENT_DIR/models.json" ] && [ -f "$AGENT_DIR/settings.json" ] || { echo "spi: $AGENT_DIR needs models.json and settings.json (the local profile)" >&2; exit 1; }
+[ -f "$AGENT_DIR/extensions/strata/index.ts" ] || echo "spi: warning: $AGENT_DIR/extensions/strata is missing, pi runs without the loop guard and the cheaper compaction" >&2
 mkdir -p "$AGENT_DIR/sessions"
 # spi --shell [command]: the same sandbox with a shell (or the command) instead of pi, to see what the model sees
 if [ "${1:-}" = "--shell" ]; then

@@ -179,7 +179,7 @@ loses its time, and none of it is the decoding speed:
 | `session_before_compact` | Keeps about 2,500 estimated tokens instead of 12,000 (the cut moves only across plain messages; with a branch summary, a custom message or a context edit in between pi's own cut stays), builds a deterministic digest of the dropped part (the request, each action with the first line of its result, the model's notes), asks the model for a note of at most 300 words from that digest, and appends pi's `read-files` and `modified-files` lists. If the model gives nothing, the digest itself becomes the summary. |
 | `before_agent_start` | Adds a short section to the system prompt: narrow commands, no repeated reads, numbered lines, batch independent lookups. |
 
-Install (the sandbox of `tools/spi` mounts the folder read-only; plain `pi` can load it with `pi -e tools/pi-strata/index.ts`):
+Install (the sandbox of `tools/spi` mounts the folder read-only and `spi` warns on start when `extensions/strata` is missing; plain `pi` can load it with `pi -e tools/pi-strata/index.ts`):
 
 ```sh
 mkdir -p ~/.pi/agent-local/extensions
