@@ -1,6 +1,7 @@
 #!/bin/bash
 # pi on the local Strata model inside a bubblewrap sandbox. The model's commands see the current folder (read-write), a
 # read-only system and an empty home: no sudo, no keys or tokens, no network except a bridge to the local Strata server.
+# gh is the exception that stays read-only: a broker on the host runs it for the repositories of the folder (docs/PI.md).
 set -euo pipefail
 
 PORT=${STRATA_PORT:-8080}
@@ -39,10 +40,29 @@ else
 fi
 
 SOCK=${XDG_RUNTIME_DIR:-/tmp}/spi-$$.sock
+GH_SOCK=${XDG_RUNTIME_DIR:-/tmp}/spi-$$-gh.sock
 socat UNIX-LISTEN:"$SOCK",fork,mode=600 TCP:127.0.0.1:"$PORT" &
 BRIDGE=$!
-trap 'kill "$BRIDGE" 2>/dev/null || true; rm -f "$SOCK"' EXIT
+GH_BROKER=
+trap 'kill "$BRIDGE" $GH_BROKER 2>/dev/null || true; rm -f "$SOCK" "$GH_SOCK"' EXIT
 for _ in $(seq 1 30); do [ -S "$SOCK" ] && break; sleep 0.1; done
+
+# gh in the sandbox has no token and no network: a read-only broker on the host answers it over a socket (SPI_GH=0 turns it off)
+GH_ARGS=()
+SPI_DIR=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
+if [ "${SPI_GH:-1}" != 0 ]; then
+    if [ -f "$SPI_DIR/spi_gh_broker.py" ] && [ -f "$SPI_DIR/spi_gh_shim.py" ] && command -v gh >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+        rm -f "$GH_SOCK"
+        python3 -I "$SPI_DIR/spi_gh_broker.py" --socket "$GH_SOCK" --cwd "$CWD" --parent-pid $$ --log "$AGENT_DIR/gh-broker.log" ${SPI_GH_REPOS:+--repos "$SPI_GH_REPOS"} &
+        GH_BROKER=$!
+        for _ in $(seq 1 30); do [ -S "$GH_SOCK" ] && break; sleep 0.1; done
+    fi
+    if [ -n "$GH_BROKER" ] && kill -0 "$GH_BROKER" 2>/dev/null && [ -S "$GH_SOCK" ]; then
+        GH_ARGS=(--bind "$GH_SOCK" /tmp/gh.sock --ro-bind "$SPI_DIR/spi_gh_shim.py" /tmp/spi-bin/gh)
+    else
+        echo "spi: warning: the read-only gh broker did not start (needs gh, python3 and spi_gh_broker.py, spi_gh_shim.py next to spi), gh stays without access" >&2
+    fi
+fi
 
 ARGS=(
     --die-with-parent --new-session
@@ -60,7 +80,7 @@ ARGS=(
     --bind "$SOCK" /tmp/strata.sock
     --chdir "$CWD"
     --clearenv
-    --setenv PATH "$NODE_DIR/bin:/usr/local/bin:/usr/bin"
+    --setenv PATH "/tmp/spi-bin:$NODE_DIR/bin:/usr/local/bin:/usr/bin"
     --setenv HOME "$HOME" --setenv USER "$(id -un)" --setenv LOGNAME "$(id -un)" --setenv SHELL /bin/bash
     --setenv TERM "${TERM:-xterm-256color}" --setenv LANG "${LANG:-C.UTF-8}"
     --setenv PI_OFFLINE 1
@@ -68,6 +88,7 @@ ARGS=(
 for f in passwd group nsswitch.conf hosts localtime ssl pki ld.so.cache ld.so.conf ld.so.conf.d alternatives os-release profile profile.d bashrc inputrc; do
     ARGS+=(--ro-bind-try "/etc/$f" "/etc/$f")
 done
+ARGS+=("${GH_ARGS[@]}")
 [ -n "${COLORTERM:-}" ] && ARGS+=(--setenv COLORTERM "$COLORTERM")
 # SPI_RO=/path/a:/path/b: more directories, read-only (toolchains the project needs); PATH entries stay yours to set
 if [ -n "${SPI_RO:-}" ]; then

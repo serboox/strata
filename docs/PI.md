@@ -91,6 +91,7 @@ push with your keys.
 | an empty environment: no `SSH_AUTH_SOCK`, no tokens in variables | `--clearenv` |
 | no `sudo` (the "no new privileges" flag is set) and no capabilities | `--cap-drop ALL` |
 | no network, except a bridge to the Strata server on `127.0.0.1:8080` | `--unshare-net` plus `socat` over a socket |
+| `gh`, read-only, for the repositories of the folder: the token and the network stay outside | a broker on the host behind a second socket ([below](#gh-in-the-sandbox)) |
 | its own profile, `models.json` and `settings.json` read-only, sessions kept | `~/.pi/agent-local` |
 
 It refuses to start in `/`, in your home directory itself or in a hidden folder of it, and checks that the server answers.
@@ -98,6 +99,31 @@ Checked here: from the sandbox the home canary, a sibling folder, `~/.ssh` and `
 `rm /usr/bin/true` and `echo x > /etc/passwd` fail with "Read-only file system", `sudo` refuses, `curl https://example.com`
 cannot resolve a name, and `rm -rf --no-preserve-root /` removes nothing outside the mounted folder (the host's `/usr/bin`,
 canary files and secrets were intact afterwards).
+
+### gh in the sandbox
+
+`gh` inside the sandbox has no token and no network, so by itself it only says "not logged in". `spi` starts a small broker on
+the host (`tools/spi_gh_broker.py`) and puts a `gh` in front of the real one that sends each command to it over a unix socket.
+The broker checks the command against a fixed list, runs the real `gh` with your token and returns the output. The token never
+enters the sandbox and the network stays closed.
+
+| | |
+| --- | --- |
+| allowed | `pr view`, `list`, `diff`, `checks`, `status`; `issue view`, `list`; `run list`, `view`; `repo view`; `api` with GET under `repos/OWNER/REPO/` (pulls, issues, commits, compare, branches, check-runs, contents, git/trees, actions runs and jobs) |
+| refused | everything that writes (create, comment, review, merge, close, edit, delete, `workflow run`), `auth`, `config`, `alias`, `extension`, `search`, `graphql`, `--jq`, `--template`, `--web`, `--input`, a field value that starts with `@` (gh would read that file on the host), headers other than `Accept`, and `--` |
+| repositories | the `github.com` remotes in the folder's `.git/config` (read-only inside the sandbox), plus `SPI_GH_REPOS=owner/repo,owner/other`; `-R` may name only these |
+| account | the one named like the repository owner (`gh auth token --user OWNER`), otherwise the active account |
+| limits | 4 MiB of output, 60 s per command (coreutils `timeout` ends gh even if the broker dies) and 4 commands at a time; 16 connections, 10 s to send a request; token-like strings are cut from the output |
+| log | `~/.pi/agent-local/gh-broker.log`, one line per request, allowed or refused; the sandbox cannot reach it |
+
+`gh help` in the sandbox lists what is available. `jq` is there, so pipe the output through it instead of `--jq`. `SPI_GH=0 spi`
+starts without the broker. `--jq` and `--template` are refused on purpose: the host `gh` would evaluate them with the token in
+its environment.
+
+What stays open: the model can read whatever the token can read in those repositories (code, pull request text, comments, CI
+logs), and text from there is as untrusted as any file it reads; it cannot write to GitHub and has nowhere to send the data. The
+list of repositories comes from the folder's own `.git/config`, so a cloned repository that names other repositories as remotes
+makes those readable too.
 
 Why bubblewrap and not a Docker image: Docker needs a root daemon (here it is switched off, and the `docker` group is root in
 disguise). Rootless podman with an image mounting the folder gives the same kernel isolation (user, mount, pid and network
@@ -110,7 +136,7 @@ model is part of what you fear.
 Install and use:
 
 ```sh
-install -m 755 tools/spi ~/.local/bin/spi
+install -m 755 tools/spi tools/spi_gh_broker.py tools/spi_gh_shim.py ~/.local/bin/    # the two .py files stay next to spi
 mkdir -p ~/.pi/agent-local                  # put models.json (above) in it, and this settings.json:
 ```
 
@@ -129,6 +155,7 @@ cd ~/some/project && spi               # interactive, the local model
 spi -p "list the files here"           # one shot
 spi --shell                            # a shell in the same sandbox: see what the model sees
 SPI_RO=/home/you/.cargo:/home/you/go spi   # more directories, read-only (toolchains the project needs)
+SPI_GH_REPOS=owner/other-repo spi      # more repositories for the read-only gh
 ```
 
 What it does not stop: the model can still delete or rewrite everything in the folder you started it in, so commit or stash
@@ -185,7 +212,7 @@ Install (the sandbox of `tools/spi` mounts the folder read-only and `spi` warns 
 ```sh
 mkdir -p ~/.pi/agent-local/extensions
 cp -r tools/pi-strata ~/.pi/agent-local/extensions/strata
-install -m 755 tools/spi ~/.local/bin/spi        # the copy that mounts extensions
+install -m 755 tools/spi tools/spi_gh_broker.py tools/spi_gh_shim.py ~/.local/bin/   # the copy that mounts extensions and gh
 ```
 
 Settings go in an optional `config.json` next to `index.ts`: `guard` (`minChars`, `window`, `nudgeAt`, `blockAt`,
