@@ -134,6 +134,24 @@ fi
 # everything above the folder is read-only too: the directories on the way down are empty and cannot be written
 ARGS+=(--remount-ro "$HOME" --remount-ro /)
 
+# pi and what the model runs (builds, tests) go in a control group of their own with a low CPU and I/O weight, so they yield to
+# the programs the person is using; SPI_PRIORITY=normal leaves the priority alone. The weight must really show up in the group:
+# a scope can start and still have its weights ignored when the controllers are not delegated to the user manager.
+priority_scope_applies() {
+    command -v systemd-run >/dev/null 2>&1 || return 1
+    local weight
+    weight=$(timeout 10 systemd-run --user --scope --quiet -p CPUWeight=20 -p IOWeight=20 -- sh -c 'cat "/sys/fs/cgroup$$(cut -d: -f3 /proc/self/cgroup)/cpu.weight"' 2>/dev/null) || return 1
+    [ "$weight" = 20 ]
+}
+PRIORITY_CMD=()
+if [ "${SPI_PRIORITY:-background}" != normal ]; then
+    if priority_scope_applies; then
+        PRIORITY_CMD=(systemd-run --user --scope --quiet -p CPUWeight=20 -p IOWeight=20 --)
+    else
+        echo "spi: warning: no control group with a low CPU weight is available here, pi and its commands keep the normal priority" >&2
+    fi
+fi
+
 status=0
 # --new-session leaves the sandbox without a controlling terminal, so the kernel never sends it SIGWINCH: the window
 # size is polled through the inherited terminal (fd 3) and a change is forwarded to the program by hand
@@ -152,5 +170,10 @@ if [ -t 3 ]; then
     ) &
 fi
 exec "$@" 3<&-'
-bwrap "${ARGS[@]}" /bin/sh -c "$INNER" sh "${RUN[@]}" || status=$?
+BWRAP_ARGS=("${ARGS[@]}" /bin/sh -c "$INNER" sh "${RUN[@]}")
+if [ "${#PRIORITY_CMD[@]}" -gt 0 ]; then
+    # systemd-run reads a $ in its arguments as the start of a variable and $$ as one literal dollar, so every dollar is doubled
+    for i in "${!BWRAP_ARGS[@]}"; do BWRAP_ARGS[i]=${BWRAP_ARGS[i]//\$/\$\$}; done
+fi
+"${PRIORITY_CMD[@]}" bwrap "${BWRAP_ARGS[@]}" || status=$?
 exit "$status"

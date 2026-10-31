@@ -186,6 +186,7 @@ spi --shell                            # a shell in the same sandbox: see what t
 SPI_RO=/home/you/.cargo:/home/you/go spi   # more directories, read-only (toolchains the project needs)
 SPI_GH_REPOS=owner/other-repo spi      # more repositories for the read-only gh
 SPI_WEB=0 spi                          # no web access at all
+SPI_PRIORITY=normal spi                # pi and its commands at the normal priority (the default: a control group with weight 20 against 100)
 SPI_WEB_VPN=block spi                  # also refuse the wide public ranges that a VPN routes (see the proxy section)
 ```
 
