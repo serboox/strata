@@ -1,13 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { findCutPoint } from "@earendil-works/pi-coding-agent";
+import { Type } from "@earendil-works/pi-ai";
+import { defineTool, findCutPoint } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { NumberedReads, readView, stripLineNumbers } from "./src/code-view.ts";
 import { buildCompaction, planCompaction, type EntryLike, type PreparationLike } from "./src/compaction.ts";
 import { DEFAULT_GUARD, LoopGuard, type GuardConfig } from "./src/loop-guard.ts";
 import { SUMMARY_SYSTEM_PROMPT } from "./src/summary.ts";
 import { SAFE_NORMALIZE, capOutput, commandShape, estimateTokens, normalizeOutput } from "./src/text.ts";
+import { DEFAULT_CHARS, MAX_CHARS, describeFetchError, fetchPage, pageSlice, pageText } from "./src/web.ts";
 
 interface Config {
   guard: GuardConfig;
@@ -15,6 +17,7 @@ interface Config {
   read: { lineNumbers: boolean; maxChars: number };
   compaction: { enabled: boolean; keepRecentEstimatedTokens: number; digestChars: number; summaryMaxTokens: number };
   promptGuidance: boolean;
+  web: { enabled: boolean };
 }
 
 const DEFAULTS: Config = {
@@ -23,6 +26,7 @@ const DEFAULTS: Config = {
   read: { lineNumbers: true, maxChars: 24000 },
   compaction: { enabled: true, keepRecentEstimatedTokens: 2500, digestChars: 14000, summaryMaxTokens: 700 },
   promptGuidance: true,
+  web: { enabled: true },
 };
 
 const GUIDANCE = [
@@ -32,6 +36,7 @@ const GUIDANCE = [
   "- Lines of a read result start with their file line number and a tab; the number is not part of the file, so leave it out of edit text. Cite those numbers when you give file:line references.",
   "- If a command returned the same output as before, changing only a number in it (head -N, a range) will not change the result: use the output you have.",
   "- When several independent lookups are needed, issue them together in one response.",
+  "- The web is reachable: web_fetch opens a URL as text, and curl works in bash. Never answer that you cannot open web pages; try, and report what came back.",
 ].join("\n");
 
 function loadConfig(): Config {
@@ -43,6 +48,7 @@ function loadConfig(): Config {
       read: { ...DEFAULTS.read, ...raw.read },
       compaction: { ...DEFAULTS.compaction, ...raw.compaction },
       promptGuidance: raw.promptGuidance ?? DEFAULTS.promptGuidance,
+      web: { ...DEFAULTS.web, ...raw.web },
     };
   } catch {
     return DEFAULTS;
@@ -52,8 +58,38 @@ function loadConfig(): Config {
 const textOf = (content: { type: string; text?: string }[]): string =>
   content.filter((block) => block.type === "text").map((block) => block.text ?? "").join("\n");
 
+const webFetchTool = defineTool({
+  name: "web_fetch",
+  label: "Web fetch",
+  description:
+    "Open an http or https URL and return it as plain text: a web page is reduced to its readable text, JSON and plain text come as they are. A long page comes in parts, and the result names the offset to pass for the next one.",
+  promptSnippet: "web_fetch: open a web page or an API address and read it as text",
+  promptGuidelines: [
+    `web_fetch returns about ${DEFAULT_CHARS} characters at a time. When the page continues, call it again with the offset the result names; do not fetch the same page again from the start.`,
+    "If web_fetch says a site blocks programs, do not guess what its page contains: tell the user, or look for the information on another site.",
+  ],
+  parameters: Type.Object({
+    url: Type.String({ description: "The http or https address to open" }),
+    offset: Type.Optional(Type.Number({ description: "Character to start from, as named by the previous result. Default 0." })),
+    max_chars: Type.Optional(Type.Number({ description: `How many characters to return, at most ${MAX_CHARS}. Default ${DEFAULT_CHARS}.` })),
+  }),
+  async execute(_toolCallId, params, signal) {
+    let page;
+    try {
+      page = await fetchPage(params.url, { signal });
+    } catch (error) {
+      throw new Error(`web_fetch: ${describeFetchError(error)}`);
+    }
+    const type = page.contentType.split(";")[0]?.trim();
+    const head = `${page.url.slice(0, 300)} (HTTP ${page.status}${type ? `, ${type}` : ""})`;
+    const text = `${head}\n${pageSlice(pageText(page), params.offset ?? 0, params.max_chars ?? DEFAULT_CHARS)}`;
+    return { content: [{ type: "text" as const, text }], details: undefined };
+  },
+});
+
 export default function strataAgent(pi: ExtensionAPI) {
   const config = loadConfig();
+  if (config.web.enabled) pi.registerTool(webFetchTool);
   const guard = new LoopGuard(config.guard);
   const reads = new NumberedReads();
   let turn = 0;

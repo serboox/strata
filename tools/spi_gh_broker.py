@@ -370,7 +370,7 @@ class Policy:
     def help_text(self) -> str:
         commands = ", ".join(" ".join(words) for words in COMMANDS)
         return (
-            "gh here is read-only and goes through a broker on the host: no token and no network inside the sandbox.\n"
+            "gh here is read-only and goes through a broker on the host: no token inside the sandbox.\n"
             f"commands: {commands}, api (GET only, under repos/OWNER/REPO/)\n"
             f"repositories: {', '.join(self.repos) or 'none'}" + (f" ({self.default_repo} is the default)" if self.repos else "") + "\n"
             "--repo/-R may name any of them. --jq and --template are not available: pipe the output through jq instead.\n"

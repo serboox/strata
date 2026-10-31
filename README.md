@@ -17,7 +17,8 @@ at hand: the numbers below are measured on it, and other GPUs and models are mea
 - **About 200 tokens per second** when reading a prompt, and **checkpoints** of the conversation start, so a new agent
   session reads about 20 tokens instead of 1,500.
 - **`tools/spi`**, which runs pi in a sandbox: only the folder you start it in and pi's own session folder are writable, no `sudo`,
-  no files of yours outside those folders, no network except the local server.
+  no files of yours outside those folders, no secrets, no network of its own: the local server, a read-only `gh` and the public web
+  (through a filtering proxy) are reached over sockets.
 
 ## How it fits in a small machine
 

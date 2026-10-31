@@ -90,22 +90,23 @@ push with your keys.
 | no controlling terminal: the model's commands cannot type into your shell | `--new-session`; because of it the kernel sends no SIGWINCH, so `spi` polls the window size and forwards each change to pi by hand |
 | an empty environment: no `SSH_AUTH_SOCK`, no tokens in variables | `--clearenv` |
 | no `sudo` (the "no new privileges" flag is set) and no capabilities | `--cap-drop ALL` |
-| no network, except a bridge to the Strata server on `127.0.0.1:8080` | `--unshare-net` plus `socat` over a socket |
-| `gh`, read-only, for the repositories of the folder: the token and the network stay outside | a broker on the host behind a second socket ([below](#gh-in-the-sandbox)) |
+| no network of its own, except a bridge to the Strata server on `127.0.0.1:8080` | `--unshare-net` plus `socat` over a socket |
+| the public web, through a filtering proxy: public addresses only, any port but the mail ports; nothing on the host, in the local network or behind the VPN | a proxy on the host behind another socket ([below](#web-access-in-the-sandbox)) |
+| `gh`, read-only, for the repositories of the folder: the token stays outside | a broker on the host behind a second socket ([below](#gh-in-the-sandbox)) |
 | its own profile, `models.json` and `settings.json` read-only, sessions kept | `~/.pi/agent-local` |
 
 It refuses to start in `/`, in your home directory itself or in a hidden folder of it, and checks that the server answers.
 Checked here: from the sandbox the home canary, a sibling folder, `~/.ssh` and `auth.json` do not exist, `touch /usr/bin/x`,
-`rm /usr/bin/true` and `echo x > /etc/passwd` fail with "Read-only file system", `sudo` refuses, `curl https://example.com`
-cannot resolve a name, and `rm -rf --no-preserve-root /` removes nothing outside the mounted folder (the host's `/usr/bin`,
+`rm /usr/bin/true` and `echo x > /etc/passwd` fail with "Read-only file system", `sudo` refuses, `curl --noproxy '*'
+https://example.com` cannot resolve a name, and `rm -rf --no-preserve-root /` removes nothing outside the mounted folder (the host's `/usr/bin`,
 canary files and secrets were intact afterwards).
 
 ### gh in the sandbox
 
-`gh` inside the sandbox has no token and no network, so by itself it only says "not logged in". `spi` starts a small broker on
+`gh` inside the sandbox has no token, so by itself it only says "not logged in". `spi` starts a small broker on
 the host (`tools/spi_gh_broker.py`) and puts a `gh` in front of the real one that sends each command to it over a unix socket.
 The broker checks the command against a fixed list, runs the real `gh` with your token and returns the output. The token never
-enters the sandbox and the network stays closed.
+enters the sandbox.
 
 | | |
 | --- | --- |
@@ -121,9 +122,37 @@ starts without the broker. `--jq` and `--template` are refused on purpose: the h
 its environment.
 
 What stays open: the model can read whatever the token can read in those repositories (code, pull request text, comments, CI
-logs), and text from there is as untrusted as any file it reads; it cannot write to GitHub and has nowhere to send the data. The
+logs), and text from there is as untrusted as any file it reads; it cannot write to GitHub, but it can send what it read to the public web through the proxy below. The
 list of repositories comes from the folder's own `.git/config`, so a cloned repository that names other repositories as remotes
 makes those readable too.
+
+### Web access in the sandbox
+
+The sandbox has no network interface of its own, so `curl https://example.com` needs the proxy. `spi` starts a small web proxy on
+the host (`tools/spi_web_proxy.py`) and bridges it into the sandbox on `127.0.0.1:3128`; `HTTP_PROXY`, `HTTPS_PROXY` and
+`NODE_USE_ENV_PROXY` point at it, and `NO_PROXY` keeps `127.0.0.1` direct, so pi still reaches the model without it. `curl`, `git`
+over https, `npm`, `pip` and node's `fetch` work through it.
+
+| | |
+| --- | --- |
+| accepted | `CONNECT host:port` and plain `http://` requests with a full address; nothing else |
+| addresses | the proxy resolves the name on the host and refuses the request unless every answer is a public address: loopback, private, link-local, carrier-grade NAT, multicast and reserved ranges are refused, and so are IPv6 forms that carry such an address (IPv4-mapped, 6to4, Teredo, NAT64). It then asks the kernel (`ip route get` for a TCP connection to that port, which honours policy rules and every routing table) how it would reach each address and keeps only those it reaches the way it reaches a documentation address, along the default route; an address of this host, an unreachable one (IPv6 on a host without it) and one behind a route other than the default are left out, and a failed lookup leaves the address out too. A route can change between the lookup and the connection, so the source address of the connected socket, which the kernel takes from the route it really used, is compared with the default route's as well. A split-tunnel VPN sends some public ranges through the company network: whole provider and CDN blocks (Cloudflare, a cloud's `/8`) and, next to them, single company endpoints. The two cannot be told apart by address alone, so the width of the route decides (`SPI_WEB_VPN`): by default (`hosts`) a route of `/22` or wider counts as the internet and a route of `/23` or narrower (down to a single address) as a company host, which is refused; `block` refuses every address that the VPN routes, `allow` none. With the default the agent can reach a company service that sits in a wide provider block and is open to the company's addresses, and with `block` it cannot reach a Cloudflare-hosted site while the VPN is up (see below for what is done about it). It connects to the address it checked, so a changed DNS answer cannot redirect it, and it follows no redirects. This keeps the local services of the host (a database on `127.0.0.1`, ssh) and the networks behind the VPN out of reach. A name that does not resolve and a name that resolves inside get the same answer, so the proxy cannot be used to probe internal names |
+| ports | any, except the mail ports 25, 465 and 587; `SPI_WEB_PORTS=80,443` limits the list |
+| needs | python3 and `ip` (iproute2) on the host; the proxy refuses to start without them |
+| limits | 64 connections (another 64 are refused with a 503, the rest dropped), 10 s for the request head, 16 name lookups and 8 route lookups at a time, the first 16 addresses of a name, 120 s idle, one hour per connection |
+| log | `~/.pi/agent-local/web-proxy.log`, one line per connection with the target, the bytes and the verdict; the sandbox cannot reach it |
+
+Not covered: ssh, raw TCP and UDP (git over ssh, database clients) and tools that ignore the proxy variables. `SPI_WEB=0 spi`
+starts without any web access.
+
+A site may still refuse the sandbox: a shop behind Cloudflare answers a program with a browser check ("Just a moment...", HTTP
+403) and gives its page only to a real browser. Nothing here works around that, and the `web_fetch` tool of the extension says so
+instead of guessing.
+
+What this gives away: the model, and anything it runs, can send data to any public address on those ports, so a text from a web
+page that steers it can also move out what it can read, which is the content of the folder, `.env` files included. The sandbox
+still has no token, no keys and no write access outside the folder, but keep secrets out of the folder or run with `SPI_WEB=0`
+when the folder holds some.
 
 Why bubblewrap and not a Docker image: Docker needs a root daemon (here it is switched off, and the `docker` group is root in
 disguise). Rootless podman with an image mounting the folder gives the same kernel isolation (user, mount, pid and network
@@ -136,7 +165,7 @@ model is part of what you fear.
 Install and use:
 
 ```sh
-install -m 755 tools/spi tools/spi_gh_broker.py tools/spi_gh_shim.py ~/.local/bin/    # the two .py files stay next to spi
+install -m 755 tools/spi tools/spi_gh_broker.py tools/spi_gh_shim.py tools/spi_web_proxy.py ~/.local/bin/    # the .py files stay next to spi
 mkdir -p ~/.pi/agent-local                  # put models.json (above) in it, and this settings.json:
 ```
 
@@ -156,13 +185,15 @@ spi -p "list the files here"           # one shot
 spi --shell                            # a shell in the same sandbox: see what the model sees
 SPI_RO=/home/you/.cargo:/home/you/go spi   # more directories, read-only (toolchains the project needs)
 SPI_GH_REPOS=owner/other-repo spi      # more repositories for the read-only gh
+SPI_WEB=0 spi                          # no web access at all
+SPI_WEB_VPN=block spi                  # also refuse the wide public ranges that a VPN routes (see the proxy section)
 ```
 
 What it does not stop: the model can still delete or rewrite everything in the folder you started it in, so commit or stash
 first and look at the diff afterwards (files it leaves there, such as a `Makefile` or a script, run later on the host if you
 run them); the names of the directories on the way down and the read-only system under `/usr` stay visible; inside the folder
-git works from its root only, because the repository above a sub-folder is out of reach; it has no git identity and no credentials, so you commit and push yourself, outside.
-Without a network it cannot install packages. If you start a plain `pi` while the local model is its default in
+git works from its root only, because the repository above a sub-folder is out of reach; it has no git identity and no credentials, so you commit and push yourself, outside; it has no CPU, memory or process limit of its own, so a runaway command can slow the machine until it is stopped or `spi` ends.
+If you start a plain `pi` while the local model is its default in
 `~/.pi/agent/settings.json`, that run has no sandbox at all: use `spi` for the local model.
 
 ## Things that matter with a 64K window
@@ -205,14 +236,15 @@ loses its time, and none of it is the decoding speed:
 | `tool_result` (`read`) | Lines are numbered from the real file line (`42<TAB>text`). A file over 24,000 characters keeps both ends and lists the definitions of the omitted part with their line numbers. |
 | `tool_call` (`edit`) | Line-number prefixes are removed from `oldText` only when every line matches a line that a numbered read of that file showed (a TSV whose own lines start with a number and a tab is left alone), and then from `newText` too. |
 | `session_before_compact` | Keeps about 2,500 estimated tokens instead of 12,000 (the cut moves only across plain messages; with a branch summary, a custom message or a context edit in between pi's own cut stays), builds a deterministic digest of the dropped part (the request, each action with the first line of its result, the model's notes), asks the model for a note of at most 300 words from that digest, and appends pi's `read-files` and `modified-files` lists. If the model gives nothing, the digest itself becomes the summary. |
-| `before_agent_start` | Adds a short section to the system prompt: narrow commands, no repeated reads, numbered lines, batch independent lookups. |
+| `before_agent_start` | Adds a short section to the system prompt: narrow commands, no repeated reads, numbered lines, batch independent lookups, and that the web is reachable. |
+| tool `web_fetch` | Opens an http or https URL and returns it as text: a page is reduced to its readable text (the `<main>` or `<article>` part when it has real content, without scripts, styles, navigation and blank lines, and with a run of eight or more short list items joined into one line), JSON and plain text come as they are, a charset is honoured, redirects are followed, at most 2 MB are read. A result is about 5,000 characters and names the `offset` for the next part, so a long page is read in pieces. A Cloudflare browser check, a refused address, a missing host and a timeout are reported in words. Turn it off with `"web": {"enabled": false}` in `config.json`. Inside `spi` it goes through the web proxy; plain `pi` fetches directly. |
 
 Install (the sandbox of `tools/spi` mounts the folder read-only and `spi` warns on start when `extensions/strata` is missing; plain `pi` can load it with `pi -e tools/pi-strata/index.ts`):
 
 ```sh
 mkdir -p ~/.pi/agent-local/extensions
 cp -r tools/pi-strata ~/.pi/agent-local/extensions/strata
-install -m 755 tools/spi tools/spi_gh_broker.py tools/spi_gh_shim.py ~/.local/bin/   # the copy that mounts extensions and gh
+install -m 755 tools/spi tools/spi_gh_broker.py tools/spi_gh_shim.py tools/spi_web_proxy.py ~/.local/bin/   # the copy that mounts extensions, gh and the proxy
 ```
 
 Settings go in an optional `config.json` next to `index.ts`: `guard` (`minChars`, `window`, `nudgeAt`, `blockAt`,
