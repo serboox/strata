@@ -6,6 +6,7 @@ import { defineTool, findCutPoint } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { NumberedReads, readView, stripLineNumbers } from "./src/code-view.ts";
 import { buildCompaction, planCompaction, type EntryLike, type PreparationLike } from "./src/compaction.ts";
+import { DEFAULT_DOOR, DoorGuard, adviceFor, refusalReason, sitesOfResult, webCall, type DoorConfig } from "./src/door-guard.ts";
 import { DEFAULT_GUARD, LoopGuard, type GuardConfig } from "./src/loop-guard.ts";
 import { SUMMARY_SYSTEM_PROMPT } from "./src/summary.ts";
 import { SAFE_NORMALIZE, capOutput, commandShape, estimateTokens, normalizeOutput } from "./src/text.ts";
@@ -13,6 +14,7 @@ import { DEFAULT_CHARS, MAX_CHARS, describeFetchError, fetchPage, pageSlice, pag
 
 interface Config {
   guard: GuardConfig;
+  doors: DoorConfig;
   output: { bashChars: number; otherChars: number };
   read: { lineNumbers: boolean; maxChars: number };
   compaction: { enabled: boolean; keepRecentEstimatedTokens: number; digestChars: number; summaryMaxTokens: number };
@@ -22,6 +24,7 @@ interface Config {
 
 const DEFAULTS: Config = {
   guard: DEFAULT_GUARD,
+  doors: DEFAULT_DOOR,
   output: { bashChars: 6000, otherChars: 6000 },
   read: { lineNumbers: true, maxChars: 24000 },
   compaction: { enabled: true, keepRecentEstimatedTokens: 2500, digestChars: 14000, summaryMaxTokens: 700 },
@@ -37,6 +40,7 @@ const GUIDANCE = [
   "- If a command returned the same output as before, changing only a number in it (head -N, a range) will not change the result: use the output you have.",
   "- When several independent lookups are needed, issue them together in one response.",
   "- The web is reachable: web_fetch opens a URL as text, and curl works in bash. Never answer that you cannot open web pages; try, and report what came back.",
+  "- A site that refuses programs (HTTP 403, a browser check, Access Denied) refuses every page of it: do not retry or try other pages, take another way (a web search, another shop or the maker's site, an API or a feed, the web archive) or ask the user for the text. A name that does not exist is not worth guessing at.",
 ].join("\n");
 
 function loadConfig(): Config {
@@ -44,6 +48,7 @@ function loadConfig(): Config {
     const raw = JSON.parse(readFileSync(new URL("./config.json", import.meta.url), "utf8")) as Partial<Config>;
     return {
       guard: { ...DEFAULTS.guard, ...raw.guard },
+      doors: { ...DEFAULTS.doors, ...raw.doors },
       output: { ...DEFAULTS.output, ...raw.output },
       read: { ...DEFAULTS.read, ...raw.read },
       compaction: { ...DEFAULTS.compaction, ...raw.compaction },
@@ -91,6 +96,7 @@ export default function strataAgent(pi: ExtensionAPI) {
   const config = loadConfig();
   if (config.web.enabled) pi.registerTool(webFetchTool);
   const guard = new LoopGuard(config.guard);
+  const doors = new DoorGuard(config.doors);
   const reads = new NumberedReads();
   let turn = 0;
   const stats = { cappedTokens: 0, stubbedTokens: 0, refusedCalls: 0, compactions: 0, summaryTokensSaved: 0 };
@@ -101,6 +107,7 @@ export default function strataAgent(pi: ExtensionAPI) {
   };
   pi.on("session_start", () => {
     forgetContext();
+    doors.reset();
     turn = 0;
   });
   pi.on("session_compact", forgetContext);
@@ -125,6 +132,12 @@ export default function strataAgent(pi: ExtensionAPI) {
         if (typeof edit.newText === "string") edit.newText = stripLineNumbers(edit.newText);
       }
     }
+    const webTarget = webCall(event.toolName, event.input);
+    const shut = webTarget === undefined || !config.doors.enabled || !config.doors.block ? undefined : doors.check(webTarget.hosts, webTarget.text);
+    if (shut !== undefined) {
+      stats.refusedCalls++;
+      return { block: true, reason: shut };
+    }
     const verdict = guard.beforeCall(event.toolName, commandShape(event.toolName, event.input));
     if (verdict === undefined) return undefined;
     stats.refusedCalls++;
@@ -140,6 +153,15 @@ export default function strataAgent(pi: ExtensionAPI) {
   pi.on("tool_result", (event, ctx) => {
     if (event.content.some((block) => block.type !== "text")) return undefined;
     const original = textOf(event.content);
+    const webTarget = webCall(event.toolName, event.input);
+    const advice: string[] = [];
+    if (webTarget !== undefined && config.doors.enabled) {
+      const reason = refusalReason(original);
+      for (const host of sitesOfResult(event.toolName, original, webTarget)) {
+        if (reason !== undefined) advice.push(adviceFor(host, reason, doors.refused(host, reason)));
+        else if (original.trim() !== "" && !event.isError) doors.opened(host);
+      }
+    }
     const hint = "narrow the command, for example grep -n -m 20, sed -n 'A,Bp' or head";
 
     let text: string;
@@ -166,6 +188,7 @@ export default function strataAgent(pi: ExtensionAPI) {
       stats.stubbedTokens += Math.max(0, estimateTokens(text) - estimateTokens(verdict.replacement));
       text = verdict.replacement;
     }
+    if (advice.length > 0) text = `${text}\n\n${advice.join("\n")}`;
     return text === original ? undefined : { content: [{ type: "text" as const, text }] };
   });
 
