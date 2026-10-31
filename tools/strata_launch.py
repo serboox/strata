@@ -76,9 +76,72 @@ def apply_turbo(mode: str, dry_run: bool) -> None:
     if dry_run:
         print(f"strata-launch: turbo {mode} (not applied in a dry run)", file=sys.stderr)
         return
-    result = subprocess.run([str(ROOT / "tools" / "turbo"), mode, "--no-sudo", "--quiet"], capture_output=True, text=True)
+    result = subprocess.run([str(ROOT / "tools" / "turbo"), mode, "--no-sudo", "--quiet"], capture_output=True, text=True, check=False)
     if result.returncode != 0:
         print(f"strata-launch: could not switch turbo {mode}: {result.stderr.strip() or 'see tools/turbo status'}", file=sys.stderr)
+
+
+# The lowest weight and the idle I/O weight: when another program wants the CPU or the disk, this one gets about a percent
+BACKGROUND_PROPERTIES = ["CPUWeight=idle", "IOWeight=1"]
+
+
+def apply_priority(mode: str, dry_run: bool, set_scheduler=os.sched_setscheduler, run=subprocess.run) -> None:
+    """Make this process, and everything it starts, yield the CPU and the disk; "normal" leaves them alone.
+
+    The scheduling class (SCHED_IDLE) and the idle I/O class are inherited by the server and the engine. They only order the
+    tasks inside one control group, so the cgroup weight of `wrap_in_scope` does the work between this server and the
+    browser. A failure is a warning only.
+    """
+    if mode == "normal":
+        return
+    if dry_run:
+        print("strata-launch: background priority (not applied in a dry run)", file=sys.stderr)
+        return
+    try:
+        set_scheduler(0, os.SCHED_IDLE, os.sched_param(0))
+    except OSError as error:
+        print(f"strata-launch: could not set the idle scheduling class: {error}", file=sys.stderr)
+    try:
+        result = run(["ionice", "-c3", "-p", str(os.getpid())], capture_output=True, text=True, check=False)
+    except OSError as error:
+        print(f"strata-launch: could not set the idle I/O class: {error}", file=sys.stderr)
+        return
+    if result.returncode != 0:
+        print(f"strata-launch: could not set the idle I/O class: {result.stderr.strip() or 'ionice failed'}", file=sys.stderr)
+
+
+# prints the CPU weight of the control group it runs in
+WEIGHT_PROBE = "g = open('/proc/self/cgroup').read().split(':', 2)[2].strip(); print(open('/sys/fs/cgroup' + g + '/cpu.weight').read().strip())"
+PROBE_TIMEOUT_SECONDS = 10
+
+
+def background_scope_works() -> bool:
+    """Whether the background weights really apply here, not only whether systemd-run accepts them: a scope can start with its
+    weights ignored when the controllers are not delegated to the user manager."""
+    probe = ["systemd-run", "--user", "--scope", "--quiet"]
+    for prop in BACKGROUND_PROPERTIES:
+        probe += ["-p", prop]
+    try:
+        result = subprocess.run(probe + [sys.executable, "-c", WEIGHT_PROBE], capture_output=True, text=True, timeout=PROBE_TIMEOUT_SECONDS, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and result.stdout.strip() == "1"
+
+
+def scope_properties(memory_budget: str | None, background: bool) -> list:
+    properties = [f"MemoryMax={memory_budget}", "MemorySwapMax=0"] if memory_budget else []
+    return properties + (BACKGROUND_PROPERTIES if background else [])
+
+
+def wrap_in_scope(server: list, properties: list) -> list:
+    """The server command inside its own systemd scope, which carries the memory limit and the background weights."""
+    if not properties:
+        return server
+    command = ["systemd-run", "--user", "--scope", "--quiet"]
+    for prop in properties:
+        command += ["-p", prop]
+    # systemd-run reads a $ in its arguments as the start of a variable and $$ as one literal dollar
+    return command + ["--"] + [argument.replace("$", "$$") for argument in server]
 
 
 def ensure_tokenizer() -> None:
@@ -103,6 +166,9 @@ def main() -> int:
                              "degrees Celsius (default 80, 0 turns the limit off)")
     parser.add_argument("--turbo", choices=("off", "on", "keep"), default="off",
                         help="CPU turbo boost at start: off (default), on, or keep what it is (tools/turbo does the same on its own)")
+    parser.add_argument("--priority", choices=("background", "normal"), default="background",
+                        help="background (default): the server yields the CPU and the disk to everything else, so the machine "
+                             "stays responsive while it works; normal: no change")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--no-limit", action="store_true", help="do not run the server in a memory-limited cgroup")
     parser.add_argument("--dry-run", action="store_true", help="write the config and print the command, start nothing")
@@ -132,18 +198,21 @@ def main() -> int:
 
     server = [str(ROOT / ".venv" / "bin" / "python"), str(ROOT / "serve" / "server.py"), "--engine", "strata", "--config",
               str(config_path), "--port", str(args.port)]
-    command = server
-    if profile["ram"] is None:
-        args.no_limit = True
-    if not args.no_limit and shutil.which("systemd-run"):
-        command = ["systemd-run", "--user", "--scope", "--quiet", "-p", f"MemoryMax={profile['ram']}", "-p",
-                   "MemorySwapMax=0", "--"] + server
-    elif not args.no_limit:
+    memory_budget = None if args.no_limit else profile["ram"]
+    background = args.priority == "background"
+    have_systemd = shutil.which("systemd-run") is not None
+    if memory_budget and not have_systemd:
         print("strata-launch: systemd-run is not available, the memory budget is not enforced", file=sys.stderr)
+        memory_budget = None
+    if background and not (have_systemd and (args.dry_run or background_scope_works())):
+        print("strata-launch: this machine does not give the server its own CPU weight, so only the idle scheduling class is set", file=sys.stderr)
+        background = False
+    command = wrap_in_scope(server, scope_properties(memory_budget, background))
     print(f"strata-launch: profile {args.profile}, memory budget {profile['ram'] or 'none (elastic page cache)'}, context {profile['context']}, "
-          f"port {args.port}, temperature limit {f'{args.max_temp:g} C' if args.max_temp > 0 else 'none'}, turbo {args.turbo}",
-          file=sys.stderr)
+          f"port {args.port}, temperature limit {f'{args.max_temp:g} C' if args.max_temp > 0 else 'none'}, turbo {args.turbo}, "
+          f"priority {args.priority}", file=sys.stderr)
     apply_turbo(args.turbo, args.dry_run)
+    apply_priority(args.priority, args.dry_run)
     if args.dry_run:
         print(" ".join(command))
         return 0

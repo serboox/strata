@@ -40,6 +40,7 @@ same thermal state.
 | `--sampling` | greedy | drafting runs only for greedy requests, `card` turns it off |
 | `--max-temp` | 80 | while the CPU package or the GPU is at this many degrees or hotter, the engine is paused for a share of every half second, a bigger share the hotter it is; 0 turns the limit off |
 | `--turbo` | off | the CPU turbo boost at start: `off`, `on` or `keep`; `tools/turbo on|off|status` switches it at any time |
+| `--priority` | background | the server and the engine yield the CPU and the disk to every other program (see "Staying in the background"); `normal` leaves the priorities alone |
 | `--prefetch` | on | read-ahead of an expert's ranges, issued only when the range is not cached |
 | `--stream-io` | direct | O_DIRECT reads for prompt chunks, so they do not push the hot experts out of the cache |
 
@@ -67,6 +68,35 @@ On this machine the CPU runs at up to 4800 MHz with the boost and 3300 MHz witho
 neither `tools/turbo` nor `strata-serve --turbo` needs sudo. Without that rule `tools/turbo` asks for sudo, and the launcher only
 warns. The boost is a machine-wide setting, not the model's: every program is slower without it. Speeds in this document were
 measured with the boost on.
+
+## Staying in the background
+
+The model keeps three or four cores busy for as long as it generates. At the default priority the browser, the editor and the
+compiler compete with it on equal terms, and the desktop slows down. `strata-serve` therefore starts the server in the background
+class (`--priority normal` turns that off):
+
+- **A control group of its own in the idle mode.** The launcher puts the server in a transient systemd scope with
+  `CPUWeight=idle` (the idle mode of the CPU controller: weight 1 and `cpu.idle=1`, so the group runs only on CPU that no other
+  group wants) and `IOWeight=1`, next to the memory limit of the profile. A group of its own is needed: the scheduling class
+  below orders tasks only inside one group, and a program started from a terminal otherwise shares the weight of that
+  terminal's group with the browser's. The scope needs the `cpu` and `io` controllers delegated to the user manager (Fedora does
+  it). The launcher starts a throwaway scope first and reads the weight back, and says so when the weight does not apply.
+- **The idle scheduling class and the idle I/O class** (`SCHED_IDLE`, `ionice -c3`), set on the launcher itself, so the server and
+  the engine inherit them.
+
+On the laptop that was measured on, with a generation running, moving a running server into such a scope took the share of
+time that other programs waited for the CPU (`/proc/pressure/cpu`, `some`) from 68% to 7% within seconds, while the engine kept
+using the cores that nothing else wanted. The speed of the model under real competition was not measured: it goes down by
+what the other programs take, and while they keep every logical CPU busy the server may stall altogether: a request waits, and
+the temperature limit's resume signal is delayed until the server gets the CPU again. It carries on when they ease. During a
+test session the model's own log showed one answer at 5.6 tokens a second instead of 36 while a test suite ran beside it.
+
+What it does not do: the two threads of a core share their execution units, so a busy engine thread still slows the program on
+the sibling thread a little (`taskset -c 0-3` keeps the engine to four logical CPUs and leaves four for the rest, at about
+half the speed); it does not shrink the memory the model keeps in the page cache, so with little free memory the kernel swaps
+other programs out, which is what `--profile` and its memory budget are for; and a server started by hand with
+`serve/server.py`, not through `strata-serve`, keeps the normal priority. A server that is already running keeps its priority until it is restarted
+with the launcher.
 
 ## What fits in 4 GB of VRAM
 
