@@ -585,6 +585,8 @@ def main(argv: list | None = None) -> int:
     profiles = [current if name == CURRENT else name for name in args.profiles.split(",")]
     if None in profiles:
         raise SystemExit("cooling-kit: the platform profile cannot be read, so 'current' is unknown; name the profiles or fix the sensor")
+    if len(set(profiles)) != len(profiles):
+        raise SystemExit("cooling-kit: --profiles lists a profile twice")
     check_profiles(profiles, current, choices, args.apply_profile)
     steps = build_steps(caps, profiles)
     out_dir = args.out_dir or ENGINE_ROOT / "run" / "experiments" / "cooling" / time.strftime("%Y%m%d-%H%M%S")

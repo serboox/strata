@@ -406,6 +406,15 @@ class MainTests(unittest.TestCase):
         with self.assertRaises(SystemExit):
             cooling_kit.main(["--sample-only", "0"])
 
+    def test_a_profile_listed_twice_is_refused(self):
+        model = scratch(self) / "m.gguf"
+        model.write_bytes(b"x")
+        fake = mock.Mock()
+        fake.profile.return_value = "balanced"
+        with mock.patch.object(cooling_kit, "Sensors", return_value=fake), self.assertRaises(SystemExit) as stop:
+            cooling_kit.main(["--model", str(model), "--profiles", "current,balanced", "--dry-run"])
+        self.assertIn("twice", str(stop.exception))
+
     def test_a_missing_model_is_refused(self):
         with self.assertRaises(SystemExit):
             cooling_kit.main(["--model", "/nonexistent/model.gguf"])
