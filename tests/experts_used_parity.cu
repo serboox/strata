@@ -26,6 +26,7 @@ constexpr float kWeightTolerance = 1e-5f;
 constexpr float kCombineTolerance = 1e-4f;
 
 int failures = 0;
+int checks = 0;
 
 #define CK(x)                                                                                    \
     do {                                                                                         \
@@ -37,6 +38,7 @@ int failures = 0;
     } while (0)
 
 void check(bool ok, const std::string& what) {
+    ++checks;
     if (!ok) {
         ++failures;
         std::fprintf(stderr, "FAIL %s\n", what.c_str());
@@ -326,6 +328,6 @@ int main() {
         std::fprintf(stderr, "experts_used_parity: %d FAILED\n", failures);
         return 1;
     }
-    std::printf("experts_used_parity: ok (k 1..%d, T 1/3/%d)\n", kMaxK, kMaxTokens);
+    std::printf("experts_used_parity: ok (%d checks, k 1..%d, T 1/3/%d)\n", checks, kMaxK, kMaxTokens);
     return 0;
 }
