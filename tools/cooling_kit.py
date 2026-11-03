@@ -173,7 +173,7 @@ def parse_caps(text: str, cpucap) -> list:
 
 
 def profile_command(name: str, profile_file: Path = PLATFORM_PROFILE) -> str:
-    """The command the owner can paste to switch the platform profile; the kit itself runs it only with --apply-profile."""
+    """The command a user can paste to switch the platform profile; the kit itself runs it only with --apply-profile."""
     return f'echo {shlex.quote(name)} | SUDO_PROMPT="{SUDO_REASON_PROFILE}" sudo -A tee {profile_file} > /dev/null'
 
 
@@ -295,7 +295,7 @@ def summarize_step(step: dict, samples: list, rows: list, stop_reason: str, star
 
 
 def sensor_notes(samples: list, sensors: Sensors, with_fans: bool = True) -> list:
-    """What the sensors did and did not give, for the owner to judge the data by."""
+    """What the sensors did and did not give, for judging the data by."""
     peak = max([sample["pkg_c"] for sample in samples if sample["pkg_c"] is not None], default=None)
     notes = []
     if peak is None:
