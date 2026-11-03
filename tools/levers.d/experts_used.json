@@ -1,0 +1,14 @@
+{
+  "name": "experts_used",
+  "lever": 4,
+  "title": "Fewer routed experts per token than the model file says (run-time K)",
+  "variants": [
+    {"name": "k6", "env": {"STRATA_Q36_EXPERTS_USED": "6"}, "engine_args": [], "launcher_args": ["--experts-used", "6"]},
+    {"name": "k7", "env": {"STRATA_Q36_EXPERTS_USED": "7"}, "engine_args": [], "launcher_args": ["--experts-used", "7"]},
+    {"name": "k5", "env": {"STRATA_Q36_EXPERTS_USED": "5"}, "engine_args": [], "launcher_args": ["--experts-used", "5"]}
+  ],
+  "needs": {"build_option": "", "model_file": "the served GGUF (IQ4_XS) plus a larger reference GGUF (Q8_0) for the quality check", "root": false},
+  "quality_check": "tools/kld_experts.py",
+  "parity_check": "build/experts_used_parity (ninja experts_used_parity): router, grouping and combine kernels for K = 1..8 against a host reference, no model; with the switch unset the engine output must be unchanged from main (same greedy tokens)",
+  "notes": "Output changes by design: judge each K by the KLD table (mean KLD, 99% KLD, same-token %, PPL ratio) against the K = 8 row, then by tok/s, MTP draft acceptance, and package temperature. The env var is the engine switch, --experts-used the launcher's mapping of it; either gives the same run. A value above the file's count stops the engine with a message."
+}
