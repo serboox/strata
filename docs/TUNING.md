@@ -26,6 +26,47 @@ The CPU package reaches 100 C about ten seconds into a generation and the clocks
 short request can show 37 tok/s while the same request after a minute of load shows 25-28. Compare runs only from the
 same thermal state.
 
+## Keeping the model in memory
+
+Two different things can take the model out of memory. The swap takes memory of a process (the engine's buffers, the Python
+server), and the server's scope has `MemorySwapMax=0` when a budget is set, so it does not swap. The model file is another
+case: it sits in the page cache, which the kernel drops when another program needs the memory and reads back from the SSD on
+the next access. That is what makes the speed fall under pressure (the table above), and the `madvise(WILLNEED)` in the engine
+only asks for a read-ahead, it pins nothing.
+
+`--protect-ram` asks the kernel not to drop it: the server's scope gets `MemoryLow` of the model size plus 2 GiB, capped by the
+budget. The kernel then takes memory from every unprotected program first and touches the model only when nothing else is
+left. It is a soft guarantee, so it cannot cause an out-of-memory kill of another program. It applies only to the profiles
+that read through the page cache (`auto` and `max`); the `direct` profiles never fill it.
+
+The `MemoryLow` of a scope is honoured only up to the lowest `MemoryLow` of every level above it: `user.slice`,
+`user-1000.slice`, `user@1000.service` and the `app.slice` of the user manager. Without a value on each of them the setting
+does nothing. On this machine each is 24G, set by a drop-in `strata-memory-low.conf` in `/etc/systemd/system/user.slice.d`,
+`user-.slice.d`, `user@.service.d` and in `/etc/systemd/user/app.slice.d`. The launcher reads these levels (found from the user
+id) and prints a warning when one allows less than the server asks. That is a necessary condition, not a guarantee: the kernel
+shares the value of a level in proportion among every scope below it that asks for protection. By hand:
+
+    for d in user.slice user.slice/user-1000.slice user.slice/user-1000.slice/user@1000.service \
+             user.slice/user-1000.slice/user@1000.service/app.slice; do echo "$d $(cat /sys/fs/cgroup/$d/memory.low)"; done
+
+`--prewarm` reads the model file once before the server starts, in the same scope, so the pages are charged to it and
+protected by it. A cached page stays charged to the control group that read it first (the scope of an earlier run, or a shell),
+so the file is dropped from the cache and read again; a 1 GiB test file that another group had cached ended up as 1024 MiB in
+the scope's own page cache, and the read took under a second on the NVMe disk. The re-read costs the time of reading the file
+from the SSD even when it was cached. A page that another process has mapped stays with its owner, so the helper reports how
+much of the file ended up counted in the scope and warns when it is less than 90 %. A scope is created for the prewarm even
+when no other property asks for one; a probe checks that a user manager is reachable, and when it is not the launcher warns,
+leaves the protection off and runs the prewarm in the current control group. It is skipped when the profile reads with O_DIRECT, when the model
+does not fit the budget, and when less memory is available than the model needs, because reading it would push other
+programs out. Both are on by default and switch off with `--no-protect-ram` and `--no-prewarm`; with both switched off a
+start is the same as before, and the `direct` profiles (`lean`, `balanced`, `fast`) are the same either way. The prewarm
+makes the server ready later by the time the file takes to read.
+
+Checked: the values the kernel reports after the drop-ins, the scope's own `memory.stat` after a prewarm (a 1 GiB test file
+shows up as 1024 MiB of the scope's page cache), the launcher's command and warnings with `--dry-run`, and that a start with both
+flags switched off prints the same command as before. Not measured: how the model behaves under real memory pressure with
+`--protect-ram`.
+
 ## What each setting does
 
 | Setting | Value | Effect |
@@ -38,11 +79,104 @@ same thermal state.
 | `--workers` | 3 | CPU expert threads besides the main one; 4 is slower, 7 is half the speed |
 | `--mtp` | 2 | drafts per step, about 90% accepted; 3 and 4 were not faster |
 | `--sampling` | greedy | drafting runs only for greedy requests, `card` turns it off |
+| `--max-temp` | 80 | while the CPU package or the GPU is at this many degrees or hotter, the engine is paused for a share of every half second, a bigger share the hotter it is; 0 turns the limit off |
+| `--turbo` | off | the CPU turbo boost at start: `off`, `on` or `keep`; `tools/turbo on|off|status` switches it at any time |
+| `--priority` | background | the server and the engine yield the CPU and the disk to every other program (see "Staying in the background"); `normal` leaves the priorities alone |
+| `--protect-ram` | on | ask the kernel to keep the cached model in memory (`MemoryLow` on the server's scope); soft, and only fully honoured when every level above allows it (see "Keeping the model in memory"); `--no-protect-ram` turns it off |
+| `--prewarm` | on | read the model file into the page cache before the server starts; skipped when the memory is not free for it; `--no-prewarm` turns it off |
 | `--prefetch` | on | read-ahead of an expert's ranges, issued only when the range is not cached |
 | `--stream-io` | direct | O_DIRECT reads for prompt chunks, so they do not push the hot experts out of the cache |
 
 `STRATA_POOL_SPIN_US` (how long idle workers spin before sleeping, 20 ms by default) was tried at 100 and 300 us: no
 gain from a cool start.
+
+## Heat and turbo
+
+The laptop heats up quickly under the model, and a hot CPU slows itself down in uneven steps. Two settings keep that under control.
+
+**The temperature limit.** The server reads the CPU package temperature (`coretemp` or `k10temp` in sysfs) and the GPU's, once
+a second. At the limit (80 C by default) it stops the engine process with SIGSTOP for a part of every half second and
+resumes it with SIGCONT: a stopped process draws no CPU and starts no GPU work, so both cool. The step looks ahead: a rising
+sensor counts as the temperature it will have in 3 seconds, judged by its own slope over the last 4 seconds (every sensor keeps
+its own history, and a sensor that drops out starts a fresh one), so the pause starts before the
+limit is crossed; the package keeps heating for a moment after the pause begins. When that projected temperature reaches the
+limit the share grows by 10% plus 4 points per degree over it, each second, up to 85%; below the limit minus 3 degrees it
+shrinks by 5 points a second, and inside that band it holds. Each change of 20 points and each start and end of the pausing is
+one line in the log
+(`[strata] thermal: cpu 83 C ...`), and the share and the temperature are in the `hardware` series of `GET /metrics`
+(`thermal_duty`, `thermal_temp`). The engine is resumed when the server stops, and the kernel kills it if the server is
+killed (`PR_SET_PDEATHSIG`), stopped or not. Where a process cannot be paused (Windows) the limit is not enforced and the
+server says so. Checked with unit tests, with a busy process (it got less than half the CPU time and ran freely again after the
+stop) and with the server's config wiring on the mock engine. With the real engine under a full load the look-ahead held the CPU
+package at 78 C for the 80 C limit (three runs of eight 900-token requests; without it the package peaked at 82 to 87 C). The
+per-sensor histories came after that run: one run of ten requests peaked at 79 C. Two variants that looked safer on paper
+overshot instead and were dropped: forgetting the history after a slow sample (peaks of 82 and 83 C in two runs) and giving
+the time back slowly inside the last degrees under the limit.
+
+**The turbo boost.** `tools/turbo status|on|off` reads and writes `intel_pstate/no_turbo` (or `cpufreq/boost` on other drivers).
+On this machine the CPU runs at up to 4800 MHz with the boost and 3300 MHz without. The switch belongs to root; a tmpfiles rule
+(kept in the machine's restore repository) turns the boost off at boot and makes the file group-writable for `wheel`, so
+neither `tools/turbo` nor `strata-serve --turbo` needs sudo. Without that rule `tools/turbo` asks for sudo, and the launcher only
+warns. The boost is a machine-wide setting, not the model's: every program is slower without it. Speeds in this document were
+measured with the boost on.
+
+**The frequency cap.** Reading memory barely heats the CPU (four threads read 55.6 GB/s for two minutes with the package at 56 to
+61 C); the heat comes from the arithmetic of the expert kernels, and it falls faster than the speed when the highest CPU
+frequency, and the voltage with it, is lowered. Sustained speed of the IQ4_XS file with MTP under the 80 C limit, turbo off,
+`STRATA_POOL_SPIN_US=0`, eight requests of 900 tokens after two warm-up requests (one or two runs each, on one machine):
+
+| setting | tokens/s (median) | peak temperature |
+|---|---|---|
+| no cap, 2 workers | 11.0 to 14.8 | 77 to 79 C |
+| 2.2 GHz, 4 workers | 28.6 and 27.2 (two runs) | 73 and 76 C |
+| 2.4 GHz, 4 workers | 28.9 | 78 C |
+| 2.6 GHz, 4 workers | 25.3 (the pauses of the governor return) | 78 C |
+| 2.0 GHz, 6 workers | 28.8 | 74 C |
+| 2.2 GHz, 6 workers | 31.1 and 29.8 (two runs) | 77 and 78 C |
+| 2.4 GHz, 6 workers | 24.9 (the pauses return) | 80 C |
+
+The default profile `auto` holds the cap by itself: `strata-serve` runs with `--cpu-max-mhz 2200`, 6 workers and no pool spin (the
+setting of the table, `STRATA_POOL_SPIN_US=0`) and puts the old limits back when it stops (Ctrl+C and SIGTERM included; after a
+`kill -9` run `tools/cpucap reset`). `--cpu-max-mhz 0` turns the cap off, the profiles with a memory budget (`lean` to `max`) run
+without it, and 2200 MHz is two thirds of this laptop's 3.3 GHz, so another CPU needs its own value. The Q4_K_XL file at the same setting gave 29.4 tokens per second with a peak of 74 C, within 5 percent of IQ4_XS, so the file is to be chosen by memory (Q4_K_XL wants about 23 GB of free RAM, IQ4_XS about 18 GB) and quality, not by speed. `tools/cpucap status|set MHZ|reset` does the same by
+hand. The limits belong to root. A tmpfiles rule makes them group-writable for `wheel`, the way the turbo switch is:
+`z- /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq 0664 root wheel -` (kept in the machine's restore repository);
+without it the server says which limits it could not write and runs without the cap. The cap is machine-wide like the turbo
+switch: every program is slower while the server runs. The speed of one setting differed by up to a quarter between the night
+and the morning; the repeats of the two best settings came within 5 percent of the first runs.
+A package power limit did not help: with RAPL PL1 at 22 and 18 W, 6 workers and no frequency cap, the speed was 10.2 and 10.4 tokens per
+second, as without any limit, because the hardware still runs the CPU at full frequency for short bursts and the governor has to pause
+the engine. The whole model on the integrated GPU (llama.cpp with Vulkan) gave 10.8 to 11.3 tokens per second with the package at
+59 to 65 C, and 8.8 with the discrete card added by a layer split.
+
+## Staying in the background
+
+The model keeps three or four cores busy for as long as it generates. At the default priority the browser, the editor and the
+compiler compete with it on equal terms, and the desktop slows down. `strata-serve` therefore starts the server in the background
+class (`--priority normal` turns that off):
+
+- **A control group of its own in the idle mode.** The launcher puts the server in a transient systemd scope with
+  `CPUWeight=idle` (the idle mode of the CPU controller: weight 1 and `cpu.idle=1`, so the group runs only on CPU that no other
+  group wants) and `IOWeight=1`, next to the memory limit of the profile. A group of its own is needed: the scheduling class
+  below orders tasks only inside one group, and a program started from a terminal otherwise shares the weight of that
+  terminal's group with the browser's. The scope needs the `cpu` and `io` controllers delegated to the user manager (Fedora does
+  it). The launcher starts a throwaway scope first and reads the weight back, and says so when the weight does not apply.
+- **The idle scheduling class and the idle I/O class** (`SCHED_IDLE`, `ionice -c3`), set on the launcher itself, so the server and
+  the engine inherit them.
+
+On the laptop that was measured on, with a generation running, moving a running server into such a scope took the share of
+time that other programs waited for the CPU (`/proc/pressure/cpu`, `some`) from 68% to 7% within seconds, while the engine kept
+using the cores that nothing else wanted. The speed of the model under real competition was not measured: it goes down by
+what the other programs take, and while they keep every logical CPU busy the server may stall altogether: a request waits, and
+the temperature limit's resume signal is delayed until the server gets the CPU again. It carries on when they ease. During a
+test session the model's own log showed one answer at 5.6 tokens a second instead of 36 while a test suite ran beside it.
+
+What it does not do: the two threads of a core share their execution units, so a busy engine thread still slows the program on
+the sibling thread a little (`taskset -c 0-3` keeps the engine to four logical CPUs and leaves four for the rest, at about
+half the speed); it does not shrink the memory the model keeps in the page cache, so with little free memory the kernel swaps
+other programs out, which is what `--profile` and its memory budget are for; and a server started by hand with
+`serve/server.py`, not through `strata-serve`, keeps the normal priority. A server that is already running keeps its priority until it is restarted
+with the launcher.
 
 ## What fits in 4 GB of VRAM
 

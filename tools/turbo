@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+import argparse
+import os
+import subprocess
+import sys
+
+CPU_ROOT = os.environ.get("TURBO_SYSFS_ROOT", "/sys/devices/system/cpu")
+# (file under CPU_ROOT, the value that means turbo is off): intel_pstate's no_turbo is a "no", cpufreq's boost a "yes"
+KNOBS = (("intel_pstate/no_turbo", "1"), ("cpufreq/boost", "0"))
+
+
+def find_knob():
+    for name, off_value in KNOBS:
+        path = os.path.join(CPU_ROOT, name)
+        if os.path.exists(path):
+            return path, off_value
+    return None, None
+
+
+def read_value(path):
+    with open(path, encoding="ascii") as fh:
+        return fh.read().strip()
+
+
+def state(path, off_value):
+    return "off" if read_value(path) == off_value else "on"
+
+
+def max_mhz():
+    for name in ("cpu0/cpufreq/scaling_max_freq", "cpu0/cpufreq/cpuinfo_max_freq"):
+        try:
+            return int(read_value(os.path.join(CPU_ROOT, name))) // 1000
+        except (OSError, ValueError):
+            continue
+    return None
+
+
+def describe(path, off_value):
+    mhz = max_mhz()
+    return f"{state(path, off_value)} ({os.path.relpath(path, CPU_ROOT)}={read_value(path)})" + (f", CPU limit {mhz} MHz" if mhz else "")
+
+
+def write_value(path, value, use_sudo):
+    try:
+        with open(path, "w", encoding="ascii") as fh:
+            fh.write(value)
+        return None
+    except PermissionError:
+        if not use_sudo:
+            return f"{path} is not writable for this user (run it with sudo, or make it group-writable with a tmpfiles rule)"
+    except OSError as e:
+        return f"{path}: {e}"
+    command = ["sudo"] + (["-A"] if os.environ.get("SUDO_ASKPASS") else []) + ["tee", path]
+    env = dict(os.environ)
+    env.setdefault("SUDO_PROMPT", "switch the CPU turbo boost")
+    result = subprocess.run(command, input=value, text=True, stdout=subprocess.DEVNULL, env=env)
+    return None if result.returncode == 0 else f"sudo could not write {path}"
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(description="Show or switch the CPU turbo boost (intel_pstate no_turbo, or cpufreq boost).")
+    parser.add_argument("action", choices=("status", "on", "off"), nargs="?", default="status")
+    parser.add_argument("--no-sudo", action="store_true", help="never ask for root; fail when the knob is not writable")
+    parser.add_argument("--quiet", action="store_true", help="print only problems")
+    args = parser.parse_args(argv)
+
+    path, off_value = find_knob()
+    if path is None:
+        print("turbo: this CPU driver has neither intel_pstate/no_turbo nor cpufreq/boost", file=sys.stderr)
+        return 2
+    if args.action == "status":
+        print(f"turbo: {describe(path, off_value)}")
+        return 0
+    wanted = args.action
+    if state(path, off_value) == wanted:
+        if not args.quiet:
+            print(f"turbo: already {wanted} ({os.path.relpath(path, CPU_ROOT)}={read_value(path)})")
+        return 0
+    on_value = "0" if off_value == "1" else "1"
+    problem = write_value(path, off_value if wanted == "off" else on_value, not args.no_sudo)
+    if problem is None and state(path, off_value) != wanted:
+        problem = f"the kernel took the write but {path} still reads {read_value(path)}"
+    if problem is not None:
+        print(f"turbo: {problem}", file=sys.stderr)
+        return 1
+    if not args.quiet:
+        print(f"turbo: {describe(path, off_value)}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
