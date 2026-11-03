@@ -581,6 +581,8 @@ def main(argv: list | None = None) -> int:
     cpucap = load_cpucap()
     caps = parse_caps(args.caps, cpucap)
     current = sensors.profile()
+    if args.apply_profile and current is None:
+        raise SystemExit("cooling-kit: --apply-profile needs a readable platform profile, so that it can be put back at the end")
     choices = (read_text(PLATFORM_PROFILE_CHOICES) or "").split()
     profiles = [current if name == CURRENT else name for name in args.profiles.split(",")]
     if None in profiles:
@@ -603,10 +605,12 @@ def run_all(args, steps: list, sensors: Sensors, out_dir: Path, current: str | N
     results, series, notes = [], {}, []
     previous = quant_bench.install_stop_handlers()
     active_profile = current
+    switch_tried = False   # a failed switch may still have changed the profile, so the end restores after any attempt
     restored = {}
     try:
         for step in steps:
             if step["profile"] != active_profile:
+                switch_tried = True
                 problem = apply_profile(step["profile"])
                 if problem is not None:
                     say(f"cooling-kit: cannot switch to {step['profile']}: {problem}")
@@ -623,7 +627,7 @@ def run_all(args, steps: list, sensors: Sensors, out_dir: Path, current: str | N
     finally:
         for number in quant_bench.STOP_SIGNALS:
             signal.signal(number, signal.SIG_IGN)
-        if active_profile != current and current is not None:
+        if switch_tried and current is not None:
             problem = apply_profile(current)
             restored["profile"] = f"back to {current}" if problem is None else f"NOT RESTORED: {problem}"
         failures = machine_state.cpu_cap_restore(saved_cap)

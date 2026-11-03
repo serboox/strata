@@ -457,6 +457,21 @@ class RunAllTests(unittest.TestCase):
         self.assertEqual(result["restored"]["profile"], "back to balanced")
         self.assertEqual(result["restored"]["cpu_cap"], "unchanged")
 
+    def test_a_failed_switch_is_still_followed_by_a_restore(self):
+        out = scratch(self) / "result"
+        steps = cooling_kit.build_steps([2200], ["performance"])
+        applied = []
+
+        def failing_apply(name, *rest, **options):
+            applied.append(name)
+            return "the check after the write failed" if name == "performance" else None
+
+        with mock.patch.object(cooling_kit, "run_step"), mock.patch.object(cooling_kit, "apply_profile", side_effect=failing_apply), \
+                mock.patch.object(cooling_kit.machine_state, "cpu_cap_snapshot", return_value={}), mock.patch.object(cooling_kit.machine_state, "running_processes", return_value=[]), \
+                contextlib.redirect_stdout(io.StringIO()):
+            cooling_kit.run_all(args(setup="stand"), steps, mock.Mock(), out, "balanced", say=lambda text: None)
+        self.assertEqual(applied, ["performance", "balanced"])
+
     def test_an_interrupted_run_still_restores_and_keeps_the_finished_steps(self):
         limits = scratch(self)
         cap_file = limits / "cpu0" / "cpufreq" / "scaling_max_freq"
