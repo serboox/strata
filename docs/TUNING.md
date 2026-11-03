@@ -344,6 +344,40 @@ because the order of the float additions differs. The Q4_K_XL path does not use 
 the Q4_K_XL, `tools/gguf_graft.py`) loads and answers with and without the flag, with the same 378 characters of greedy text; its
 speed through the server is not yet measured on a free machine.
 
+## Dense part in Q6_K (a file variant, opt-in)
+
+The dense matrices (attention, GDN, shared expert, MTP projection, embeddings) are Q8_0 in every file and sit in video memory
+(about 1.6 GB), where every decode step reads them again. Q6_K stores the same weights in 0.82 bytes instead of 1.06, 23 percent
+fewer bytes, for a small speed gain that is expected to be 3 to 4 percent (not measured yet). The router, the norms, the GDN
+`ssm_a`/`alpha`/`beta`/`dt`/`conv` tensors and all expert tensors are never touched. The switch is a different model file, so there
+is nothing to turn on in the engine and the Q8_0 file keeps working unchanged.
+
+```sh
+python3 tools/requant_dense.py SRC.gguf DST.gguf --dry-run                    # which tensors change, the new size, the disk space
+python3 tools/requant_dense.py SRC.gguf DST.gguf --groups attn,ssm,shexp      # the default groups
+python3 tools/requant_dense.py SRC.gguf DST.gguf --groups all                 # also output.weight, token_embd, the MTP projection
+python3 tools/requant_dense.py --selftest                                     # the quantiser against ggml's reference, seconds
+```
+
+The groups are sets of tensor-name patterns: `attn` is `attn_q/k/v/output`, `ssm` is `attn_qkv`, `attn_gate`, `ssm_out` (the GDN
+layers), `shexp` is `ffn_gate/up/down_shexp`, `head` is `output.weight`, `embd` is `token_embd.weight` and `mtp` is
+`nextn.eh_proj`. Only Q8_0 tensors whose row length is a multiple of 256 are converted; a selected tensor of another type (the head
+of the IQ4_XS file is Q6_K already) is listed and kept. The tool reads and writes one tensor chunk at a time, so memory stays small,
+keeps every metadata entry and every other tensor byte for byte, and writes `DST.part` first. Run it with the system `python3`
+(the project venv has no numpy), and keep the output inside `models/qwen3.6-35b-a3b/`: the launcher takes the tokenizer from there.
+
+**Engine support (read from the code, not run).** Q6_K dense matrices already work on every GPU path, so no engine change was
+needed: the loader accepts ggml type 14 (`native_mmvq_supported`); a decode step of 1 to 8 rows runs `native_mmvq` case 14 (the
+8-column launches); a prompt chunk of more than 8 rows runs `Gemm::native`, whose dequantisation to FP16 has case 14; the embedding
+gather accepts type 14; the head takes the whole-vocabulary path (`head_rows`). What a Q6_K matrix does not get are the Q8_0-only
+fast paths: the lossless packed plane copy (`STRATA_Q8_PACKED`), the one-warp-per-row kernel for the small matrices (attention k and
+v, the shared expert), the fused shared-expert gate and up kernel, and the draft head's subset kernel. Q6_K has more arithmetic per
+byte, so the gain can be smaller than the byte saving, or negative: compare the step times in the server log, not only the speed.
+
+**Quality.** The weights are re-quantised, so the answers are not identical to the Q8_0 file's. The quantiser follows ggml's
+`quantize_row_q6_K_ref`; `--selftest` prints its agreement with that reference and the relative RMS error of Q8_0 to Q6_K on random
+data. Judge the file by the perplexity of the llama.cpp perplexity tool on the source file and on the variant over the same text.
+
 ## Against llama.cpp
 
 llama.cpp b3fa6995 on the same machine (`-ngl 99 --n-cpu-moe 99 -t 4 -fa on`, experts on the CPU, no drafting), greedy
@@ -520,6 +554,72 @@ Details, analogies and charts are in `docs/index.html`, section 6.
 | Assembly | kernels sit near the memory roofs; the gap is in barriers and idle gaps |
 
 Not measured (needs root, the password prompt was not answered): raw NVMe against the LUKS volume, CPU energy per token.
+
+## Testing the levers
+
+Five changes are meant to make the IQ4_XS file faster on this laptop without turbo, overclocking or going above 80 C. Each is
+off by default, and with its switch off the engine behaves as before. `tools/lever_matrix.py` is the runner for testing them:
+it reads one definition file per lever from `tools/levers.d/*.json`, plans runs and executes them one at a time through
+`tools/quant_bench.py` with the thermal rules of this document (the 2200 MHz cap, 6 workers, `STRATA_POOL_SPIN_US=0`, the 80 C
+limit, a wait for the package to cool to 55 C before every run). Nothing in this section has been measured yet.
+
+| # | Lever | Switch | Needs | What proves it |
+| --- | --- | --- | --- | --- |
+| 1 | Better cooling | `tools/cooling_kit.py` (no engine switch; the platform profile belongs to root) | nothing | the kit's table: sustained tokens per second and the time to 75 and 80 C per frequency cap |
+| 2 | Overlap GPU and CPU work in a step | env `STRATA_Q36_OVERLAP` and flag `--overlap` | nothing | identical greedy text, then speed |
+| 3 | Experts split between the CPU and the Iris Xe iGPU | env `STRATA_IGPU_EXPERTS` and flag `--igpu-experts` | build with `-DSTRATA_IGPU_VULKAN=ON` | identical greedy text (or a stated numeric tolerance), then speed |
+| 4 | Fewer active experts per token | env `STRATA_Q36_EXPERTS_USED` and flag `--experts-used` | nothing | not identical by design: a quality check, then speed |
+| 5 | Dense part Q8_0 to Q6_K | a model file made by `tools/requant_dense.py` | the file (about 16.7 GiB of disk per variant) | not identical by design: perplexity against the source file, then speed |
+
+The names of the switches of levers 2 to 4 are the ones in their own sections of this document and in `tools/levers.d/`; where
+they differ, the definition file is the truth, and `python3 tools/lever_matrix.py list` shows what is on this machine.
+
+**The order to follow.**
+
+1. *Free the machine.* Close everything heavy, then `python3 tools/machine_state.py` must say it is quiet (turbo off, no engine or
+   server running, low load, memory free). `tools/cpucap status` must show the limit files as writable.
+2. *Cooling first.* `python3 tools/cooling_kit.py --sample-only 20` to see which sensors work, then the kit as described under
+   "Measuring the cooling". Take the best cap from its table as `--cpu-max-mhz` for everything after, and keep the `--setup` text
+   of the run. The cap is machine-wide and every later number depends on it.
+3. *Build and make what the levers need.* The usual build for levers 2 and 4; a build with `-DSTRATA_IGPU_VULKAN=ON` for lever 3
+   (the runner reads `build/CMakeCache.txt` and calls the lever unavailable without it); `tools/requant_dense.py` for lever 5.
+   `python3 tools/lever_matrix.py list` says which levers are available and why not.
+4. *Baseline and each lever alone.* `python3 tools/lever_matrix.py plan --each` shows the runs and their exact command lines;
+   `python3 tools/lever_matrix.py run --each` executes them. The session starts and ends with a baseline run: the difference
+   between the two is the drift of the machine (heat, other programs, the time of day), and the summary marks it `UNSTABLE` above
+   5 percent, in which case the deltas are not to be trusted and the session is repeated later. A lever's delta is measured
+   against the mean of the baselines.
+5. *Parity.* The summary compares the first measured answer of every run with the baseline's (greedy, temperature 0, the same
+   prompt): `identical`, `DIFFERS` or `n/a`. For the levers that must not change the output (2, and 3 within its stated
+   tolerance) a `DIFFERS` is a bug, not a trade-off: stop and report it before looking at the speed. Levers 4 and 5 differ by
+   design, so their parity column only shows how far the text drifted.
+6. *Quality.* For levers 4 and 5 run the perplexity tool of llama.cpp (`llama.cpp/build/bin/llama-perplexity`, the `quality_check` of
+   the definition) on the source file and on the variant over the same text, and read the answers of the two runs side by side.
+   A speed gain is worth nothing if the quality loss is larger than is acceptable. The runner does not run quality tools: it
+   prints the command and writes `not run` in the column.
+7. *Combinations.* Only after the single runs: `python3 tools/lever_matrix.py run --levers overlap,experts_used` for the pairs
+   that passed steps 5 and 6, `run --pairs` for all of them, and `run --all` for every available lever together. A pair can
+   fail where its members do not (two switches setting the same environment variable with different values are refused at
+   plan time, with both sources named).
+8. *Decide.* Keep a lever only if its gain is above the drift, its parity or quality check passed, and its peak package
+   temperature stayed at or below the limit.
+
+Every command takes `--dry-run`: it prints the plan and the command lines and runs nothing. Results go to
+`run/experiments/levers/<time>/`: one JSON per run (with the plan, the exact command and quant_bench's result), `summary.json`
+and `summary.txt` (rewritten after every run, so an interrupted session keeps what it measured), `chart.svg` and `raw/` with
+the benchmark's own files. A stop signal ends the running benchmark gracefully (it stops its server and puts the cap back), the
+runner checks that the frequency limit files read as they did before the session, and lists any engine process left behind.
+
+**The definition files.** One JSON file per lever, loaded by name:
+`{"name", "lever": 1..5, "title", "kind": "engine" | "system" | "model-file" (default engine), "variants": [{"name", "env",
+"engine_args", "launcher_args", "model_file"}], "needs": {"build_option", "model_file", "root"}, "quality_check", "parity_check",
+"notes"}`. The first variant is the lever "on" (`--levers overlap`; another one is `--levers overlap:other`). `engine` levers are
+measured with the variant's `env` and `engine_args` (`launcher_args` are only printed: the benchmark harness cannot pass launcher
+flags); `system` levers are not run by the runner (the cooling kit does them) and never take part in `--each`, `--all` or
+`--pairs`; `model-file` levers replace the model with the variant's `model_file` and are available only when the file exists. The
+environment of a run is the baseline's (`STRATA_POOL_SPIN_US=0`) plus each selected variant's plus `--env`; the same variable with
+different values from two sources is an error that names both, the same value twice is fine, and identical engine arguments are
+passed once. `python3 tools/lever_matrix.py --help` prints the same schema.
 
 ## Benchmarking pitfalls
 

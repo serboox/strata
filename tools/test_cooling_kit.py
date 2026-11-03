@@ -67,8 +67,8 @@ def row(tok_s, warmup=False, lines=1, t=None, wall=20.0, cool=True):
 
 
 def args(**changes):
-    base = dict(model=Path("/m.gguf"), duration=300.0, max_tokens=900, workers=6, limit=80.0, start_temp=55.0, cool_timeout=1.0, period=2.0, env={"STRATA_POOL_SPIN_US": "0"},
-                engine_args=[], prewarm=False, force=False, setup="on a stand", sample_only=None, png=False)
+    base = {"model": Path("/m.gguf"), "duration": 300.0, "max_tokens": 900, "workers": 6, "limit": 80.0, "start_temp": 55.0, "cool_timeout": 1.0, "period": 2.0,
+            "env": {"STRATA_POOL_SPIN_US": "0"}, "engine_args": [], "prewarm": False, "force": False, "setup": "on a stand", "sample_only": None, "png": False}
     base.update(changes)
     return Namespace(**base)
 
@@ -294,7 +294,7 @@ class StepTests(unittest.TestCase):
         popen = mock.Mock(return_value=process)
         ticks = iter(range(0, 1000, 5))
         out = scratch(self)
-        summary, samples, rows = cooling_kit.run_step({"index": 1, "label": "cap2200_balanced", "cap_mhz": 2200, "profile": "balanced"}, args(), self.sensors([60.0, 62.0, 64.0, 66.0]),
+        summary, _, rows = cooling_kit.run_step({"index": 1, "label": "cap2200_balanced", "cap_mhz": 2200, "profile": "balanced"}, args(), self.sensors([60.0, 62.0, 64.0, 66.0]),
                                                       out, lambda text: None, popen=popen, sleep=lambda seconds: None, clock=lambda: next(ticks),
                                                       wait_cool=lambda limit, timeout: (54.0, 12.0, True))
         self.assertEqual(len(rows), 2)
@@ -440,7 +440,6 @@ class RunAllTests(unittest.TestCase):
 
         def fake_apply(name, *rest, **options):
             active["profile"] = name
-            return None
 
         with mock.patch.object(cooling_kit, "run_step", side_effect=fake_step), mock.patch.object(cooling_kit, "apply_profile", side_effect=fake_apply), \
                 mock.patch.object(cooling_kit.machine_state, "cpu_cap_snapshot", return_value=saved), mock.patch.object(cooling_kit.machine_state, "running_processes", return_value=[]), \
