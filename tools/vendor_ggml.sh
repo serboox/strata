@@ -1,9 +1,16 @@
 #!/bin/sh
-# usage: vendor_ggml.sh <llama.cpp checkout> [destination root]
+# usage: vendor_ggml.sh [--with-vulkan] <llama.cpp checkout> [destination root]
 # Copies the part of ggml that this project builds (the base library, the CPU backend, and the ggml-cuda headers and MMQ
 # instances Strata compiles itself) from a llama.cpp checkout into <root>/third_party/llama.cpp, with its licence and the
 # commit it came from.  <root> defaults to the repository that holds this script.
+# --with-vulkan also copies ggml-vulkan (for -DSTRATA_IGPU_VULKAN=ON); it is only built against the base library of the same
+# commit, so the checkout must be the one third_party/llama.cpp/VERSION.txt names.
 set -eu
+WITH_VULKAN=0
+if [ "${1:-}" = "--with-vulkan" ]; then
+  WITH_VULKAN=1
+  shift
+fi
 SRC="$1"
 ROOT="${2:-$(cd "$(dirname "$0")/.." && pwd)}"
 DST="$ROOT/third_party/llama.cpp"
@@ -24,6 +31,9 @@ cp -r "$SRC/ggml/src/ggml-cuda/vendors" "$DST/ggml/src/ggml-cuda/"
 for t in q8_0 q4_k q5_k q5_1 q6_k; do
   cp "$SRC/ggml/src/ggml-cuda/template-instances/mmq-instance-$t.cu" "$DST/ggml/src/ggml-cuda/template-instances/"
 done
+if [ "$WITH_VULKAN" = 1 ]; then
+  cp -r "$SRC/ggml/src/ggml-vulkan" "$DST/ggml/src/"
+fi
 cp "$SRC/LICENSE" "$DST/LICENSE"
 git -C "$SRC" rev-parse HEAD > "$DST/VERSION.txt"
 git -C "$SRC" log -1 --format='%ad' >> "$DST/VERSION.txt"

@@ -20,6 +20,7 @@
 #include "strata/core/experts_used.hpp"
 #include "strata/core/family_layout.hpp"
 #include "strata/kernels/fused_gdn.hpp"
+#include "strata/kernels/igpu_experts.hpp"
 #include "strata/kernels/iq_kernels.hpp"
 #include "strata/kernels/native_mmvq.hpp"
 #include "strata/kernels/native_moe.hpp"
@@ -1745,6 +1746,14 @@ struct Engine {
     std::vector<strata::kernels::cpu::ExpertJobMulti> jobs;
     std::vector<strata::kernels::cpu::NativeFmt> job_fmt;   // experts mapped: each job's own layout (reserved, never moved)
 #endif
+    // the iGPU's fixed share of the routed experts (STRATA_IGPU_EXPERTS): its entries are taken out of the pool's jobs and
+    // land in cpu_out like the pool's rows
+    std::unique_ptr<strata::kernels::igpu::ExpertShare> igpu;
+    std::vector<strata::kernels::igpu::Entry> igpu_entries;
+    bool igpu_stats = false;
+    size_t igpu_cap = 0;   // most entries one layer sends to the iGPU; the pool takes the rest
+    strata::kernels::igpu::Stats igpu_seen;
+    double igpu_seen_pool_ms = 0;
     float *h_h = nullptr, *cpu_out = nullptr, *ecpu = nullptr;
     int32_t *h_ids = nullptr, *h_miss = nullptr, *d_miss = nullptr, *h_cnt = nullptr;
     uint8_t* acts = nullptr;   // per token: its quantized activation (kNativeActBytes)
@@ -1761,7 +1770,7 @@ struct Engine {
     int32_t* h_rb = nullptr;                // pinned [n_expert + 1]: the sorted entries' expert bounds of this layer
     int32_t* rb_rel = nullptr;              // device [n_expert + 1]: one group's bounds relative to its first row
     int stream_pos = 0;
-    long long hy_cpu = 0, hy_gpu = 0, hy_swaps = 0;   // entries computed on the CPU / GPU, slot replacements
+    long long hy_cpu = 0, hy_gpu = 0, hy_igpu = 0, hy_swaps = 0;   // entries computed on the CPU pool / GPU / iGPU, slot replacements
     long long hy_jobs = 0;   // expert weight sets the CPU pool read (one per distinct expert of a layer's batch)
     double hy_cpu_ms = 0, hy_wait_ms = 0, hy_prep_ms = 0;   // pool time; waiting for the router; job building before the pool
     // STRATA_Q36_OVERLAP: ways to overlap the GPU and CPU work of a hybrid step (all off unless asked for)
@@ -1793,8 +1802,18 @@ struct Engine {
             if (!row_ids[li].empty())
                 for (int e = 0; e < n * Kp; ++e) hy[li].score[(size_t) row_ids[li][(size_t) e]] += 1.0;
     }
+    void igpu_report() {
+        const strata::kernels::igpu::Stats now = igpu->stats();
+        std::fprintf(stderr, "strata-q36 iGPU step: %lld entries in %lld calls, iGPU %.2f ms (graph %.2f, io %.2f, run %.2f), "
+                     "CPU pool %.2f ms, join wait %.2f ms\n", now.entries - igpu_seen.entries, now.calls - igpu_seen.calls,
+                     now.compute_ms - igpu_seen.compute_ms, now.graph_ms - igpu_seen.graph_ms, now.io_ms - igpu_seen.io_ms,
+                     now.run_ms - igpu_seen.run_ms, hy_cpu_ms - igpu_seen_pool_ms, now.wait_ms - igpu_seen.wait_ms);
+        igpu_seen = now;
+        igpu_seen_pool_ms = hy_cpu_ms;
+    }
     void after_rows(int n) {   // a decode step / verify window kept n rows: count them, rebalance at the boundary
         if (!m->hybrid) return;
+        if (igpu && igpu_stats) igpu_report();
         count_rows(n);
         if (pos % kRebalanceEvery == 0) {
             CK(cudaStreamSynchronize(st));
@@ -3219,7 +3238,7 @@ struct Engine {
             CK(cudaGetLastError());
             const size_t bytes = (size_t) (T - 1) * strata::kernels::cpu::kNativeActBytes + H.fmt.act_bytes;
             CK(cudaMemcpyAsync(h_acts, d_acts, bytes, cudaMemcpyDeviceToHost, st));
-            if (ov.verify) CK(cudaMemcpyAsync(h_h, h, (size_t) T * N * 4, cudaMemcpyDeviceToHost, st));
+            if (ov.verify || igpu) CK(cudaMemcpyAsync(h_h, h, (size_t) T * N * 4, cudaMemcpyDeviceToHost, st));
         } else
 #endif
         CK(cudaMemcpyAsync(h_h, h, (size_t) T * N * 4, cudaMemcpyDeviceToHost, st));
@@ -3239,7 +3258,8 @@ struct Engine {
     /// The CPU pool's jobs for the entries of a layer's batch that have no slot: up to MAXT tokens per expert.  `miss`
     /// gets each entry's flag.  `effects` off: no routing counts and no row ids are recorded (the verify run).
     int build_jobs_classic(size_t li, int T, bool gpu_act, std::vector<strata::kernels::cpu::ExpertJobMulti>& out_jobs,
-                           std::vector<strata::kernels::cpu::NativeFmt>& out_fmt, int32_t* miss, bool effects) {
+                           std::vector<strata::kernels::cpu::NativeFmt>& out_fmt, int32_t* miss, bool effects,
+                           std::vector<strata::kernels::igpu::Entry>* divert) {
         namespace C = strata::kernels::cpu;
         const int N = (int) m->g.n_embd, Kp = (int) m->top_k;
         const int n_ent = T * Kp;
@@ -3263,6 +3283,10 @@ struct Engine {
             miss[e] = H.slot_of[(size_t) x] < 0;
             if (!miss[e]) continue;
             ++n_miss;
+            if (igpu && divert->size() < igpu_cap && igpu->owns(li, x)) {
+                divert->push_back({h_h + (size_t) (e / Kp) * N, x, cpu_out + (size_t) e * N});
+                continue;
+            }
             const int t = e / Kp;
             if (!gpu_act && !quantized[(size_t) t]) {
                 C::native_quant_act(H.fmt, h_h + (size_t) t * N, acts + (size_t) t * C::kNativeActBytes);
@@ -3319,6 +3343,10 @@ struct Engine {
             miss[e] = H.slot_of[(size_t) x] < 0;
             if (!miss[e]) continue;
             ++n_miss;
+            if (igpu && igpu_entries.size() < igpu_cap && igpu->owns(li, x)) {
+                igpu_entries.push_back({h_h + (size_t) (e / Kp) * N, x, cpu_out + (size_t) e * N});
+                continue;
+            }
             const int t = e / Kp;
             if (!gpu_act && !tok_quant[(size_t) t]) {
                 C::native_quant_act(H.fmt, h_h + (size_t) t * N, acts + (size_t) t * C::kNativeActBytes);
@@ -3361,7 +3389,8 @@ struct Engine {
             std::vector<C::ExpertJobMulti> vj;
             std::vector<C::NativeFmt> vf;
             std::vector<int32_t> vm((size_t) n_ent);
-            build_jobs_classic(li, T, gpu_act, vj, vf, vm.data(), false);
+            std::vector<strata::kernels::igpu::Entry> vd;
+            build_jobs_classic(li, T, gpu_act, vj, vf, vm.data(), false, &vd);
             if (vj.size() != jobs.size()) bad = "job count";
             for (size_t i = 0; bad == nullptr && i < vj.size(); ++i) {
                 const C::ExpertJobMulti &a = vj[i], &b = jobs[i];
@@ -3452,13 +3481,17 @@ struct Engine {
         const bool gpu_act = dev_quant(li);
         // the merge flags of the glue path travel with the rows: one upload
         int32_t* const miss = ov.glue ? reinterpret_cast<int32_t*>(cpu_out + (size_t) n_ent * N) : h_miss;
+        igpu_entries.clear();
         int n_miss;
         if (ov.glue) n_miss = build_jobs_glue(li, T, gpu_act, miss);
-        else n_miss = build_jobs_classic(li, T, gpu_act, jobs, job_fmt, miss, true);
+        else n_miss = build_jobs_classic(li, T, gpu_act, jobs, job_fmt, miss, true, &igpu_entries);
         if (ov.verify && (ov.glue || gpu_act)) verify_cpu_path(li, T, gpu_act, miss);
-        hy_cpu += n_miss;
+        const int diverted = (int) igpu_entries.size();
+        hy_cpu += n_miss - diverted;
+        hy_igpu += diverted;
         hy_gpu += n_ent - n_miss;
         if (n_miss == 0) return;
+        if (igpu) igpu->submit(li, igpu_entries.data(), (int) igpu_entries.size());
         if (L.hblobs == nullptr)
             for (const C::ExpertJobMulti& j : jobs) {   // the experts' three ranges, read in parallel while the pool starts
                 const size_t x = (size_t) (j.blob - L.src_g) / L.src_gsz;
@@ -3470,8 +3503,9 @@ struct Engine {
             hy_prep_ms += ms_since(t0);
             hy_jobs += (long long) jobs.size();
         }
-        pool->run_split_multi_native(H.fmt, jobs.data(), (int) jobs.size());
+        if (!jobs.empty()) pool->run_split_multi_native(H.fmt, jobs.data(), (int) jobs.size());
         hy_cpu_ms += ms_since(t0);
+        if (igpu) igpu->wait();
         const auto te = ov.stats ? Clock::now() : t0;
         if (ov.glue) {
             CK(cudaMemcpyAsync(ecpu, cpu_out, ((size_t) n_ent * N + (size_t) n_ent) * 4, cudaMemcpyHostToDevice, st));
@@ -3982,9 +4016,12 @@ struct Engine {
         CK(cudaStreamSynchronize(st));
         warming = false;
         for (Hy& H : hy) std::fill(H.score.begin(), H.score.end(), 0.0);
-        hy_cpu = hy_gpu = hy_swaps = 0;
+        hy_cpu = hy_gpu = hy_igpu = hy_swaps = 0;
         hy_cpu_ms = hy_wait_ms = hy_prep_ms = 0;
         hy_jobs = 0;
+        if (igpu) igpu->reset_stats();
+        igpu_seen = {};
+        igpu_seen_pool_ms = 0;
         pool->ms_multi_gu = pool->ms_multi_q = pool->ms_multi_down = 0;
         reset();
         std::fprintf(stderr, "strata-q36: warmed up in %.1f s (one prompt chunk, a decode step%s)\n",
@@ -4004,6 +4041,48 @@ struct Engine {
 };
 
 // ------------------------------------------------------------------------------------------------ expert placement
+constexpr size_t kIgpuMaxEntries = 8;   // a call of 8 entries takes 2.3 ms on the Iris Xe, 16 take 5 ms: more would stall the layer
+
+/// STRATA_IGPU_EXPERTS: the iGPU holds a fixed share of every hybrid layer's routed experts.  It stays off, with one
+/// stderr line, when the build, the device or the formats do not allow it.
+void attach_igpu(Engine& E, const std::vector<Layer*>& all, int rows) {
+    namespace I = strata::kernels::igpu;
+    const char* want = std::getenv("STRATA_IGPU_EXPERTS");
+    if (want == nullptr || *want == '\0' || std::strcmp(want, "0") == 0) return;
+    const auto& g = E.m->g;
+    const double share = I::share_from_env();
+    if (share <= 0.0) {
+        std::fprintf(stderr, "strata-q36: STRATA_IGPU_EXPERTS=%s is not a share between 0 and 1: the iGPU stays off\n", want);
+        return;
+    }
+    const auto t0 = Clock::now();
+    I::Options opt;
+    opt.n_embd = g.n_embd;
+    opt.n_ff = g.n_ff;
+    opt.n_expert = g.n_expert;
+    opt.share = share;
+    opt.max_entries = std::min(rows * (int) E.m->top_k, opt.max_entries);
+    if (const char* dev = std::getenv("STRATA_IGPU_DEVICE")) opt.device = dev;
+    std::vector<I::ExpertSource> sources(all.size());
+    for (size_t li = 0; li < all.size(); ++li) {
+        const Layer& L = *all[li];
+        if (L.n_slots >= (int) g.n_expert || L.L.tail_off != 0) continue;   // a scale tail after the blob is applied by the pool's kernels only
+        sources[li] = {L.L.gu_type, L.L.d_type, L.src_g, L.src_u, L.src_d, L.src_gsz, L.src_dsz, L.n_slots};
+    }
+    std::string err;
+    E.igpu = I::ExpertShare::create(opt, sources, err);
+    if (!E.igpu) {
+        std::fprintf(stderr, "strata-q36: the iGPU stays off: %s\n", err.c_str());
+        return;
+    }
+    E.igpu_stats = std::getenv("STRATA_IGPU_STATS") != nullptr;
+    E.igpu_cap = kIgpuMaxEntries;
+    if (const char* cap = std::getenv("STRATA_IGPU_MAX_ENTRIES")) E.igpu_cap = (size_t) std::max(1, std::atoi(cap));
+    std::fprintf(stderr, "strata-q36: iGPU experts: %d of %lld per layer (%.0f%%), %.2f GiB, on %s, ready in %.1f s\n",
+                 E.igpu->experts_per_layer(), (long long) g.n_expert, 100.0 * E.igpu->experts_per_layer() / (double) g.n_expert,
+                 (double) E.igpu->resident_bytes() / (1 << 30), E.igpu->device_name().c_str(), ms_since(t0) / 1000.0);
+}
+
 /// The routed experts after the engine's buffers: all in VRAM when they fit in `vram_gib` (< 0: the free VRAM less a
 /// reserve), else the hybrid mode - every expert in host memory, the same number of VRAM slots per layer, a decode
 /// batch's other experts on the CPU pool and a prompt chunk's streamed through two staging buffers.
@@ -4092,6 +4171,7 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
         }
         std::fprintf(stderr, "strata-q36: every routed expert in VRAM (%.2f GiB) in %.1f s\n", (double) total / (1 << 30),
                      ms_since(t0) / 1000.0);
+        attach_igpu(E, all, 1);
         return true;
     }
 #if !defined(STRATA_Q36_CPU_POOL)
@@ -4196,6 +4276,7 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
             return false;
         }
     }
+    attach_igpu(E, all, mtp_only ? E.tmax : E.hybrid_t);
     const size_t T = (size_t) E.tmax, N = (size_t) g.n_embd, Kp = (size_t) m.top_k;
     CK(cudaHostAlloc((void**) &E.h_h, T * N * 4, cudaHostAllocDefault));
     const size_t merge_flag_bytes = E.ov.glue ? T * Kp * 4 : 0;   // the merge flags after the CPU rows: one upload
@@ -5229,13 +5310,18 @@ int strata::qwen35::run(int argc, char** argv) {
                 for (const auto& kv : E.v_by)
                     std::fprintf(stderr, "strata-q36 VERIFY   %s: %lld mismatches\n", kv.first.c_str(), kv.second);
             if (!E.m->hybrid) return;
-            const long long n = E.hy_cpu + E.hy_gpu;
+            const long long n = E.hy_cpu + E.hy_gpu + E.hy_igpu;
             std::fprintf(stderr, "strata-q36: hybrid experts: %lld of %lld batch entries on the GPU (%.1f%%), %lld on the "
                          "CPU pool in %.0f ms, %lld slot replacements\n", E.hy_gpu, n, n ? 100.0 * E.hy_gpu / n : 0.0,
                          E.hy_cpu, E.hy_cpu_ms, E.hy_swaps);
             std::fprintf(stderr, "strata-q36: CPU path ms: router wait %.0f, job building %.0f, gate/up %.0f, quantize %.0f, "
                          "down %.0f; %lld expert weight sets read\n", E.hy_wait_ms, E.hy_prep_ms, E.pool->ms_multi_gu, E.pool->ms_multi_q,
                          E.pool->ms_multi_down, E.hy_jobs);
+            if (E.igpu) {
+                const strata::kernels::igpu::Stats s = E.igpu->stats();
+                std::fprintf(stderr, "strata-q36: iGPU experts: %lld batch entries in %lld calls, %.0f ms on the worker, the CPU "
+                             "side waited %.0f ms for it\n", s.entries, s.calls, s.compute_ms, s.wait_ms);
+            }
         }
     } report{E};
     if (const char* tr = std::getenv("STRATA_ROUTE_TRACE")) route_trace = std::fopen(tr, "wb");

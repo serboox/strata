@@ -110,6 +110,25 @@ def overlap_environment(switches: str | None) -> dict | None:
     return {"STRATA_Q36_OVERLAP": switches} if switches else None
 
 
+IGPU_SHARE_ENV = "STRATA_IGPU_EXPERTS"
+
+
+def igpu_share(text: str) -> float:
+    """A share of the routed experts for the iGPU: 0 (off) or a fraction above 0 and below 1."""
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a number") from None
+    if value == 0 or (math.isfinite(value) and 0 < value < 1):
+        return value
+    raise argparse.ArgumentTypeError(f"the share must be 0 (off) or above 0 and below 1, not {text}")
+
+
+def with_igpu(env: dict | None, share: float) -> dict | None:
+    """The engine environment with the iGPU's share of the experts added; unchanged when the share is 0."""
+    return {**(env or {}), IGPU_SHARE_ENV: f"{share:g}"} if share else env
+
+
 def uses_iq_experts(model: Path) -> bool:
     """Whether the expert tensors of this GGUF file are stored as IQ3_S or IQ4_XS, the formats the AVX-512 kernels serve."""
     import gguf_reader
@@ -378,6 +397,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--overlap", nargs="?", const="all", type=overlap_list, metavar="LIST",
                         help="overlap GPU and CPU work inside a decode step (off by default): all, or a comma list of "
                              f"{', '.join(OVERLAP_SWITCHES)}; the output is the same as without it (docs/TUNING.md)")
+    parser.add_argument("--igpu-experts", type=igpu_share, default=0.0, metavar="SHARE",
+                        help="let the Vulkan iGPU compute this fraction of every layer's routed experts next to the CPU pool "
+                             "(0, the default, is off); needs a build with -DSTRATA_IGPU_VULKAN=ON, see docs/TUNING.md")
     parser.add_argument("--ram", help="memory budget of the server, e.g. 9G (page cache included); default: the profile's")
     parser.add_argument("--context", type=int, help="context window in tokens")
     parser.add_argument("--chunk", type=int, help="prompt chunk in tokens (more is faster, and takes VRAM)")
@@ -455,7 +477,8 @@ def main() -> int:
     config_path = RUN_DIR / "qwen36.json"
     kernel_env = iq_kernel_env(args.iq_kernels, MODEL_FILE)
     lever_env = {**experts_used_env(args.experts_used), **(overlap_environment(args.overlap) or {})}
-    config = build_config(profile, args.port, args.sampling, args.max_temp, engine_environment(kernel_env, cpu_max_mhz, lever_env))
+    config = build_config(profile, args.port, args.sampling, args.max_temp,
+                          with_igpu(engine_environment(kernel_env, cpu_max_mhz, lever_env), args.igpu_experts))
     config_path.write_text(json.dumps(config, indent=1) + "\n", encoding="utf-8")
 
     server = [str(ROOT / ".venv" / "bin" / "python"), str(ROOT / "serve" / "server.py"), "--engine", "strata", "--config",
@@ -482,6 +505,7 @@ def main() -> int:
           f"port {args.port}, temperature limit {f'{args.max_temp:g} C' if args.max_temp > 0 else 'none'}, turbo {args.turbo}, "
           f"priority {args.priority}, model {MODEL_FILE.name}, iq kernels {iq_kernel_state(kernel_env)}"
           + (f", overlap {args.overlap}" if args.overlap else "")
+          + (f", iGPU experts {args.igpu_experts:g}" if args.igpu_experts else "")
           + (f", experts per token {args.experts_used}" if args.experts_used is not None else "")
           + (f", cpu cap {cpu_max_mhz:g} MHz" if cpu_max_mhz else "") + (f", memory protection {memory_low / GIB:.1f} GiB" if memory_low else "")
           + (f", prewarm {prewarm_bytes / GIB:.1f} GiB" if prewarm_bytes else ""), file=sys.stderr)
