@@ -10,6 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(1, str(Path(__file__).resolve().parent))
 from serve.thermal import MAX_LIMIT_C, MIN_LIMIT_C  # noqa: E402
 MODEL_DIR = ROOT / "models" / "qwen3.6-35b-a3b"
 MODEL_FILE = MODEL_DIR / "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
@@ -59,7 +60,34 @@ def engine_args(profile: dict) -> list:
 GREEDY_SAMPLING = {"temperature": 0, "presence_penalty": 0, "frequency_penalty": 0, "repetition_penalty": 1}
 
 
-def build_config(profile: dict, port: int, sampling: str, max_temp: float = 0) -> dict:
+IQ_EXPERT_TYPES = ("IQ3_S", "IQ4_XS")
+IQ_KERNELS_ENV = {"STRATA_IQ_VBMI": "1"}
+IQ_KERNELS_OFF_ENV = {"STRATA_IQ_VBMI": "0"}
+
+
+def uses_iq_experts(model: Path) -> bool:
+    """Whether the expert tensors of this GGUF file are stored as IQ3_S or IQ4_XS, the formats the AVX-512 kernels serve."""
+    import gguf_reader
+    return any(tensor.type_name in IQ_EXPERT_TYPES for tensor in gguf_reader.GGUFFile(model).tensors if "_exps" in tensor.name)
+
+
+def iq_kernel_env(mode: str, model: Path) -> dict | None:
+    """The engine environment that switches the IQ kernels on or off; off is set explicitly so that a value inherited from the caller's
+    environment cannot turn them on, and None leaves the environment alone (auto with a model that has no IQ experts)."""
+    if mode == "off":
+        return IQ_KERNELS_OFF_ENV
+    if mode == "on" or uses_iq_experts(model):
+        return IQ_KERNELS_ENV
+    return None
+
+
+def iq_kernel_state(env: dict | None) -> str:
+    if env == IQ_KERNELS_ENV:
+        return "on"
+    return "off" if env == IQ_KERNELS_OFF_ENV else "not needed"
+
+
+def build_config(profile: dict, port: int, sampling: str, max_temp: float = 0, env: dict | None = None) -> dict:
     config = {"exe": "build/strata-q36", "args": engine_args(profile), "cwd": str(ROOT),
               "tokenizer": str(MODEL_DIR / "pack" / "tokenizer"), "model_name": MODEL_NAME, "arch": "qwen35moe",
               "log": str(ROOT / "logs" / "strata-qwen36.log"), "host": "127.0.0.1", "port": port}
@@ -67,6 +95,8 @@ def build_config(profile: dict, port: int, sampling: str, max_temp: float = 0) -
         config["sampling"] = GREEDY_SAMPLING
     if max_temp > 0:
         config["thermal"] = {"max_temp_c": max_temp}
+    if env:
+        config["env"] = dict(env)
     return config
 
 
@@ -272,7 +302,7 @@ def plan_memory(protect: bool | None, prewarm: bool | None, io: str, budget: str
     return memory_low, prewarm_bytes, scope_for_prewarm, messages
 
 
-# short forms that selected one flag before --protect-ram, --prewarm and their --no- forms made them ambiguous
+# Abbreviations that stay accepted although --protect-ram, --prewarm and their --no- forms share these prefixes.
 OLD_ABBREVIATIONS = {"--pro": "--profile", "--n": "--no-limit", "--no": "--no-limit", "--no-": "--no-limit"}
 
 
@@ -294,6 +324,10 @@ def ensure_tokenizer() -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Start the Qwen3.6-35B-A3B server inside a memory budget.")
     parser.add_argument("--profile", choices=list(PROFILES), default="auto")
+    parser.add_argument("--model", type=Path, help="the GGUF file to serve (default: the Q4_K_XL file); its MTP block must be in it")
+    parser.add_argument("--iq-kernels", choices=("auto", "on", "off"), default="auto",
+                        help="the AVX-512 kernels for IQ3_S and IQ4_XS experts: auto (default) turns them on when the model has such "
+                             "experts, on and off force it; the Q4_K_XL file is never affected")
     parser.add_argument("--ram", help="memory budget of the server, e.g. 9G (page cache included); default: the profile's")
     parser.add_argument("--context", type=int, help="context window in tokens")
     parser.add_argument("--chunk", type=int, help="prompt chunk in tokens (more is faster, and takes VRAM)")
@@ -328,6 +362,11 @@ def main() -> int:
     if not (args.max_temp == 0 or (math.isfinite(args.max_temp) and MIN_LIMIT_C <= args.max_temp <= MAX_LIMIT_C)):
         parser.error(f"--max-temp must be 0 (off) or from {MIN_LIMIT_C:g} to {MAX_LIMIT_C:g} degrees Celsius, not {args.max_temp:g}")
 
+    global MODEL_FILE
+    if args.model:
+        MODEL_FILE = args.model.expanduser().resolve()
+        if MODEL_DIR.resolve() not in MODEL_FILE.parents:
+            parser.error(f"--model must be a file inside {MODEL_DIR}: the tokenizer there belongs to this model")
     profile = dict(PROFILES[args.profile])
     if args.ram:
         profile["ram"] = args.ram
@@ -346,7 +385,9 @@ def main() -> int:
     RUN_DIR.mkdir(exist_ok=True)
     (ROOT / "logs").mkdir(exist_ok=True)
     config_path = RUN_DIR / "qwen36.json"
-    config_path.write_text(json.dumps(build_config(profile, args.port, args.sampling, args.max_temp), indent=1) + "\n", encoding="utf-8")
+    kernel_env = iq_kernel_env(args.iq_kernels, MODEL_FILE)
+    config = build_config(profile, args.port, args.sampling, args.max_temp, kernel_env)
+    config_path.write_text(json.dumps(config, indent=1) + "\n", encoding="utf-8")
 
     server = [str(ROOT / ".venv" / "bin" / "python"), str(ROOT / "serve" / "server.py"), "--engine", "strata", "--config",
               str(config_path), "--port", str(args.port)]
@@ -370,7 +411,7 @@ def main() -> int:
     command = wrap_in_scope(server, scope_properties(memory_budget, background, memory_low), always=scope_for_prewarm)
     print(f"strata-launch: profile {args.profile}, memory budget {profile['ram'] or 'none (elastic page cache)'}, context {profile['context']}, "
           f"port {args.port}, temperature limit {f'{args.max_temp:g} C' if args.max_temp > 0 else 'none'}, turbo {args.turbo}, "
-          f"priority {args.priority}" + (f", memory protection {memory_low / GIB:.1f} GiB" if memory_low else "")
+          f"priority {args.priority}, model {MODEL_FILE.name}, iq kernels {iq_kernel_state(kernel_env)}" + (f", memory protection {memory_low / GIB:.1f} GiB" if memory_low else "")
           + (f", prewarm {prewarm_bytes / GIB:.1f} GiB" if prewarm_bytes else ""), file=sys.stderr)
     apply_turbo(args.turbo, args.dry_run)
     apply_priority(args.priority, args.dry_run)
