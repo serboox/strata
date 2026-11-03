@@ -1,0 +1,16 @@
+{
+  "name": "cooling",
+  "lever": 1,
+  "title": "Better cooling: measure how the CPU frequency cap and the platform cooling profile limit the sustained speed",
+  "kind": "system",
+  "variants": [
+    {"name": "cap_2200", "env": {}, "engine_args": [], "launcher_args": ["--cpu-max-mhz", "2200"]},
+    {"name": "cap_2400", "env": {}, "engine_args": [], "launcher_args": ["--cpu-max-mhz", "2400"]},
+    {"name": "cap_2600", "env": {}, "engine_args": [], "launcher_args": ["--cpu-max-mhz", "2600"]},
+    {"name": "cap_2800", "env": {}, "engine_args": [], "launcher_args": ["--cpu-max-mhz", "2800"]}
+  ],
+  "needs": {"build_option": "", "model_file": "", "root": false},
+  "quality_check": "",
+  "parity_check": "Not an engine change: the output is identical at every cap; only speed and temperature differ.",
+  "notes": "Run tools/cooling_kit.py (--caps 2.2,2.4,2.6,2.8, --setup \"<physical conditions>\", optionally --profiles balanced,performance --apply-profile). Watch the time to 75 and 80 C, the sustained tokens per second at each cap, and whether the fan sensors read at all (a fan at 0 RPM for the whole run is reported as an unreliable sensor). The platform profile belongs to root: the kit prints the sudo command and only runs it with --apply-profile."
+}

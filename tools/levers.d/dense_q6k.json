@@ -1,0 +1,16 @@
+{
+  "name": "dense_q6k",
+  "lever": 5,
+  "title": "Dense part Q8_0 -> Q6_K: a model file variant with about 23 % fewer dense bytes re-read every step",
+  "kind": "model-file",
+  "variants": [
+    {"name": "attn_ssm_shexp", "env": {}, "engine_args": [], "launcher_args": [],
+     "model_file": "models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp-q6dense-attn_ssm_shexp.gguf"},
+    {"name": "all_dense", "env": {}, "engine_args": [], "launcher_args": [],
+     "model_file": "models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp-q6dense-all_dense.gguf"}
+  ],
+  "needs": {"build_option": "", "model_file": "models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp-q6dense-<variant>.gguf, made by tools/requant_dense.py (python3 tools/requant_dense.py SRC DST --groups attn,ssm,shexp | --groups all)", "root": false},
+  "quality_check": "/home/sergei/clang/github.com/ggml-org/llama.cpp/build/bin/llama-perplexity",
+  "parity_check": "Not identical by design (the weights are re-quantised): compare the perplexity of the source file and the variant with the llama.cpp perplexity tool on the same text, and the greedy answers of tools/quant_bench.py for drift.",
+  "notes": "Expected speed gain is small (3 to 4 %). The engine takes Q6_K dense matrices on every path, but the Q8_0-only fast paths (the packed Q8_0 plane copy, the one-warp-per-row small-matrix kernel, the fused shared-expert gate and up kernel, the draft head subset kernel) are not used for them, so the gain can be lower or negative: compare the per-step GPU time. The file is about 0.4 GB smaller on the GPU. The 17 GB output file needs free disk space and a few minutes of single-core quantisation."
+}
