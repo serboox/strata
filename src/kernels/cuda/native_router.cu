@@ -233,7 +233,21 @@ void native_router_top10_multi(const float* logits, int32_t* ids, float* weights
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
-bool native_router_topk_supported(int n_expert, int k) { return (n_expert == 512 && k == 10) || (n_expert == 256 && k == 8); }
+constexpr int kMaxTopk256 = 8;
+bool native_router_topk_supported(int n_expert, int k) {
+    return (n_expert == 512 && k == 10) || (n_expert == 256 && k >= 1 && k <= kMaxTopk256);
+}
+namespace {
+template <int K>
+bool launch_route_topk256(int k, const float* logits, int32_t* ids, float* weights, int n_tok, cudaStream_t stream) {
+    if (k == K) {
+        route_topk<256, K><<<(unsigned) ((n_tok + 7) / 8), dim3(32, 8), 0, stream>>>(logits, ids, weights, n_tok);
+        return true;
+    }
+    if constexpr (K > 1) return launch_route_topk256<K - 1>(k, logits, ids, weights, n_tok, stream);
+    return false;
+}
+}
 void native_router_topk(const float* logits, int32_t* ids, float* weights, int n_expert, int k, int n_tok, void* stream) {
     if (n_expert == 512 && k == 10) {   // Flash-Next: the pinned kernels above, unchanged
         if (n_tok == 1) native_router_top10(logits, ids, weights, stream);
@@ -244,8 +258,7 @@ void native_router_topk(const float* logits, int32_t* ids, float* weights, int n
         !valid(logits, (size_t) n_tok * n_expert * 4) || !valid(ids, (size_t) n_tok * k * 4) ||
         !valid(weights, (size_t) n_tok * k * 4))
         throw std::invalid_argument("native_router_topk: a stream, a supported (experts, k) and aligned buffers");
-    route_topk<256, 8><<<(unsigned) ((n_tok + 7) / 8), dim3(32, 8), 0, static_cast<cudaStream_t>(stream)>>>(
-        logits, ids, weights, n_tok);
+    launch_route_topk256<kMaxTopk256>(k, logits, ids, weights, n_tok, static_cast<cudaStream_t>(stream));
     const auto error = cudaGetLastError();
     if (error != cudaSuccess) throw std::runtime_error(cudaGetErrorString(error));
 }
