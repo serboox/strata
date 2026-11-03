@@ -96,14 +96,22 @@ The laptop heats up quickly under the model, and a hot CPU slows itself down in 
 
 **The temperature limit.** The server reads the CPU package temperature (`coretemp` or `k10temp` in sysfs) and the GPU's, once
 a second. At the limit (80 C by default) it stops the engine process with SIGSTOP for a part of every half second and
-resumes it with SIGCONT: a stopped process draws no CPU and starts no GPU work, so both cool. The share is 10% plus 4 points
-per degree over the limit, added each second, up to 85%; below the limit minus 3 degrees it shrinks by 5 points a second, and
-inside that band it holds. Each change of 20 points and each start and end of the pausing is one line in the log
+resumes it with SIGCONT: a stopped process draws no CPU and starts no GPU work, so both cool. The step looks ahead: a rising
+sensor counts as the temperature it will have in 3 seconds, judged by its own slope over the last 4 seconds (every sensor keeps
+its own history, and a sensor that drops out starts a fresh one), so the pause starts before the
+limit is crossed; the package keeps heating for a moment after the pause begins. When that projected temperature reaches the
+limit the share grows by 10% plus 4 points per degree over it, each second, up to 85%; below the limit minus 3 degrees it
+shrinks by 5 points a second, and inside that band it holds. Each change of 20 points and each start and end of the pausing is
+one line in the log
 (`[strata] thermal: cpu 83 C ...`), and the share and the temperature are in the `hardware` series of `GET /metrics`
 (`thermal_duty`, `thermal_temp`). The engine is resumed when the server stops, and the kernel kills it if the server is
 killed (`PR_SET_PDEATHSIG`), stopped or not. Where a process cannot be paused (Windows) the limit is not enforced and the
 server says so. Checked with unit tests, with a busy process (it got less than half the CPU time and ran freely again after the
-stop) and with the server's config wiring on the mock engine; not yet with the real engine under a real load.
+stop) and with the server's config wiring on the mock engine. With the real engine under a full load the look-ahead held the CPU
+package at 78 C for the 80 C limit (three runs of eight 900-token requests; without it the package peaked at 82 to 87 C). The
+per-sensor histories came after that run: one run of ten requests peaked at 79 C. Two variants that looked safer on paper
+overshot instead and were dropped: forgetting the history after a slow sample (peaks of 82 and 83 C in two runs) and giving
+the time back slowly inside the last degrees under the limit.
 
 **The turbo boost.** `tools/turbo status|on|off` reads and writes `intel_pstate/no_turbo` (or `cpufreq/boost` on other drivers).
 On this machine the CPU runs at up to 4800 MHz with the boost and 3300 MHz without. The switch belongs to root; a tmpfiles rule

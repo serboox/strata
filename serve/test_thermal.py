@@ -50,13 +50,92 @@ class NextDutyTests(unittest.TestCase):
         self.assertEqual(duty, thermal.MAX_DUTY)
 
     def test_inside_the_margin_it_holds(self):
-        self.assertEqual(next_duty(78.0, 0.4, 80.0), 0.4)
+        self.assertEqual(next_duty(79.5, 0.4, 80.0), 0.4)
 
     def test_well_below_the_limit_it_relaxes_to_zero(self):
         duty = 0.12
         for _ in range(10):
             duty = next_duty(60.0, duty, 80.0)
         self.assertEqual(duty, 0.0)
+
+
+class AnticipationTests(unittest.TestCase):
+    def test_a_fast_rise_starts_the_pause_before_the_limit(self):
+        self.assertEqual(next_duty(74.0, 0.0, 80.0), 0.0)
+        self.assertGreater(next_duty(74.0, 0.0, 80.0, slope_c_s=2.5), 0.0)
+
+    def test_a_falling_or_flat_temperature_is_judged_as_it_is(self):
+        self.assertAlmostEqual(next_duty(78.0, 0.4, 80.0, slope_c_s=-3.0), 0.4)
+        self.assertEqual(next_duty(70.0, 0.0, 80.0, slope_c_s=0.0), 0.0)
+
+    def test_the_governor_reads_the_slope_from_its_clock(self):
+        now = [0.0]
+        temps = iter([70.0, 72.0, 74.0, 76.0, 78.0])
+        gov = Governor(80.0, lambda: {"cpu": next(temps)}, lambda: 1, log=lambda text: None, kill=lambda pid, sig: None, clock=lambda: now[0])
+        duties = []
+        for _ in range(5):
+            gov._sample()
+            duties.append(gov.duty)
+            now[0] += 1.0
+        self.assertEqual(duties[0], 0.0)
+        self.assertGreater(duties[-1], 0.0)
+        self.assertLess(gov.temp_c, 80.0)
+
+    def test_readings_too_close_in_time_give_no_slope(self):
+        gov = Governor(80.0, lambda: {"cpu": 79.0}, lambda: 1, log=lambda text: None, kill=lambda pid, sig: None, clock=lambda: 0.0)
+        self.assertEqual(gov._slope("cpu", 70.0), 0.0)
+        self.assertEqual(gov._slope("cpu", 79.0), 0.0)
+
+    def test_a_steady_hot_sensor_does_not_hide_a_cooler_one_that_heats_fast(self):
+        now = [0.0]
+        cpu = iter([65.0, 68.0, 71.0, 74.0])
+        gov = Governor(80.0, lambda: {"cpu": next(cpu), "gpu": 76.0}, lambda: 1, log=lambda text: None, kill=lambda pid, sig: None, clock=lambda: now[0])
+        for _ in range(4):
+            gov._sample()
+            now[0] += 1.0
+        self.assertGreater(gov.duty, 0.0)
+        self.assertEqual(gov.hottest, "gpu")
+
+    def test_a_slow_sample_keeps_the_history_and_the_slope_over_the_real_span(self):
+        now = [0.0]
+        gov = Governor(80.0, lambda: {"cpu": 60.0}, lambda: 1, log=lambda text: None, kill=lambda pid, sig: None, clock=lambda: now[0])
+        gov._slope("cpu", 60.0)
+        now[0] = 3.0
+        self.assertAlmostEqual(gov._slope("cpu", 78.0), 6.0)
+        self.assertEqual(len(gov._histories["cpu"]), 2)
+
+    def test_samples_taken_at_the_same_instant_do_not_pile_up(self):
+        gov = Governor(80.0, lambda: {"cpu": 60.0}, lambda: 1, log=lambda text: None, kill=lambda pid, sig: None, clock=lambda: 7.0)
+        for _ in range(100):
+            gov._slope("cpu", 70.0)
+        self.assertEqual(len(gov._histories["cpu"]), 1)
+
+    def test_a_clock_that_goes_back_starts_a_fresh_history(self):
+        now = [5.0]
+        gov = Governor(80.0, lambda: {"cpu": 60.0}, lambda: 1, log=lambda text: None, kill=lambda pid, sig: None, clock=lambda: now[0])
+        gov._slope("cpu", 60.0)
+        now[0] = 1.0
+        self.assertEqual(gov._slope("cpu", 78.0), 0.0)
+        self.assertEqual(len(gov._histories["cpu"]), 1)
+
+    def test_steady_sampling_still_gives_the_slope(self):
+        now = [0.0]
+        gov = Governor(80.0, lambda: {"cpu": 60.0}, lambda: 1, log=lambda text: None, kill=lambda pid, sig: None, clock=lambda: now[0])
+        slope = 0.0
+        for step in range(4):
+            slope = gov._slope("cpu", 60.0 + 2.0 * step)
+            now[0] += 1.0
+        self.assertAlmostEqual(slope, 2.0)
+
+    def test_a_sensor_that_returns_starts_a_fresh_history(self):
+        now = [0.0]
+        feed = iter([{"cpu": 60.0, "gpu": 60.0}, {"cpu": 60.0}, {"cpu": 60.0}, {"cpu": 60.0, "gpu": 78.0}])
+        gov = Governor(80.0, lambda: next(feed), lambda: 1, log=lambda text: None, kill=lambda pid, sig: None, clock=lambda: now[0])
+        for _ in range(4):
+            gov._sample()
+            now[0] += 1.0
+        self.assertEqual(gov.duty, 0.0)
+        self.assertEqual(set(gov._histories), {"cpu", "gpu"})
 
 
 class SensorTests(unittest.TestCase):

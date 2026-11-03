@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import atexit
+import collections
 import glob
 import os
 import signal
@@ -16,6 +17,9 @@ RESUME_MARGIN_C = 3.0
 MAX_DUTY = 0.85
 ACTIVE_DUTY = 0.02
 MIN_LIMIT_C, MAX_LIMIT_C = 40.0, 110.0
+LOOKAHEAD_S = 3.0
+SLOPE_WINDOW_S = 4.0
+MIN_SLOPE_SPAN_S = 2.0
 
 
 def say(message: str) -> None:
@@ -59,11 +63,15 @@ def cpu_package_temp_c(hwmon_root: str = "/sys/class/hwmon", thermal_root: str =
     return max(readings) if readings else None
 
 
-def next_duty(temp_c: float, duty: float, limit_c: float, margin_c: float = RESUME_MARGIN_C, max_duty: float = MAX_DUTY) -> float:
-    """The share of each period the engine is paused for, given the hottest reading now."""
-    if temp_c >= limit_c:
-        return min(max_duty, duty + 0.10 + 0.04 * (temp_c - limit_c))
-    if temp_c <= limit_c - margin_c:
+def next_duty(temp_c: float, duty: float, limit_c: float, margin_c: float = RESUME_MARGIN_C, max_duty: float = MAX_DUTY,
+              slope_c_s: float = 0.0) -> float:
+    """The share of each period the engine is paused for, given the hottest reading now. A rising temperature counts as the
+    temperature it will have in LOOKAHEAD_S seconds, so the pause starts before the limit is crossed: the package heats by a
+    few degrees a second under full load and keeps rising for a moment after the pause begins."""
+    ahead_c = temp_c + LOOKAHEAD_S * max(0.0, slope_c_s)
+    if ahead_c >= limit_c:
+        return min(max_duty, duty + 0.10 + 0.04 * (ahead_c - limit_c))
+    if ahead_c <= limit_c - margin_c:
         return max(0.0, duty - 0.05)
     return duty
 
@@ -76,7 +84,7 @@ class Governor:
 
     def __init__(self, limit_c: float, temperatures: Callable[[], dict], get_pid: Callable[[], Optional[int]],
                  log: Callable[[str], None] = say, period_s: float = PERIOD_S, sample_s: float = SAMPLE_S,
-                 kill: Callable[[int, int], None] = os.kill):
+                 kill: Callable[[int, int], None] = os.kill, clock: Callable[[], float] = time.monotonic):
         self.limit_c = limit_c
         self.temperatures = temperatures
         self.get_pid = get_pid
@@ -84,6 +92,8 @@ class Governor:
         self.period_s = period_s
         self.sample_s = sample_s
         self.kill = kill
+        self.clock = clock
+        self._histories: dict = {}
         self.duty = 0.0
         self.temp_c: Optional[float] = None
         self.hottest: Optional[str] = None
@@ -123,19 +133,43 @@ class Governor:
     def _signal(self, sig: int) -> None:
         self._send(self.get_pid(), sig)
 
+    def _slope(self, source: str, temp_c: float) -> float:
+        """Degrees per second of one sensor over the last few seconds of its readings; 0 until they span long enough. Every sensor
+        keeps its own history, so a hot steady sensor cannot hide a cooler one that is heating fast."""
+        now = self.clock()
+        history = self._histories.setdefault(source, collections.deque())
+        if history:
+            gap = now - history[-1][0]
+            if gap == 0.0:
+                history.pop()
+            elif gap < 0.0:
+                history.clear()
+        # A slow sample is not a reason to forget the history: a slope over a longer span only pauses sooner, while an empty
+        # history blinds the look-ahead for the next two seconds.
+        history.append((now, temp_c))
+        while history and now - history[0][0] > SLOPE_WINDOW_S:
+            history.popleft()
+        oldest_time, oldest_temp = history[0]
+        span = now - oldest_time
+        return (temp_c - oldest_temp) / span if span >= MIN_SLOPE_SPAN_S else 0.0
+
     def _sample(self) -> None:
         try:
             readings = {k: v for k, v in self.temperatures().items() if isinstance(v, (int, float))}
         except Exception:  # noqa: BLE001 - a sensor hiccup must never stop the server
             readings = {}
+        for gone in set(self._histories) - set(readings):
+            del self._histories[gone]   # a sensor that returns starts a fresh history instead of a false rise
         if not readings:
             self.temp_c, self.hottest = None, None
             self.duty = max(0.0, self.duty - 0.05)
             return
         self.hottest = max(readings, key=readings.get)
         self.temp_c = float(readings[self.hottest])
+        slopes = {name: self._slope(name, float(value)) for name, value in readings.items()}
+        lead = max(readings, key=lambda name: float(readings[name]) + LOOKAHEAD_S * max(0.0, slopes[name]))
         previous = self.duty
-        self.duty = next_duty(self.temp_c, self.duty, self.limit_c)
+        self.duty = next_duty(float(readings[lead]), self.duty, self.limit_c, slope_c_s=slopes[lead])
         if previous <= ACTIVE_DUTY < self.duty:
             self.log(f"[strata] thermal: {self.hottest} {self.temp_c:.0f} C reached the {self.limit_c:.0f} C limit, "
                      f"the engine now pauses {self.duty:.0%} of the time")
