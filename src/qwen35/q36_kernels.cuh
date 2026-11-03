@@ -303,15 +303,16 @@ __global__ void k_group_small(const int32_t* ids, int n_ent, int K_, const int32
     }
 }
 
-/// route_topk<256, 8> (native_router.cu, copied: the same expressions) for n_tok <= 8 tokens (one warp each) and, in the same
-/// launch, k_group_small's grouping of the picks.  block (32, 8).  HY as k_group_small.
-template <bool HY>
+/// route_topk<256, K> (native_router.cu, copied: the same expressions) for n_tok <= 8 tokens (one warp each) and, in the same
+/// launch, k_group_small's grouping of the picks.  block (32, 8).  HY as k_group_small.  K is the experts per token, 1 .. 8.
+template <bool HY, int K = 8>
 __global__ void __launch_bounds__(256) k_route_group(const float* __restrict__ logits, int32_t* __restrict__ ids,
                                                      float* __restrict__ weights, int n_tok, int ld, const int32_t* slot_of,
                                                      const uint8_t* blobs, unsigned long long blob,
                                                      unsigned long long* grp_ptr, int32_t* grp_start, int32_t* n_groups,
                                                      int32_t* ent_dst, int32_t* ent_tok) {
-    constexpr int NE = 256, K = 8, V = NE / 32;
+    constexpr int NE = 256, V = NE / 32;
+    static_assert(K >= 1 && K <= 8, "the entries of 8 tokens must fit the 64 shared slots");
     __shared__ int sids[64], sid[64];
     const int tk = threadIdx.y;
     const int lane = threadIdx.x;
@@ -394,6 +395,33 @@ __global__ void __launch_bounds__(256) k_route_group(const float* __restrict__ l
         grp_start[G] = nv;
         *n_groups = G;
     }
+}
+
+constexpr int kRouteGroupMaxK = 8;
+inline bool route_group_supports(int k) { return k >= 1 && k <= kRouteGroupMaxK; }
+
+template <bool HY, int K>
+void route_group_launch_k(const float* logits, int32_t* ids, float* weights, int n_tok, int ld, const int32_t* slot_of,
+                          const uint8_t* blobs, unsigned long long blob, unsigned long long* grp_ptr, int32_t* grp_start,
+                          int32_t* n_groups, int32_t* ent_dst, int32_t* ent_tok, cudaStream_t st) {
+    k_route_group<HY, K><<<1, dim3(32, 8), 0, st>>>(logits, ids, weights, n_tok, ld, slot_of, blobs, blob, grp_ptr, grp_start,
+                                                    n_groups, ent_dst, ent_tok);
+}
+
+/// k_route_group for `k` experts per token (route_group_supports); false when k has no instance.  k == 8 is the model's own count.
+template <bool HY, int K = kRouteGroupMaxK>
+bool route_group_launch(int k, const float* logits, int32_t* ids, float* weights, int n_tok, int ld, const int32_t* slot_of,
+                        const uint8_t* blobs, unsigned long long blob, unsigned long long* grp_ptr, int32_t* grp_start,
+                        int32_t* n_groups, int32_t* ent_dst, int32_t* ent_tok, cudaStream_t st) {
+    if (k == K) {
+        route_group_launch_k<HY, K>(logits, ids, weights, n_tok, ld, slot_of, blobs, blob, grp_ptr, grp_start, n_groups, ent_dst,
+                                    ent_tok, st);
+        return true;
+    }
+    if constexpr (K > 1)
+        return route_group_launch<HY, K - 1>(k, logits, ids, weights, n_tok, ld, slot_of, blobs, blob, grp_ptr, grp_start,
+                                             n_groups, ent_dst, ent_tok, st);
+    return false;
 }
 
 }  // namespace q36k

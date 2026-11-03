@@ -79,8 +79,17 @@ def resolve_cpu_cap(profile_name: str, requested: float | None) -> float:
     return DEFAULT_CPU_MAX_MHZ if profile_name == "auto" else 0.0
 
 
-def engine_environment(kernel_env: dict | None, cpu_max_mhz: float) -> dict | None:
-    env = {**(kernel_env or {}), **(CAPPED_ENV if cpu_max_mhz else {})}
+EXPERTS_USED_ENV = "STRATA_Q36_EXPERTS_USED"
+MODEL_EXPERTS_USED = 8   # what the Qwen3.6-35B-A3B file routes per token; the engine refuses more than a file's own count
+
+
+def experts_used_env(experts_used: int | None) -> dict:
+    """The engine environment that makes it route a token to fewer experts than the file says; empty keeps the file's count."""
+    return {} if experts_used is None else {EXPERTS_USED_ENV: str(experts_used)}
+
+
+def engine_environment(kernel_env: dict | None, cpu_max_mhz: float, experts_used: int | None = None) -> dict | None:
+    env = {**(kernel_env or {}), **(CAPPED_ENV if cpu_max_mhz else {}), **experts_used_env(experts_used)}
     return env or None
 
 
@@ -363,6 +372,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="hold the highest CPU frequency at this many MHz while the server runs and put it back at exit "
                              f"(default {DEFAULT_CPU_MAX_MHZ:g} with the auto profile, with {CAPPED_WORKERS} workers and no pool spin; 0 turns the "
                              "cap off, and so do the other profiles); a lower cap lets the model run without pauses, see the frequency cap in docs/TUNING.md")
+    parser.add_argument("--experts-used", type=int, default=None, metavar="K",
+                        help=f"route every token to K experts instead of the model's {MODEL_EXPERTS_USED} (1 to {MODEL_EXPERTS_USED}): fewer expert products per "
+                             "token, so a faster and cooler decode at some cost in quality, which tools/kld_experts.py measures; "
+                             "default: the model's own count")
     parser.add_argument("--turbo", choices=("off", "on", "keep"), default="off",
                         help="CPU turbo boost at start: off (default), on, or keep what it is (tools/turbo does the same on its own)")
     parser.add_argument("--priority", choices=("background", "normal"), default="background",
@@ -391,6 +404,9 @@ def main() -> int:
     if not (cpu_max_mhz == 0 or (math.isfinite(cpu_max_mhz) and MIN_MHZ <= cpu_max_mhz <= MAX_MHZ)):
         parser.error(f"--cpu-max-mhz must be 0 (off) or from {MIN_MHZ:g} to {MAX_MHZ:g} MHz, not {cpu_max_mhz:g}")
 
+    if args.experts_used is not None and not 1 <= args.experts_used <= MODEL_EXPERTS_USED:
+        parser.error(f"--experts-used must be from 1 to {MODEL_EXPERTS_USED}, not {args.experts_used}")
+
     global MODEL_FILE
     if args.model:
         MODEL_FILE = args.model.expanduser().resolve()
@@ -418,7 +434,7 @@ def main() -> int:
     (ROOT / "logs").mkdir(exist_ok=True)
     config_path = RUN_DIR / "qwen36.json"
     kernel_env = iq_kernel_env(args.iq_kernels, MODEL_FILE)
-    config = build_config(profile, args.port, args.sampling, args.max_temp, engine_environment(kernel_env, cpu_max_mhz))
+    config = build_config(profile, args.port, args.sampling, args.max_temp, engine_environment(kernel_env, cpu_max_mhz, args.experts_used))
     config_path.write_text(json.dumps(config, indent=1) + "\n", encoding="utf-8")
 
     server = [str(ROOT / ".venv" / "bin" / "python"), str(ROOT / "serve" / "server.py"), "--engine", "strata", "--config",
@@ -444,7 +460,7 @@ def main() -> int:
     print(f"strata-launch: profile {args.profile}, memory budget {profile['ram'] or 'none (elastic page cache)'}, context {profile['context']}, "
           f"port {args.port}, temperature limit {f'{args.max_temp:g} C' if args.max_temp > 0 else 'none'}, turbo {args.turbo}, "
           f"priority {args.priority}, model {MODEL_FILE.name}, iq kernels {iq_kernel_state(kernel_env)}"
-          + (f", cpu cap {cpu_max_mhz:g} MHz" if cpu_max_mhz else "") + (f", memory protection {memory_low / GIB:.1f} GiB" if memory_low else "")
+          + (f", cpu cap {cpu_max_mhz:g} MHz" if cpu_max_mhz else "") + (f", experts per token {args.experts_used}" if args.experts_used is not None else "") + (f", memory protection {memory_low / GIB:.1f} GiB" if memory_low else "")
           + (f", prewarm {prewarm_bytes / GIB:.1f} GiB" if prewarm_bytes else ""), file=sys.stderr)
     apply_turbo(args.turbo, args.dry_run)
     apply_priority(args.priority, args.dry_run)

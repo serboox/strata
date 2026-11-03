@@ -112,6 +112,11 @@ target_compile_definitions(strata_cuda_kernels PRIVATE STRATA_HAVE_DFLASH2=1)
 target_compile_options(strata_cuda_kernels PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:--use_fast_math>)
 target_link_libraries(strata_cuda_kernels PUBLIC CUDA::cudart)
 
+# The router, the grouping and the combine kernels for 1..8 experts per token against a host reference, no model:
+# `ninja experts_used_parity && ./experts_used_parity` (a few seconds on any CUDA device)
+add_executable(experts_used_parity EXCLUDE_FROM_ALL tests/experts_used_parity.cu)
+target_link_libraries(experts_used_parity PRIVATE strata_cuda_kernels)
+
 # ---- llama.cpp's MMQ prompt kernels (ggml-cuda, MIT).  Q8_0 is compiled into the engine; the K-quants (Q4_K, Q5_K,
 # Q6_K, Q5_1) are libstrata_kq, a shared library next to the engine that is opened on first use: the engine loads every
 # kernel of its own binary at start (CUDA_MODULE_LOADING=EAGER), and these four types would take their VRAM from every model.

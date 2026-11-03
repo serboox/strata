@@ -378,6 +378,41 @@ byte, so the gain can be smaller than the byte saving, or negative: compare the 
 `quantize_row_q6_K_ref`; `--selftest` prints its agreement with that reference and the relative RMS error of Q8_0 to Q6_K on random
 data. Judge the file by the perplexity of the llama.cpp perplexity tool on the source file and on the variant over the same text.
 
+## Fewer experts per token (opt-in, changes the output)
+
+The model routes every token to 8 of its 256 experts. Each expert costs the CPU a dequantizing dot product per layer, and the
+routed experts are 52 of the 75 ms of a decode step, so fewer experts per token make a step shorter and the package cooler.
+The price is quality: the model was trained with 8, and the answer changes. The default is the file's own count and changes
+nothing; the setting is for a measured trade, not for a default.
+
+- On: `strata_launch.py --experts-used K`, or `STRATA_Q36_EXPERTS_USED=K` in the engine's environment. K is an integer from 1
+  to the file's `expert_used_count` (8). A larger value or anything that is not an integer stops the engine with a message; it
+  never routes to more experts than the file says. The engine prints one line to stderr when the count is lowered.
+- What it does: the router keeps the K best of the 256 by probability and renormalises their weights over those K (the sum of the
+  K picked is the divisor). llama.cpp does the same with `--override-kv qwen35moe.expert_used_count=int:K` (its `build_moe_ffn`:
+  softmax over all experts, top-K, weights divided by their sum), so the two can be compared at the same K. The shared expert is
+  not touched. The count applies to every pass: decode, verify windows, prompt chunks and the MTP block.
+- Kernels: the fused router and grouping kernel, the plain router and the combine kernel take any K from 1 to 8; K = 8 runs
+  the same kernel instances and launches as before.
+- Expected gain: the expert part of a step falls about with K, so 6 of 8 may give up to 20% more tokens per second. This is
+  an estimate from the step table below, not a measurement; the drafts' acceptance (MTP) may fall with it and eat some of it.
+- Quality gate: `tools/kld_experts.py` runs llama.cpp's KL-divergence test. It saves the reference logits of a larger file once
+  (`--ref-model`, e.g. the Q8_0 one), then measures the served file (`--model`) at each count on the same text and prints one
+  line per count: mean KLD, the 99th percentile of KLD, how often the top token is the same, and the perplexity ratio. The line
+  for 8 is the cost of the file itself; judge each lower count against it. It holds the CPU cap, stops llama-perplexity at the
+  temperature limit and has a time budget. It does not build llama.cpp: when `llama-perplexity` is missing it prints the build
+  command. `--dry-run` prints the commands and starts nothing.
+
+```
+tools/kld_experts.py --model models/qwen3.6-35b-a3b/<served>.gguf --ref-model <q8_0>.gguf --ks 8,7,6,5 --cpu-max-mhz 2200 --out run/kld_experts/first
+```
+
+- Verify the kernels without a model: `ninja experts_used_parity && ./experts_used_parity` (a few seconds, any CUDA GPU) checks
+  the router, the grouping and the combine for K = 1 to 8 against a host reference. `STRATA_Q36_VERIFY=1` with `--no-graph`
+  compares the fused kernels with the old ones on the real activations for the chosen K.
+- Watch: the tokens per second and the drafts' acceptance in the server log, the package temperature, and the KLD table above. A
+  lower K also changes the prompt pass, so the quality of long contexts and of tool calls is worth a look before it is left on.
+
 ## Against llama.cpp
 
 llama.cpp b3fa6995 on the same machine (`-ngl 99 --n-cpu-moe 99 -t 4 -fa on`, experts on the CPU, no drafting), greedy
