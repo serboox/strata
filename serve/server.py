@@ -3837,6 +3837,7 @@ class Service:
         self.config_effort = None                     # #1641: the config's "reasoning_effort": the level for requests with none
         self.keep_awake = None                        # #1727 (opt-in): serve.keepawake.KeepAwake, the config's "prevent_sleep"
         self.thermal = None                           # serve.thermal.Governor, the config's "thermal": {"max_temp_c": N}
+        self.cpu_cap = None                           # serve.cpucap.CpuCap, the config's "thermal": {"cpu_max_mhz": N}
         self.fifo = threading.Lock()
         self.slot_save_path = None                    # --slot-save-path: /slots/0?action=save|restore (off when None)
         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
@@ -8514,6 +8515,13 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         svc.thermal.start()
         print(f"[strata] thermal: the engine is paused for part of the time whenever the CPU or the GPU reaches "
               f"{svc.thermal.limit_c:.0f} C", flush=True)
+    from serve import cpucap
+    try:
+        svc.cpu_cap = cpucap.create(cfg.get("thermal"))
+    except ValueError as e:
+        raise SystemExit(f"[strata] config {e}")
+    if svc.cpu_cap is not None:
+        svc.cpu_cap.start()
     if cfg.get("reasoning_effort") is not None:         # #1641: the thinking level of requests that name none
         try:
             svc.config_effort = clean_shared_defaults({"reasoning_effort": cfg["reasoning_effort"]}).get("reasoning_effort")

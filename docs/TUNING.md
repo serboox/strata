@@ -120,6 +120,35 @@ neither `tools/turbo` nor `strata-serve --turbo` needs sudo. Without that rule `
 warns. The boost is a machine-wide setting, not the model's: every program is slower without it. Speeds in this document were
 measured with the boost on.
 
+**The frequency cap.** Reading memory barely heats the CPU (four threads read 55.6 GB/s for two minutes with the package at 56 to
+61 C); the heat comes from the arithmetic of the expert kernels, and it falls faster than the speed when the highest CPU
+frequency, and the voltage with it, is lowered. Sustained speed of the IQ4_XS file with MTP under the 80 C limit, turbo off,
+`STRATA_POOL_SPIN_US=0`, eight requests of 900 tokens after two warm-up requests (one or two runs each, on one machine):
+
+| setting | tokens/s (median) | peak temperature |
+|---|---|---|
+| no cap, 2 workers | 11.0 to 14.8 | 77 to 79 C |
+| 2.2 GHz, 4 workers | 28.6 and 27.2 (two runs) | 73 and 76 C |
+| 2.4 GHz, 4 workers | 28.9 | 78 C |
+| 2.6 GHz, 4 workers | 25.3 (the pauses of the governor return) | 78 C |
+| 2.0 GHz, 6 workers | 28.8 | 74 C |
+| 2.2 GHz, 6 workers | 31.1 and 29.8 (two runs) | 77 and 78 C |
+| 2.4 GHz, 6 workers | 24.9 (the pauses return) | 80 C |
+
+The default profile `auto` holds the cap by itself: `strata-serve` runs with `--cpu-max-mhz 2200`, 6 workers and no pool spin (the
+setting of the table, `STRATA_POOL_SPIN_US=0`) and puts the old limits back when it stops (Ctrl+C and SIGTERM included; after a
+`kill -9` run `tools/cpucap reset`). `--cpu-max-mhz 0` turns the cap off, the profiles with a memory budget (`lean` to `max`) run
+without it, and 2200 MHz is two thirds of this laptop's 3.3 GHz, so another CPU needs its own value. The Q4_K_XL file at the same setting gave 29.4 tokens per second with a peak of 74 C, within 5 percent of IQ4_XS, so the file is to be chosen by memory (Q4_K_XL wants about 23 GB of free RAM, IQ4_XS about 18 GB) and quality, not by speed. `tools/cpucap status|set MHZ|reset` does the same by
+hand. The limits belong to root. A tmpfiles rule makes them group-writable for `wheel`, the way the turbo switch is:
+`z- /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq 0664 root wheel -` (kept in the machine's restore repository);
+without it the server says which limits it could not write and runs without the cap. The cap is machine-wide like the turbo
+switch: every program is slower while the server runs. The speed of one setting differed by up to a quarter between the night
+and the morning; the repeats of the two best settings came within 5 percent of the first runs.
+A package power limit did not help: with RAPL PL1 at 22 and 18 W, 6 workers and no frequency cap, the speed was 10.2 and 10.4 tokens per
+second, as without any limit, because the hardware still runs the CPU at full frequency for short bursts and the governor has to pause
+the engine. The whole model on the integrated GPU (llama.cpp with Vulkan) gave 10.8 to 11.3 tokens per second with the package at
+59 to 65 C, and 8.8 with the discrete card added by a layer split.
+
 ## Staying in the background
 
 The model keeps three or four cores busy for as long as it generates. At the default priority the browser, the editor and the

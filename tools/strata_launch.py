@@ -11,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(1, str(Path(__file__).resolve().parent))
+from serve.cpucap import MAX_MHZ, MIN_MHZ  # noqa: E402
 from serve.thermal import MAX_LIMIT_C, MIN_LIMIT_C  # noqa: E402
 MODEL_DIR = ROOT / "models" / "qwen3.6-35b-a3b"
 MODEL_FILE = MODEL_DIR / "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
@@ -64,6 +65,24 @@ IQ_EXPERT_TYPES = ("IQ3_S", "IQ4_XS")
 IQ_KERNELS_ENV = {"STRATA_IQ_VBMI": "1"}
 IQ_KERNELS_OFF_ENV = {"STRATA_IQ_VBMI": "0"}
 
+# The setting measured on the author's laptop (i7-11370H, turbo off, 80 C limit): the highest CPU frequency, the pool workers
+# and the pool spin that held 30 tokens per second for minutes instead of 11 to 15; see "The frequency cap" in docs/TUNING.md.
+DEFAULT_CPU_MAX_MHZ = 2200.0
+CAPPED_WORKERS = 6
+CAPPED_ENV = {"STRATA_POOL_SPIN_US": "0"}
+
+
+def resolve_cpu_cap(profile_name: str, requested: float | None) -> float:
+    """The CPU frequency cap in MHz: what was asked for, else the measured default for the profile without a memory limit."""
+    if requested is not None:
+        return requested
+    return DEFAULT_CPU_MAX_MHZ if profile_name == "auto" else 0.0
+
+
+def engine_environment(kernel_env: dict | None, cpu_max_mhz: float) -> dict | None:
+    env = {**(kernel_env or {}), **(CAPPED_ENV if cpu_max_mhz else {})}
+    return env or None
+
 
 def uses_iq_experts(model: Path) -> bool:
     """Whether the expert tensors of this GGUF file are stored as IQ3_S or IQ4_XS, the formats the AVX-512 kernels serve."""
@@ -95,6 +114,8 @@ def build_config(profile: dict, port: int, sampling: str, max_temp: float = 0, e
         config["sampling"] = GREEDY_SAMPLING
     if max_temp > 0:
         config["thermal"] = {"max_temp_c": max_temp}
+    if profile.get("cpu_max_mhz"):
+        config.setdefault("thermal", {})["cpu_max_mhz"] = profile["cpu_max_mhz"]
     if env:
         config["env"] = dict(env)
     return config
@@ -338,6 +359,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-temp", type=float, default=80.0, metavar="C",
                         help="pause the engine for part of the time whenever the CPU package or the GPU reaches this many "
                              "degrees Celsius (default 80, 0 turns the limit off)")
+    parser.add_argument("--cpu-max-mhz", type=float, default=None, metavar="MHZ",
+                        help="hold the highest CPU frequency at this many MHz while the server runs and put it back at exit "
+                             f"(default {DEFAULT_CPU_MAX_MHZ:g} with the auto profile, with {CAPPED_WORKERS} workers and no pool spin; 0 turns the "
+                             "cap off, and so do the other profiles); a lower cap lets the model run without pauses, see the frequency cap in docs/TUNING.md")
     parser.add_argument("--turbo", choices=("off", "on", "keep"), default="off",
                         help="CPU turbo boost at start: off (default), on, or keep what it is (tools/turbo does the same on its own)")
     parser.add_argument("--priority", choices=("background", "normal"), default="background",
@@ -362,6 +387,10 @@ def main() -> int:
     if not (args.max_temp == 0 or (math.isfinite(args.max_temp) and MIN_LIMIT_C <= args.max_temp <= MAX_LIMIT_C)):
         parser.error(f"--max-temp must be 0 (off) or from {MIN_LIMIT_C:g} to {MAX_LIMIT_C:g} degrees Celsius, not {args.max_temp:g}")
 
+    cpu_max_mhz = resolve_cpu_cap(args.profile, args.cpu_max_mhz)
+    if not (cpu_max_mhz == 0 or (math.isfinite(cpu_max_mhz) and MIN_MHZ <= cpu_max_mhz <= MAX_MHZ)):
+        parser.error(f"--cpu-max-mhz must be 0 (off) or from {MIN_MHZ:g} to {MAX_MHZ:g} MHz, not {cpu_max_mhz:g}")
+
     global MODEL_FILE
     if args.model:
         MODEL_FILE = args.model.expanduser().resolve()
@@ -376,6 +405,9 @@ def main() -> int:
         profile["chunk"] = args.chunk
     if args.mtp is not None:
         profile["mtp"] = args.mtp
+    if cpu_max_mhz:
+        profile["cpu_max_mhz"] = cpu_max_mhz
+        profile["workers"] = CAPPED_WORKERS
     if args.workers:
         profile["workers"] = args.workers
     for path in (ROOT / "build" / "strata-q36", MODEL_FILE):
@@ -386,7 +418,7 @@ def main() -> int:
     (ROOT / "logs").mkdir(exist_ok=True)
     config_path = RUN_DIR / "qwen36.json"
     kernel_env = iq_kernel_env(args.iq_kernels, MODEL_FILE)
-    config = build_config(profile, args.port, args.sampling, args.max_temp, kernel_env)
+    config = build_config(profile, args.port, args.sampling, args.max_temp, engine_environment(kernel_env, cpu_max_mhz))
     config_path.write_text(json.dumps(config, indent=1) + "\n", encoding="utf-8")
 
     server = [str(ROOT / ".venv" / "bin" / "python"), str(ROOT / "serve" / "server.py"), "--engine", "strata", "--config",
@@ -411,7 +443,8 @@ def main() -> int:
     command = wrap_in_scope(server, scope_properties(memory_budget, background, memory_low), always=scope_for_prewarm)
     print(f"strata-launch: profile {args.profile}, memory budget {profile['ram'] or 'none (elastic page cache)'}, context {profile['context']}, "
           f"port {args.port}, temperature limit {f'{args.max_temp:g} C' if args.max_temp > 0 else 'none'}, turbo {args.turbo}, "
-          f"priority {args.priority}, model {MODEL_FILE.name}, iq kernels {iq_kernel_state(kernel_env)}" + (f", memory protection {memory_low / GIB:.1f} GiB" if memory_low else "")
+          f"priority {args.priority}, model {MODEL_FILE.name}, iq kernels {iq_kernel_state(kernel_env)}"
+          + (f", cpu cap {cpu_max_mhz:g} MHz" if cpu_max_mhz else "") + (f", memory protection {memory_low / GIB:.1f} GiB" if memory_low else "")
           + (f", prewarm {prewarm_bytes / GIB:.1f} GiB" if prewarm_bytes else ""), file=sys.stderr)
     apply_turbo(args.turbo, args.dry_run)
     apply_priority(args.priority, args.dry_run)

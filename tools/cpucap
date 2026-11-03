@@ -1,0 +1,36 @@
+#!/usr/bin/env python3
+import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+from serve import cpucap  # noqa: E402
+
+RULE_HINT = "the limits belong to root: make them group-writable with the tmpfiles rule of docs/TUNING.md, or run this with sudo"
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(description="Show, set or reset the highest frequency every CPU may use.")
+    parser.add_argument("action", choices=("status", "set", "reset"))
+    parser.add_argument("mhz", nargs="?", type=float, help="the highest frequency in MHz (set only)")
+    args = parser.parse_args(argv)
+    if args.action == "status":
+        print(cpucap.describe(cpucap.CPU_ROOT))
+        return 0
+    if args.action == "reset":
+        failures = cpucap.reset(cpucap.CPU_ROOT)
+        if failures:
+            print(f"cpucap: {len(failures)} limits could not be written ({failures[0]}); {RULE_HINT}", file=sys.stderr)
+            return 1
+        print(cpucap.describe(cpucap.CPU_ROOT))
+        return 0
+    if args.mhz is None or not cpucap.MIN_MHZ <= args.mhz <= cpucap.MAX_MHZ:
+        parser.error(f"set needs a frequency from {cpucap.MIN_MHZ:g} to {cpucap.MAX_MHZ:g} MHz")
+    cap = cpucap.CpuCap(args.mhz, log=lambda message: print(message, file=sys.stderr), root=cpucap.CPU_ROOT)
+    failures = cap.apply()
+    print(cpucap.describe(cpucap.CPU_ROOT))
+    return 1 if failures else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

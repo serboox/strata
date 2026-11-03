@@ -59,6 +59,9 @@ measured before the AVX-512 kernels (see [docs/TUNING.md](docs/TUNING.md)).
 `--max-temp C` (80 by default, 0 turns it off) pauses the engine for part of the time while the CPU or the GPU is that hot,
 and `--turbo off|on|keep` (off by default) sets the CPU turbo boost at start; `tools/turbo on|off|status` does the latter on
 its own (see "Heat and turbo" in [docs/TUNING.md](docs/TUNING.md)).
+`--cpu-max-mhz MHZ` (2200 with the `auto` profile, 0 turns it off) holds the highest CPU frequency at that value while the server
+runs and puts it back at exit; with 6 workers it more than doubled the sustained speed on the author's laptop (see "The frequency
+cap" in [docs/TUNING.md](docs/TUNING.md)).
 `--protect-ram` and `--prewarm` (both on by default; `--no-protect-ram` and `--no-prewarm` turn them off) ask the kernel to
 keep the cached model in memory and read it in before the start (see "Keeping the model in memory" in [docs/TUNING.md](docs/TUNING.md)).
 `--context` and `--chunk` change the context window and the prompt chunk, the two things that compete for the 4 GB of

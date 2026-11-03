@@ -73,6 +73,45 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config["env"], {"STRATA_IQ_VBMI": "1"})
         self.assertEqual(config["thermal"], {"max_temp_c": 80.0})
 
+    def test_the_cpu_cap_joins_the_thermal_block(self):
+        config = strata_launch.build_config({**self.profile, "cpu_max_mhz": 2200.0}, 8080, "greedy", 80.0)
+        self.assertEqual(config["thermal"], {"max_temp_c": 80.0, "cpu_max_mhz": 2200.0})
+
+    def test_the_cpu_cap_works_without_a_temperature_limit(self):
+        config = strata_launch.build_config({**self.profile, "cpu_max_mhz": 2200.0}, 8080, "greedy", 0)
+        self.assertEqual(config["thermal"], {"cpu_max_mhz": 2200.0})
+
+    def test_a_profile_without_the_cap_key_has_none_in_the_config(self):
+        self.assertNotIn("cpu_max_mhz", strata_launch.build_config(dict(self.profile), 8080, "greedy", 80.0)["thermal"])
+
+    def test_the_cap_is_not_given_on_the_command_line_by_default(self):
+        self.assertIsNone(strata_launch.build_parser().parse_args([]).cpu_max_mhz)
+
+    def test_the_auto_profile_gets_the_measured_cap_unless_told_otherwise(self):
+        self.assertEqual(strata_launch.resolve_cpu_cap("auto", None), strata_launch.DEFAULT_CPU_MAX_MHZ)
+        self.assertEqual(strata_launch.resolve_cpu_cap("auto", 0), 0)
+        self.assertEqual(strata_launch.resolve_cpu_cap("auto", 2400.0), 2400.0)
+
+    def test_the_profiles_with_a_memory_budget_have_no_cap_unless_asked(self):
+        for name in ("lean", "balanced", "fast", "max"):
+            self.assertEqual(strata_launch.resolve_cpu_cap(name, None), 0)
+            self.assertEqual(strata_launch.resolve_cpu_cap(name, 1800.0), 1800.0)
+
+    def test_the_cap_brings_the_pool_spin_to_the_engine_environment(self):
+        self.assertEqual(strata_launch.engine_environment(None, 2200.0), {"STRATA_POOL_SPIN_US": "0"})
+        self.assertEqual(strata_launch.engine_environment(strata_launch.IQ_KERNELS_ENV, 2200.0),
+                         {"STRATA_IQ_VBMI": "1", "STRATA_POOL_SPIN_US": "0"})
+
+    def test_without_a_cap_the_engine_environment_is_the_kernel_one_or_none(self):
+        self.assertIsNone(strata_launch.engine_environment(None, 0))
+        self.assertEqual(strata_launch.engine_environment(strata_launch.IQ_KERNELS_ENV, 0), {"STRATA_IQ_VBMI": "1"})
+
+    def test_a_cap_outside_the_range_is_refused(self):
+        for bad in ("100", "20000", "-5", "nan"):
+            with mock.patch.object(sys, "argv", ["strata-launch", "--cpu-max-mhz", bad]), self.assertRaises(SystemExit) as raised:
+                strata_launch.main()
+            self.assertEqual(raised.exception.code, 2)
+
     def test_the_model_given_on_the_command_line_is_served(self):
         args = strata_launch.build_parser().parse_args(["--model", "/tmp/other.gguf"])
         self.assertEqual((args.model, args.iq_kernels), (Path("/tmp/other.gguf"), "auto"))
