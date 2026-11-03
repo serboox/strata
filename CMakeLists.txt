@@ -67,7 +67,7 @@ endif()
 add_library(strata_kernels_cpu STATIC
   src/kernels/cpu/expert.cpp src/kernels/cpu/pool.cpp src/kernels/cpu/expert_layout.cpp src/kernels/cpu/hadamard.cpp
   src/kernels/cpu/native_expert.cpp src/kernels/cpu/q2_avx2.cpp src/kernels/cpu/q2_avx1.cpp
-  src/kernels/cpu/iq_avx512.cpp src/kernels/cpu/iq_avx2.cpp src/kernels/cpu/iq_avx1.cpp
+  src/kernels/cpu/iq_avx512.cpp src/kernels/cpu/iq3s_vbmi.cpp src/kernels/cpu/iq4xs_vnni.cpp src/kernels/cpu/iq_avx2.cpp src/kernels/cpu/iq_avx1.cpp
   src/kernels/cpu/kq_avx2.cpp src/kernels/cpu/kq_avx512.cpp
   src/kernels/cpu/nvfp4_avx512.cpp src/kernels/cpu/nvfp4_avx2.cpp
   src/kernels/cpu/tq_cpu.cpp src/kernels/cpu/tq_avx2.cpp src/kernels/cpu/tq_avx512.cpp)
@@ -79,6 +79,10 @@ set_source_files_properties(src/kernels/cpu/expert.cpp PROPERTIES COMPILE_OPTION
 set_source_files_properties(src/kernels/cpu/q2_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mf16c")
 set_source_files_properties(src/kernels/cpu/iq_avx512.cpp src/kernels/cpu/nvfp4_avx512.cpp PROPERTIES COMPILE_OPTIONS
   "-mavx512f;-mavx512bw;-mavx512vl;-mavx512dq;-mavx512vnni;-mavx512vbmi;-mavx512vpopcntdq;-mbmi2;-mf16c;-mfma")
+set_source_files_properties(src/kernels/cpu/iq3s_vbmi.cpp PROPERTIES COMPILE_OPTIONS
+  "-mavx512f;-mavx512bw;-mavx512vl;-mavx512vbmi;-mavx512bitalg;-mbmi2;-mf16c;-mfma")
+set_source_files_properties(src/kernels/cpu/iq4xs_vnni.cpp PROPERTIES COMPILE_OPTIONS
+  "-mavx512f;-mavx512bw;-mavx512vl;-mavx512vnni;-mbmi2;-mf16c;-mfma")
 set_source_files_properties(src/kernels/cpu/iq_avx2.cpp src/kernels/cpu/kq_avx2.cpp src/kernels/cpu/nvfp4_avx2.cpp
   src/kernels/cpu/tq_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mf16c")
 set_source_files_properties(src/kernels/cpu/tq_avx512.cpp PROPERTIES COMPILE_OPTIONS
@@ -93,6 +97,11 @@ set_property(SOURCE src/kernels/cpu/q2_avx2.cpp src/kernels/cpu/iq_avx2.cpp APPE
 add_executable(kq512_parity EXCLUDE_FROM_ALL tests/kq512_parity.cpp)
 target_include_directories(kq512_parity PRIVATE ${_strata_include} ${_ggml_include} third_party/ggml)
 target_link_libraries(kq512_parity PRIVATE strata_kernels_cpu)
+
+# The IQ3_S and IQ4_XS AVX-512 kernels against ggml's dots, and their speed: `ninja iq_vbmi_bench && ./iq_vbmi_bench [--bench --threads 1]`
+add_executable(iq_vbmi_bench EXCLUDE_FROM_ALL tests/iq_vbmi_bench.cpp)
+target_include_directories(iq_vbmi_bench PRIVATE ${_strata_include} ${_ggml_include} third_party/ggml)
+target_link_libraries(iq_vbmi_bench PRIVATE strata_kernels_cpu)
 
 # ---- CUDA kernels of the Qwen3.6 path
 add_library(strata_cuda_kernels STATIC
