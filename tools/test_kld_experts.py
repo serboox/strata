@@ -170,36 +170,50 @@ class BaseLogitsTests(unittest.TestCase):
         self.ref = self.root / "ref.gguf"
         self.ref.write_bytes(b"0123456789")
         self.base = self.root / "base.kld"
+        self.binary = self.root / "llama-perplexity"
+        self.binary.write_bytes(b"binary")
 
     def tearDown(self):
         self.directory.cleanup()
 
     def test_a_missing_file_is_not_reusable(self):
-        signature = kld_experts.base_signature(self.ref, "abc", 512, 24)
+        signature = kld_experts.base_signature(self.ref, "abc", 512, 24, ["-ngl", "99"], self.binary)
         self.assertEqual(kld_experts.reusable_base(self.base, signature)[0], False)
 
     def test_a_file_saved_with_the_same_inputs_is_reused(self):
-        signature = kld_experts.base_signature(self.ref, "abc", 512, 24)
+        signature = kld_experts.base_signature(self.ref, "abc", 512, 24, ["-ngl", "99"], self.binary)
         self.base.write_bytes(b"x")
         kld_experts.sidecar_path(self.base).write_text(json.dumps(signature))
         self.assertEqual(kld_experts.reusable_base(self.base, signature), (True, ""))
 
     def test_a_different_text_context_chunks_or_reference_is_refused_and_named(self):
-        saved = kld_experts.base_signature(self.ref, "abc", 512, 24)
+        saved = kld_experts.base_signature(self.ref, "abc", 512, 24, ["-ngl", "99"], self.binary)
         self.base.write_bytes(b"x")
         kld_experts.sidecar_path(self.base).write_text(json.dumps(saved))
-        usable, reason = kld_experts.reusable_base(self.base, kld_experts.base_signature(self.ref, "other", 1024, 24))
+        usable, reason = kld_experts.reusable_base(self.base, kld_experts.base_signature(self.ref, "other", 1024, 24, ["-ngl", "99"], self.binary))
         self.assertFalse(usable)
         self.assertIn("ctx", reason)
         self.assertIn("text_sha256", reason)
         self.ref.write_bytes(b"0123456789 and more")
-        usable, reason = kld_experts.reusable_base(self.base, kld_experts.base_signature(self.ref, "abc", 512, 24))
+        usable, reason = kld_experts.reusable_base(self.base, kld_experts.base_signature(self.ref, "abc", 512, 24, ["-ngl", "99"], self.binary))
         self.assertFalse(usable)
         self.assertIn("ref_size", reason)
 
     def test_a_file_without_a_description_is_refused(self):
         self.base.write_bytes(b"x")
-        self.assertFalse(kld_experts.reusable_base(self.base, kld_experts.base_signature(self.ref, "abc", 512, 24))[0])
+        self.assertFalse(kld_experts.reusable_base(self.base, kld_experts.base_signature(self.ref, "abc", 512, 24, ["-ngl", "99"], self.binary))[0])
+
+    def test_other_llama_arguments_or_another_binary_make_the_saved_file_unusable(self):
+        saved = kld_experts.base_signature(self.ref, "abc", 512, 24, ["-ngl", "99"], self.binary)
+        self.base.write_bytes(b"x")
+        kld_experts.sidecar_path(self.base).write_text(json.dumps(saved))
+        usable, reason = kld_experts.reusable_base(self.base, kld_experts.base_signature(self.ref, "abc", 512, 24, ["-ngl", "0"], self.binary))
+        self.assertFalse(usable)
+        self.assertIn("llama_args", reason)
+        self.binary.write_bytes(b"another build")
+        usable, reason = kld_experts.reusable_base(self.base, kld_experts.base_signature(self.ref, "abc", 512, 24, ["-ngl", "99"], self.binary))
+        self.assertFalse(usable)
+        self.assertIn("binary_size", reason)
 
 
 class RowTests(unittest.TestCase):
@@ -212,8 +226,8 @@ class RowTests(unittest.TestCase):
         row = kld_experts.measurement_row(6, MODEL_LOG % 8 + llama_summary(), finished())
         self.assertIn("override was not applied", row["status"])
 
-    def test_a_log_without_the_expert_line_is_not_an_error(self):
-        self.assertEqual(kld_experts.measurement_row(6, llama_summary(), finished())["status"], "ok")
+    def test_a_log_without_the_expert_line_is_unconfirmed_not_ok(self):
+        self.assertTrue(kld_experts.measurement_row(6, llama_summary(), finished())["status"].startswith("unconfirmed"))
 
     def test_a_failed_run_says_so(self):
         self.assertIn("exited with 1", kld_experts.measurement_row(6, "", finished(returncode=1))["status"])

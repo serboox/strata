@@ -148,10 +148,12 @@ def build_hint(environ=os.environ, home: Path | None = None) -> str:
             f"nice -n 19 cmake --build {source}/build --target llama-perplexity -j3")
 
 
-def base_signature(ref_model: Path, text_sha256: str, ctx: int, chunks: int) -> dict:
+def base_signature(ref_model: Path, text_sha256: str, ctx: int, chunks: int, llama_args: list, binary: Path) -> dict:
     status = ref_model.stat()
+    program = binary.stat()
     return {"ref_model": str(ref_model.resolve()), "ref_size": status.st_size, "ref_mtime_ns": status.st_mtime_ns,
-            "text_sha256": text_sha256, "ctx": ctx, "chunks": chunks}
+            "text_sha256": text_sha256, "ctx": ctx, "chunks": chunks, "llama_args": llama_args,
+            "binary": str(binary.resolve()), "binary_size": program.st_size, "binary_mtime_ns": program.st_mtime_ns}
 
 
 def sidecar_path(base_logits: Path) -> Path:
@@ -245,6 +247,8 @@ def measurement_row(k: int, output: str, run: WatchedRun) -> dict:
         row["status"] = f"no KL divergence summary (it needs at least {MIN_SCORED_TOKENS} scored tokens: more text or chunks)"
     elif logged is not None and logged != k:
         row["status"] = f"llama.cpp loaded the model with {logged} experts per token, not {k}: the override was not applied"
+    elif logged is None:
+        row["status"] = "unconfirmed: llama.cpp did not print the experts per token, so the override is not proven"
     else:
         row["status"] = "ok"
     return row
@@ -399,7 +403,7 @@ def main(argv: list | None = None) -> int:
         print("kld-experts: refusing to start: " + "; ".join(problems) + " (--force overrides the machine checks)", file=sys.stderr)
         return 2
 
-    signature = base_signature(args.ref_model, text_info["sha256"], args.ctx, args.chunks)
+    signature = base_signature(args.ref_model, text_info["sha256"], args.ctx, args.chunks, args.llama_args, binary)
     reuse, reason = reusable_base(base_logits, signature)
     if base_logits.exists() and not reuse:
         print(f"kld-experts: {base_logits} exists but cannot be used: {reason}; give another --base-logits or remove it", file=sys.stderr)
