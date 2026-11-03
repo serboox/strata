@@ -614,15 +614,22 @@ def convert(source: Path, dest: Path, groups: tuple, chunk_bytes: int = DEFAULT_
         problems = check_output(plan, part)
         if problems:
             raise ValueError("the output failed its check: " + "; ".join(problems[:5]))
-        if dest.exists():
-            raise FileExistsError(f"{dest} appeared while the conversion ran")
-        os.rename(part, dest)
+        publish_without_replacing(part, dest)
     except BaseException:
         sink.abort()
         if part.exists():
             part.unlink()
         raise
     return plan
+
+
+def publish_without_replacing(part: Path, dest: Path) -> None:
+    """Gives `part` the name `dest`; a `dest` that exists, also one created a moment ago, stays untouched and is an error."""
+    try:
+        os.link(part, dest)
+    except FileExistsError:
+        raise FileExistsError(f"{dest} already exists or appeared while the conversion ran") from None
+    part.unlink()
 
 
 def selftest(blocks: int, out=sys.stdout, benchmark_blocks: int = SELFTEST_BENCHMARK_BLOCKS) -> bool:

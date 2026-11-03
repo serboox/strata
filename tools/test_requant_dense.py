@@ -271,6 +271,23 @@ class ConversionTests(unittest.TestCase):
         self.assertIn("already exists", err)
         self.assertEqual(self.run_cli(self.source, self.dest, "--dry-run")[0], 1)
 
+    def test_a_destination_that_appears_during_the_run_is_not_replaced(self):
+        part = self.dest.with_name(self.dest.name + ".moved")
+        part.write_bytes(b"new result")
+        self.dest.write_bytes(b"created by another process")
+        with self.assertRaises(FileExistsError):
+            rd.publish_without_replacing(part, self.dest)
+        self.assertEqual(self.dest.read_bytes(), b"created by another process")
+        self.assertTrue(part.exists())
+        part.unlink()
+
+    def test_publishing_gives_the_part_file_its_final_name_and_removes_the_old_one(self):
+        part = self.dest.with_name(self.dest.name + ".moved")
+        part.write_bytes(b"new result")
+        rd.publish_without_replacing(part, self.dest)
+        self.assertEqual(self.dest.read_bytes(), b"new result")
+        self.assertFalse(part.exists())
+
     def test_a_stale_part_file_is_not_overwritten_or_deleted(self):
         self.part.write_bytes(b"stale")
         with self.assertRaises(FileExistsError):
