@@ -321,8 +321,8 @@ Turning it on:
 How it works: at start the chosen experts' bytes (not the whole model) are copied into iGPU buffers, 3 tensors per layer, so the
 RAM use grows by about the share times the experts' size (1.5 to 1.9 MB per expert; the engine prints the total, about 4 GiB at
 0.25 for 41 layers). The share is fixed, no uploads at run time. Without routing statistics at start the rule is the experts
-that follow the VRAM-resident block (`resident ... resident + share * 256`, wrapping around), so the first steps already send
-their misses to the iGPU. Per layer, the entries that miss the VRAM slots and belong to the iGPU's set go to a worker thread
+that follow the VRAM-resident block (`resident ... resident + share * 256`, cut short where the block's experts would begin), so the
+first steps already send their misses to the iGPU. Per layer, the entries that miss the VRAM slots and belong to the iGPU's set go to a worker thread
 that runs the expert FFN (gate, up, SwiGLU, down) as one ggml graph and writes the rows where the pool writes its own, the
 engine merges them with the router weights as before; the pool takes the other misses and runs meanwhile. The iGPU uses float
 activations and its own summation order, so its rows differ from the pool's by rounding noise (see below).
