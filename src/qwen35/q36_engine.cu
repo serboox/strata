@@ -5296,6 +5296,8 @@ int strata::qwen35::run(int argc, char** argv) {
         uint64_t h = E.fnv(&size, sizeof size);
         h = E.fnv(&when, sizeof when, h);
         h = E.fnv(build.data(), build.size(), h);
+        const char* experts_used = std::getenv(strata::core::kExpertsUsedEnv);
+        if (experts_used != nullptr && *experts_used != '\0') h = E.fnv(&m.top_k, sizeof m.top_k, h);   // a state made with fewer experts must not load into a run with another count
         const int64_t shape[5] = {kv_q8 ? 1 : 0, m.g.head_dim, m.g.n_head_kv, m.g.n_layers, (int64_t) E.ctx};
         E.ckpt_sig = E.fnv(shape, sizeof shape, h);
     }
