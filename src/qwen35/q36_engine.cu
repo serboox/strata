@@ -17,6 +17,7 @@
 // Modes: --serve (serve/server.py's engine protocol: READY / GEN / T / DONE / STOP / PP), --tokens IDS [--n N]
 // [--force IDS] [--dump-full-logits F] (tools/qwen35/kl.py's reference interface), --bench-pp N / --bench-tg N.
 #include "strata/artifact/gguf_reader.hpp"
+#include "strata/core/experts_used.hpp"
 #include "strata/core/family_layout.hpp"
 #include "strata/kernels/fused_gdn.hpp"
 #include "strata/kernels/iq_kernels.hpp"
@@ -1248,6 +1249,13 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp) {
         err = "a geometry this driver's kernels do not take (head 256, state 128, conv 4, <= 512 experts, top-k <= 15)";
         return false;
     }
+    const int64_t file_top_k = m.top_k;
+    if (!strata::core::resolve_experts_used(std::getenv(strata::core::kExpertsUsedEnv), file_top_k, m.top_k, err)) return false;
+    if (m.top_k != file_top_k) {
+        m.g.n_expert_used = m.top_k;
+        std::fprintf(stderr, "strata-q36: %s: %lld of the model's %lld routed experts per token\n", strata::core::kExpertsUsedEnv,
+                     (long long) m.top_k, (long long) file_top_k);
+    }
     const std::string p = "qwen35moe.";
     if (const strata::MetaValue* v = gm.meta().get(p + "attention.layer_norm_rms_epsilon")) m.eps = (float) v->num();
     if (const strata::MetaValue* v = gm.meta().get(p + "rope.freq_base")) m.rope_base = (float) v->num();
@@ -2461,13 +2469,13 @@ struct Engine {
     bool route_group(const Layer& L, const int32_t* slot_of, int T, int ld) {
         const int Kp = (int) m->top_k;
         grouped_by_route = false;
-        if (!fast_k || T > 8 || m->g.n_expert != 256 || Kp != 8) return false;
+        if (!fast_k || T > 8 || m->g.n_expert != 256 || !q36k::route_group_supports(Kp)) return false;
         if (slot_of)
-            q36k::k_route_group<true><<<1, dim3(32, 8), 0, st>>>(logits_r, ids, ewts, T, ld, slot_of, L.blobs, L.stride, grp_ptr,
-                                                                 grp_start, n_groups, ent_dst, ent_tok);
+            q36k::route_group_launch<true>(Kp, logits_r, ids, ewts, T, ld, slot_of, L.blobs, L.stride, grp_ptr, grp_start, n_groups,
+                                           ent_dst, ent_tok, st);
         else
-            q36k::k_route_group<false><<<1, dim3(32, 8), 0, st>>>(logits_r, ids, ewts, T, ld, nullptr, L.blobs, L.stride, grp_ptr,
-                                                                  grp_start, n_groups, ent_dst, ent_tok);
+            q36k::route_group_launch<false>(Kp, logits_r, ids, ewts, T, ld, nullptr, L.blobs, L.stride, grp_ptr, grp_start,
+                                            n_groups, ent_dst, ent_tok, st);
         grouped_by_route = true;
         if (verify_k) {
             // the old top-k into scratch, the ids / weights compared, then the old grouping of the new ids
@@ -2713,7 +2721,7 @@ struct Engine {
         const bool one = T == 1;
         // a decode batch of up to 8 rows takes the router and the shared expert's gate in one product too (rows of 257) when the fused
         // router follows; the prompt chunks and the checks keep the separate products
-        const bool ext = one || (fast_k && std::getenv("STRATA_Q36_NO_EXT") == nullptr && !verify_k && T <= kGemmT && g.n_expert == 256 && Kp == 8);
+        const bool ext = one || (fast_k && std::getenv("STRATA_Q36_NO_EXT") == nullptr && !verify_k && T <= kGemmT && g.n_expert == 256 && q36k::route_group_supports(Kp));
         if (ext) f32mm(L.router_ext, h, logits_r, N, (int) g.n_expert + 1, T);
         else f32mm(L.router, h, logits_r, N, (int) g.n_expert, T);
         // the hybrid rows path: a batch of up to hybrid_t rows; when only the MTP block is hybrid, its every batch
