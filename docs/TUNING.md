@@ -299,6 +299,57 @@ because the order of the float additions differs. The Q4_K_XL path does not use 
 the Q4_K_XL, `tools/gguf_graft.py`) loads and answers with and without the flag, with the same 378 characters of greedy text; its
 speed through the server is not yet measured on a free machine.
 
+## Experts on the Iris Xe iGPU (opt-in, needs a special build)
+
+In the hybrid mode the CPU pool computes every expert that has no VRAM slot. The integrated GPU can take part of that work: it
+computes a fixed share of each layer's routed experts through ggml's Vulkan backend while the pool computes the others, for the
+same token at the same time. Measured earlier with llama.cpp (the whole model on the iGPU alone): 10 to 11 tok/s at about 59 C,
+because the iGPU does the arithmetic instead of the CPU cores. Whether the split gains anything is not measured yet: the iGPU and
+the cores share the memory bandwidth and the package's power budget, and every layer pays for a launch and a join.
+
+Turning it on:
+
+1. Build with `-DSTRATA_IGPU_VULKAN=ON` (`tools/build.sh -DSTRATA_IGPU_VULKAN=ON`). It needs `glslc`, the Vulkan and SPIR-V headers and
+   a Vulkan driver (Mesa ANV for the Iris Xe); the shaders are compiled at build time. The default build does not change: with
+   the option off nothing of it is compiled or linked. `third_party/llama.cpp/ggml/src/ggml-vulkan` is the one of the pinned ggml
+   commit; `tools/vendor_ggml.sh --with-vulkan <llama.cpp checkout of that commit>` refreshes it.
+2. `STRATA_IGPU_EXPERTS=0.25` (or `strata_launch.py --igpu-experts 0.25`): the fraction of every layer's 256 experts that the iGPU
+   holds, above 0 and below 1; unset or 0 is off. `STRATA_IGPU_DEVICE=<index or part of the name>` picks the Vulkan device; the
+   default is the first integrated GPU, never the NVIDIA card. A binary built without the option, a missing device or an expert
+   format the iGPU cannot run prints one line to stderr and runs as before.
+
+How it works: at start the chosen experts' bytes (not the whole model) are copied into iGPU buffers, 3 tensors per layer, so the
+RAM use grows by about the share times the experts' size (1.5 to 1.9 MB per expert; the engine prints the total, about 4 GiB at
+0.25 for 41 layers). The share is fixed, no uploads at run time. Without routing statistics at start the rule is the experts
+that follow the VRAM-resident block (`resident ... resident + share * 256`, wrapping around), so the first steps already send
+their misses to the iGPU. Per layer, the entries that miss the VRAM slots and belong to the iGPU's set go to a worker thread
+that runs the expert FFN (gate, up, SwiGLU, down) as one ggml graph and writes the rows where the pool writes its own, the
+engine merges them with the router weights as before; the pool takes the other misses and runs meanwhile. The iGPU uses float
+activations and its own summation order, so its rows differ from the pool's by rounding noise (see below).
+
+What to watch: the package temperature as usual (the iGPU draws from the same package power budget, and nothing here changes a
+frequency or a power limit), and `STRATA_IGPU_STATS=1`, which prints per decode step the entries that went to the iGPU, the
+worker's time, the CPU pool's time and the time the CPU side waited for the worker at the join. If the wait is large the iGPU is
+the bottleneck and the share is too high; if it is always zero and the pool time did not shrink, the iGPU gets too little.
+The first call per expert format takes 0.2 to 0.5 s (the driver builds its pipelines), which the warm-up absorbs. The worker is one
+more thread next to the pool's. Only the decode and small-batch path uses the iGPU; a prompt chunk streamed through the staging
+buffers does not.
+
+Verifying: `ninja igpu_parity && ./igpu_parity` (a few seconds on the iGPU, no model) feeds synthetic quantised experts of eight
+format pairs (IQ4_XS, IQ3_S, Q4_K, Q5_K, Q6_K, Q8_0) to the worker and prints the relative error against ggml-cpu's dot
+products (what the pool computes) and against exact float arithmetic. It fails when the iGPU is further from exact than three
+times the pool's own distance (plus 1e-3) or more than 5e-2 from the pool's rows. On the Iris Xe (Mesa ANV) the rows differ from
+the pool's by a relative 2.5e-2 to 3.1e-2 (L2 over a row) for IQ4_XS, IQ3_S, Q4_K, Q5_K and Q6_K, and by 1e-7 for Q8_0; against exact
+arithmetic the iGPU is at 1.4e-2 and the pool at 2.4e-2 to 3.0e-2, because the pool rounds its activations to 256-value blocks and the
+iGPU to 32-value ones. `./igpu_parity --bench` prints the latency of one layer's call at the model's expert shape (2048 by 512) for 1 to 16 entries, split into
+graph building, row transfer and the run on the device. On the Iris Xe, with the machine lightly loaded: 0.75 to 0.9 ms for 1 entry,
+1.2 to 1.3 for 2, 1.7 for 4, 2.3 for 8 and 5 to 6.4 for 16; nearly all of it is the run on the device (the transfer is 0.13 to 0.24 ms,
+the graph 0.01). The iGPU is at least twice as slow per entry as the whole pool, so it can only take a few entries of a layer:
+`STRATA_IGPU_MAX_ENTRIES` (default 8) caps the entries one layer sends to it, the pool computes the others, also for the iGPU's experts.
+Known risks: the extra RAM, the shared
+bandwidth, an iGPU failure mid-run stops the engine (a wrong row would be worse), and a share chosen without statistics may
+overlap experts that later move into the VRAM slots (those entries then never reach the iGPU).
+
 ## Against llama.cpp
 
 llama.cpp b3fa6995 on the same machine (`-ngl 99 --n-cpu-moe 99 -t 4 -fa on`, experts on the CPU, no drafting), greedy
