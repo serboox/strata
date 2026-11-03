@@ -30,6 +30,15 @@ set(GGML_BACKEND_DL OFF CACHE BOOL "" FORCE)
 set(GGML_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(GGML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(GGML_NATIVE ON CACHE BOOL "" FORCE)
+# Part of the hybrid path's routed experts on a Vulkan iGPU (ggml-vulkan, vendored beside the base library).  OFF: nothing
+# of it is configured or compiled.
+option(STRATA_IGPU_VULKAN "compute a share of the hybrid path's routed experts on the iGPU through ggml-vulkan" OFF)
+if(STRATA_IGPU_VULKAN)
+  if(NOT EXISTS ${STRATA_GGML_DIR}/ggml/src/ggml-vulkan/CMakeLists.txt)
+    message(FATAL_ERROR "STRATA_IGPU_VULKAN needs ggml-vulkan in ${STRATA_GGML_DIR}: tools/vendor_ggml.sh --with-vulkan <llama.cpp checkout of the commit in VERSION.txt>")
+  endif()
+  set(GGML_VULKAN ON CACHE BOOL "" FORCE)
+endif()
 add_subdirectory(${STRATA_GGML_DIR}/ggml ${CMAKE_BINARY_DIR}/ggml EXCLUDE_FROM_ALL)
 set_target_properties(ggml-base PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
@@ -103,6 +112,18 @@ add_executable(iq_vbmi_bench EXCLUDE_FROM_ALL tests/iq_vbmi_bench.cpp)
 target_include_directories(iq_vbmi_bench PRIVATE ${_strata_include} ${_ggml_include} third_party/ggml)
 target_link_libraries(iq_vbmi_bench PRIVATE strata_kernels_cpu)
 
+if(STRATA_IGPU_VULKAN)
+  add_library(strata_kernels_igpu STATIC src/kernels/igpu/igpu_experts.cpp)
+  target_include_directories(strata_kernels_igpu PUBLIC ${_strata_include} PRIVATE ${_ggml_include})
+  target_compile_definitions(strata_kernels_igpu PUBLIC STRATA_IGPU_VULKAN=1)
+  target_link_libraries(strata_kernels_igpu PUBLIC ggml-vulkan ggml-base Threads::Threads)
+
+  # The iGPU's expert FFN against ggml-cpu's and a float reference, per format: `ninja igpu_parity && ./igpu_parity`
+  add_executable(igpu_parity EXCLUDE_FROM_ALL tests/igpu_parity.cpp)
+  target_include_directories(igpu_parity PRIVATE ${_strata_include} ${_ggml_include})
+  target_link_libraries(igpu_parity PRIVATE strata_kernels_igpu ggml-cpu ggml-base)
+endif()
+
 # ---- CUDA kernels of the Qwen3.6 path
 add_library(strata_cuda_kernels STATIC
   src/kernels/cuda/dequant_bf16.cu src/kernels/cuda/iq_kernels.cu src/kernels/cuda/native_mmvq.cu
@@ -144,6 +165,9 @@ target_include_directories(strata_qwen35 PUBLIC ${_strata_include} PRIVATE ${_gg
 target_compile_definitions(strata_qwen35 PRIVATE STRATA_HAVE_DFLASH2=1 STRATA_NATIVE_EXPERTS=1 STRATA_PREFILL_FUSED=1
                            STRATA_PREFILL_MMQ=1 STRATA_Q36_CPU_POOL=1)
 target_link_libraries(strata_qwen35 PRIVATE strata_prefill strata_cuda_kernels strata_kernels_cpu)
+if(STRATA_IGPU_VULKAN)
+  target_link_libraries(strata_qwen35 PRIVATE strata_kernels_igpu)
+endif()
 
 add_executable(strata-q36 src/qwen35/q36_main.cpp)
 target_link_libraries(strata-q36 PRIVATE strata_qwen35 CUDA::cudart)
