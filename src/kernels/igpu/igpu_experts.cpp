@@ -289,6 +289,7 @@ struct ExpertShare::Impl {
                 const Entry& e = entries[first + (size_t) i];
                 std::memcpy(xbuf.data() + (size_t) i * N, e.x, N * sizeof(float));
                 idbuf[(size_t) i] = w.compact[(size_t) e.expert];
+                if (idbuf[(size_t) i] < 0) fail("an entry's expert is not in the share");
             }
             ggml_backend_tensor_set(g.x, xbuf.data(), 0, xbuf.size() * sizeof(float));
             ggml_backend_tensor_set(g.ids, idbuf.data(), 0, idbuf.size() * sizeof(int32_t));

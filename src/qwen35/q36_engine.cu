@@ -3165,6 +3165,7 @@ struct Engine {
         hy_cpu += n_miss - (int) igpu_entries.size();
         hy_gpu += n_ent - n_miss;
         if (n_miss == 0) return;
+        if (igpu) igpu->submit(li, igpu_entries.data(), (int) igpu_entries.size());
         if (L.hblobs == nullptr)
             for (const C::ExpertJobMulti& j : jobs) {   // the experts' three ranges, read in parallel while the pool starts
                 const size_t x = (size_t) (j.blob - L.src_g) / L.src_gsz;
@@ -3172,7 +3173,6 @@ struct Engine {
                 willneed(L.src_u + x * L.src_gsz, L.src_gsz);
                 willneed(L.src_d + x * L.src_dsz, L.src_dsz);
             }
-        if (igpu) igpu->submit(li, igpu_entries.data(), (int) igpu_entries.size());
         if (!jobs.empty()) pool->run_split_multi_native(H.fmt, jobs.data(), (int) jobs.size());
         hy_cpu_ms += ms_since(t0);
         if (igpu) igpu->wait();
@@ -3712,7 +3712,7 @@ void attach_igpu(Engine& E, const std::vector<Layer*>& all, int rows) {
     std::vector<I::ExpertSource> sources(all.size());
     for (size_t li = 0; li < all.size(); ++li) {
         const Layer& L = *all[li];
-        if (L.n_slots >= (int) g.n_expert) continue;
+        if (L.n_slots >= (int) g.n_expert || L.L.tail_off != 0) continue;   // a scale tail after the blob is applied by the pool's kernels only
         sources[li] = {L.L.gu_type, L.L.d_type, L.src_g, L.src_u, L.src_d, L.src_gsz, L.src_dsz, L.n_slots};
     }
     std::string err;
