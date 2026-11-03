@@ -1,9 +1,10 @@
-# Strata: Qwen3.6-35B-A3B on a 4 GB GPU
+# Strata: making local neural networks fast on modest hardware
 
-Strata serves **Qwen3.6-35B-A3B** (UD-Q4_K_XL, 22.9 GB) on a PC with a small GPU and a modest RAM budget, through an OpenAI-
-and Anthropic-compatible HTTP API on `127.0.0.1:8080`, so that a console agent such as
-[pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) can work with it locally. It is built and measured on a
-laptop with an RTX 3050 Ti (4 GB of VRAM), 31 GB of RAM and an NVMe SSD.
+Strata is about making neural networks run fast on the hardware at hand, one machine and one model at a time. The first target,
+and the only one so far, is **Qwen3.6-35B-A3B** (UD-Q4_K_XL, 22.9 GB) on a laptop with an RTX 3050 Ti (4 GB of VRAM), 31 GB of RAM
+and an NVMe SSD. It is served through an OpenAI- and Anthropic-compatible HTTP API on `127.0.0.1:8080`, so that a console agent such
+as [pi](https://www.npmjs.com/package/@earendil-works/pi-coding-agent) can work with it locally. That laptop is simply the machine
+at hand: the numbers below are measured on it, and other GPUs and models are meant to follow.
 
 - **About 37 tokens per second** when generating, with 23 GB of RAM free for the page cache; the speed falls gradually, not
   to zero, when memory is short.
