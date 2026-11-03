@@ -27,7 +27,9 @@
 #include "strata/prefill/gemm.hpp"
 #include "strata/prefill/moe_mmq.hpp"
 #include "strata/qwen35/engine.hpp"
+#include "q36_act_quant.cuh"
 #include "q36_kernels.cuh"
+#include "q36_overlap.hpp"
 #if defined(STRATA_Q36_CPU_POOL)
 #include "strata/kernels/cpu/native_expert.hpp"
 #include "strata/kernels/cpu/pool.hpp"
@@ -1762,6 +1764,23 @@ struct Engine {
     long long hy_cpu = 0, hy_gpu = 0, hy_swaps = 0;   // entries computed on the CPU / GPU, slot replacements
     long long hy_jobs = 0;   // expert weight sets the CPU pool read (one per distinct expert of a layer's batch)
     double hy_cpu_ms = 0, hy_wait_ms = 0, hy_prep_ms = 0;   // pool time; waiting for the router; job building before the pool
+    // STRATA_Q36_OVERLAP: ways to overlap the GPU and CPU work of a hybrid step (all off unless asked for)
+    q36::Overlap ov = q36::overlap_from_env();
+    uint8_t* d_acts = nullptr;       // [rows][kNativeActBytes] the CPU path's activations quantized on the device (ov.quant)
+    uint8_t* h_acts = nullptr;       // their pinned host copy
+    std::vector<char> hy_dev_quant;  // per state index: that layer's activations come from d_acts
+    std::vector<uint8_t> ov_ref_act; // verify: the host quantizer's row
+    std::vector<int32_t> job_open;   // ov.glue: expert -> the index of its job with room, -1 for none
+    std::vector<char> tok_quant;     // ov.glue: the row's activation is quantized on the host already
+    double ov_enq_ms = 0;            // host time spent enqueuing the CPU rows' upload and merge
+    long long ov_layers = 0, ov_route_ready = 0;   // hybrid layers run / those whose router result had already arrived
+    long long ov_v_calls = 0, ov_v_bad = 0;
+    cudaStream_t sc = nullptr;                          // ov.commit: the GDN state commit runs here
+    cudaEvent_t ev_commit_in = nullptr, ev_commit_out = nullptr;
+    float* sc_hc = nullptr;                             // the side-stream commit's own conv output (never read back)
+    bool commit_pending = false;                        // the commit on `sc` has not been joined by `st` yet
+    float *vc_S = nullptr, *vc_conv = nullptr, *vc_hc = nullptr;   // verify: one layer's state commit run the old way
+    int vc_layer = -1;
     // decode / verify rows: their routing is counted once the rows are kept (commit), so a verify window's rejected
     // drafts never move the slots; the slots follow the counts at every kRebalanceEvery-th position exactly (a
     // window never steps over one), so plain and speculative decoding see the same slot tables at every position
@@ -1813,6 +1832,7 @@ struct Engine {
     /// The current session: `i`'s state, cache and position become the engine's (conv / S / kc / vc / pos / hlast).
     void select(int i) {
         if (i == cur) return;
+        join_commit();
         sess[(size_t) cur].pos = pos;
         cur = i;
         load_cur();
@@ -2047,6 +2067,7 @@ struct Engine {
     /// The recurrent state and the cache to a fresh sequence.
     void reset() {
         const auto& g = m->g;
+        join_commit();
         for (size_t l = 0; l < conv.size(); ++l) {
             if (conv[l]) CK(cudaMemsetAsync(conv[l], 0, (size_t) g.ssm_conv_channels * (g.ssm_d_conv - 1) * 4, st));
             if (S[l]) CK(cudaMemsetAsync(S[l], 0, (size_t) g.ssm_v_heads * g.ssm_state_size * g.ssm_state_size * 4, st));
@@ -2071,6 +2092,7 @@ struct Engine {
     /// recurrent state, or K then V as [kv head][n cells] rows, then the last hidden vector.
     void ckpt_copy(uint8_t* blob, int64_t n, bool save) {
         const auto& g = m->g;
+        join_commit();
         const size_t row = kv_row_bytes(g.head_dim, kv_q8);
         const cudaMemcpyKind kind = save ? cudaMemcpyDeviceToHost : cudaMemcpyHostToDevice;
         auto flat = [&](void* dev, size_t bytes) {
@@ -2935,15 +2957,121 @@ struct Engine {
 
     /// After a verify window of T rows: the GDN state takes the first n_keep rows (conv history and recurrence run
     /// again over the rows' kept inputs).
-    void commit(int n_keep) {
+    void commit(int n_keep, cudaStream_t cs = nullptr, float* conv_out = nullptr) {
         const auto& g = m->g;
         const int HK = (int) g.ssm_k_heads, HV = (int) g.ssm_v_heads, C = (int) g.ssm_conv_channels;
+        if (cs == nullptr) cs = st;
+        if (conv_out == nullptr) conv_out = hc;
         for (size_t l = 0; l < m->layers.size(); ++l) {
             const Layer& L = m->layers[l];
             if (L.attn) continue;
-            k_conv_seq<<<C / 128, 128, 0, st>>>(conv[l], v_qkv[l], L.conv, hc, C, 2 * HK, m->eps, n_keep, true);
-            k_gdn_seq<<<HV, dim3(128, 4), 0, st>>>(S[l], v_hc[l], C, v_alpha[l], v_beta[l], z, L.ssm_norm, m->eps,
+            k_conv_seq<<<C / 128, 128, 0, cs>>>(conv[l], v_qkv[l], L.conv, conv_out, C, 2 * HK, m->eps, n_keep, true);
+            k_gdn_seq<<<HV, dim3(128, 4), 0, cs>>>(S[l], v_hc[l], C, v_alpha[l], v_beta[l], z, L.ssm_norm, m->eps,
                                                    nullptr, HK, HV, n_keep, true);
+        }
+    }
+
+    /// STRATA_Q36_OVERLAP_STATS: one line per decode / speculative step.  Times are host wall-clock, so the GPU work
+    /// that the step overlaps with the CPU shows up as the part of `rest` that is not launch time.
+    struct OvMark {
+        Clock::time_point t0;
+        double wait = 0, prep = 0, cpu = 0, enq = 0;
+        long long cpu_n = 0, gpu_n = 0, jobs = 0, layers = 0, ready = 0;
+    };
+    long long ov_steps = 0;
+    OvMark ov_mark() const {
+        OvMark a;
+        a.t0 = Clock::now();
+        a.wait = hy_wait_ms;
+        a.prep = hy_prep_ms;
+        a.cpu = hy_cpu_ms;
+        a.enq = ov_enq_ms;
+        a.cpu_n = hy_cpu;
+        a.gpu_n = hy_gpu;
+        a.jobs = hy_jobs;
+        a.layers = ov_layers;
+        a.ready = ov_route_ready;
+        return a;
+    }
+    void ov_report(const char* what, const OvMark& a) {
+        if (++ov_steps % ov.stats_every != 0) return;
+        const double total = ms_since(a.t0), wait = hy_wait_ms - a.wait, prep = hy_prep_ms - a.prep;
+        const double cpu_all = hy_cpu_ms - a.cpu, enq = ov_enq_ms - a.enq;
+        std::fprintf(stderr, "strata-q36 OVERLAP %s: total %.2f ms = GPU wait %.2f + host glue %.2f + pool %.2f + upload/merge "
+                     "enqueue %.2f + rest %.2f; expert entries: %lld on the CPU (%lld weight sets read), %lld on the GPU; router result "
+                     "already there when the host looked: %lld of %lld layers\n", what, total, wait, prep, cpu_all - prep, enq,
+                     total - wait - cpu_all - enq, hy_cpu - a.cpu_n, hy_jobs - a.jobs, hy_gpu - a.gpu_n,
+                     ov_route_ready - a.ready, ov_layers - a.layers);
+    }
+
+    /// ov.commit: commit() on a side stream, so the next step's MTP forward (attention only: it neither reads nor
+    /// writes the GDN state or the verify buffers) starts without waiting for it.  Everything that reads or moves the
+    /// GDN state, or reuses the verify buffers the commit reads, calls join_commit() first (spec_step's next verify
+    /// forward, process, the batch rows, select, reset, copy_session, the checkpoints).
+    void commit_overlapped(int n_keep) {
+        if (sc == nullptr) {
+            CK(cudaStreamCreateWithFlags(&sc, cudaStreamNonBlocking));
+            CK(cudaEventCreateWithFlags(&ev_commit_in, cudaEventDisableTiming));
+            CK(cudaEventCreateWithFlags(&ev_commit_out, cudaEventDisableTiming));
+            CK(cudaMalloc(&sc_hc, (size_t) kVerify * m->g.ssm_conv_channels * 4));
+        }
+        join_commit();
+        CK(cudaEventRecord(ev_commit_in, st));
+        CK(cudaStreamWaitEvent(sc, ev_commit_in, 0));
+        if (ov.verify) verify_commit_begin();
+        commit(n_keep, sc, sc_hc);
+        if (ov.verify) verify_commit_end(n_keep);
+        CK(cudaEventRecord(ev_commit_out, sc));
+        commit_pending = true;
+    }
+    void join_commit() {
+        if (!commit_pending) return;
+        CK(cudaStreamWaitEvent(st, ev_commit_out, 0));
+        commit_pending = false;
+        if (ov.verify) verify_commit_compare();
+    }
+    /// STRATA_Q36_VERIFY_OVERLAP for the commit: the first GDN layer's state is copied before the side-stream commit and
+    /// run again the old way (own scratch) after it; join_commit() compares the two states bitwise.
+    void verify_commit_begin() {
+        const auto& g = m->g;
+        if (vc_layer < 0) {
+            for (size_t l = 0; l < m->layers.size() && vc_layer < 0; ++l)
+                if (!m->layers[l].attn) vc_layer = (int) l;
+            if (vc_layer < 0) return;
+            CK(cudaMalloc(&vc_S, (size_t) g.ssm_v_heads * g.ssm_state_size * g.ssm_state_size * 4));
+            CK(cudaMalloc(&vc_conv, (size_t) g.ssm_conv_channels * (g.ssm_d_conv - 1) * 4));
+            CK(cudaMalloc(&vc_hc, (size_t) kVerify * g.ssm_conv_channels * 4));
+        }
+        CK(cudaMemcpyAsync(vc_S, S[vc_layer], (size_t) g.ssm_v_heads * g.ssm_state_size * g.ssm_state_size * 4,
+                           cudaMemcpyDeviceToDevice, sc));
+        CK(cudaMemcpyAsync(vc_conv, conv[vc_layer], (size_t) g.ssm_conv_channels * (g.ssm_d_conv - 1) * 4,
+                           cudaMemcpyDeviceToDevice, sc));
+    }
+    void verify_commit_end(int n_keep) {
+        if (vc_layer < 0) return;
+        const auto& g = m->g;
+        const int HK = (int) g.ssm_k_heads, HV = (int) g.ssm_v_heads, C = (int) g.ssm_conv_channels;
+        const Layer& L = m->layers[(size_t) vc_layer];
+        k_conv_seq<<<C / 128, 128, 0, sc>>>(vc_conv, v_qkv[vc_layer], L.conv, vc_hc, C, 2 * HK, m->eps, n_keep, true);
+        k_gdn_seq<<<HV, dim3(128, 4), 0, sc>>>(vc_S, v_hc[vc_layer], C, v_alpha[vc_layer], v_beta[vc_layer], z, L.ssm_norm,
+                                               m->eps, nullptr, HK, HV, n_keep, true);
+    }
+    void verify_commit_compare() {
+        if (vc_layer < 0) return;
+        const auto& g = m->g;
+        CK(cudaStreamSynchronize(sc));
+        const size_t s_bytes = (size_t) g.ssm_v_heads * g.ssm_state_size * g.ssm_state_size * 4;
+        const size_t c_bytes = (size_t) g.ssm_conv_channels * (g.ssm_d_conv - 1) * 4;
+        std::vector<char> a(s_bytes + c_bytes), b(s_bytes + c_bytes);
+        CK(cudaMemcpy(a.data(), S[vc_layer], s_bytes, cudaMemcpyDeviceToHost));
+        CK(cudaMemcpy(a.data() + s_bytes, conv[vc_layer], c_bytes, cudaMemcpyDeviceToHost));
+        CK(cudaMemcpy(b.data(), vc_S, s_bytes, cudaMemcpyDeviceToHost));
+        CK(cudaMemcpy(b.data() + s_bytes, vc_conv, c_bytes, cudaMemcpyDeviceToHost));
+        ++ov_v_calls;
+        if (a != b) {
+            ++ov_v_bad;
+            std::fprintf(stderr, "strata-q36 VERIFY_OVERLAP commit: layer %d state after the side-stream commit differs from "
+                         "the old way's\n", vc_layer);
         }
     }
 
@@ -3074,12 +3202,26 @@ struct Engine {
         ++stream_pos;
     }
 
+    /// Whether layer li's CPU-path activations are quantized on the device (ov.quant, and the layer's format is one the
+    /// device quantizer reproduces bit for bit: the probe at placement checked it).
+    bool dev_quant(size_t li) const { return ov.quant && li < hy_dev_quant.size() && hy_dev_quant[li] != 0; }
+
     /// The GPU half of a hybrid MoE: the routing to the host, the resident experts' entries grouped and run.
     void moe_hybrid_gpu(const Layer& L, size_t li, int T) {
         const auto& g = m->g;
         const int N = (int) g.n_embd, Kp = (int) m->top_k;
         const int64_t n_ent = (int64_t) T * Kp;
         CK(cudaMemcpyAsync(h_ids, ids, (size_t) n_ent * 4, cudaMemcpyDeviceToHost, st));
+#if defined(STRATA_Q36_CPU_POOL)
+        if (dev_quant(li)) {
+            const Hy& H = hy[li];
+            q36act::launch(H.fmt.gu_act, h, d_acts, N, T, strata::kernels::cpu::kNativeActBytes, st);
+            CK(cudaGetLastError());
+            const size_t bytes = (size_t) (T - 1) * strata::kernels::cpu::kNativeActBytes + H.fmt.act_bytes;
+            CK(cudaMemcpyAsync(h_acts, d_acts, bytes, cudaMemcpyDeviceToHost, st));
+            if (ov.verify) CK(cudaMemcpyAsync(h_h, h, (size_t) T * N * 4, cudaMemcpyDeviceToHost, st));
+        } else
+#endif
         CK(cudaMemcpyAsync(h_h, h, (size_t) T * N * 4, cudaMemcpyDeviceToHost, st));
         CK(cudaEventRecord(ev_route, st));
         group_entries(L, hy[li].slot_of_d, T);
@@ -3087,6 +3229,206 @@ struct Engine {
         K::native_expert_grouped(L.L, grp_ptr, grp_start, n_groups, ent_dst, ent_tok,
                                  std::min<int64_t>(n_ent, g.n_expert), n_ent, xq, escr, eparts, st);
     }
+#if defined(STRATA_Q36_CPU_POOL)
+    static void cpu_relax() {
+#if defined(__x86_64__)
+        asm volatile("pause" ::: "memory");
+#endif
+    }
+
+    /// The CPU pool's jobs for the entries of a layer's batch that have no slot: up to MAXT tokens per expert.  `miss`
+    /// gets each entry's flag.  `effects` off: no routing counts and no row ids are recorded (the verify run).
+    int build_jobs_classic(size_t li, int T, bool gpu_act, std::vector<strata::kernels::cpu::ExpertJobMulti>& out_jobs,
+                           std::vector<strata::kernels::cpu::NativeFmt>& out_fmt, int32_t* miss, bool effects) {
+        namespace C = strata::kernels::cpu;
+        const int N = (int) m->g.n_embd, Kp = (int) m->top_k;
+        const int n_ent = T * Kp;
+        Hy& H = hy[li];
+        const Layer& L = layer_at((int) li);
+        const uint8_t* act_base = gpu_act ? h_acts : acts;
+        out_jobs.clear();
+        out_fmt.clear();
+        out_fmt.reserve((size_t) n_ent);
+        std::vector<char> quantized((size_t) T, 0);
+        int n_miss = 0;
+        std::map<int, size_t> open;   // expert -> its job with room
+        const bool defer = effects && rows_deferred && li < m->layers.size();
+        if (defer) {
+            if (row_ids.size() < m->layers.size()) row_ids.resize(m->layers.size());
+            row_ids[li].assign(h_ids, h_ids + n_ent);
+        }
+        for (int e = 0; e < n_ent; ++e) {
+            const int x = h_ids[e];
+            if (effects && !(rows_deferred && li < m->layers.size())) H.score[(size_t) x] += 1.0;
+            miss[e] = H.slot_of[(size_t) x] < 0;
+            if (!miss[e]) continue;
+            ++n_miss;
+            const int t = e / Kp;
+            if (!gpu_act && !quantized[(size_t) t]) {
+                C::native_quant_act(H.fmt, h_h + (size_t) t * N, acts + (size_t) t * C::kNativeActBytes);
+                quantized[(size_t) t] = 1;
+            }
+            auto it = open.find(x);
+            if (it == open.end() || out_jobs[it->second].nt == C::MAXT) {
+                C::ExpertJobMulti j;
+                if (L.hblobs != nullptr) {
+                    j.blob = L.hblobs + (size_t) x * L.stride;
+                } else {   // the GGUF in place: the gate rows are the blob, up and down at their distance in the mapping
+                    const uint8_t* gate = L.src_g + (size_t) x * L.src_gsz;
+                    C::NativeFmt& f = out_fmt.emplace_back(H.fmt);
+                    f.up_off = (size_t) ((uintptr_t) (L.src_u + (size_t) x * L.src_gsz) - (uintptr_t) gate);   // modular: the
+                    f.down_off = (size_t) ((uintptr_t) (L.src_d + (size_t) x * L.src_dsz) - (uintptr_t) gate); // file's tensor order does not matter
+                    j.blob = gate;
+                    j.fmt = &f;
+                }
+                out_jobs.push_back(j);
+                it = open.insert_or_assign(x, out_jobs.size() - 1).first;
+            }
+            C::ExpertJobMulti& j = out_jobs[it->second];
+            j.nact[j.nt] = act_base + (size_t) t * C::kNativeActBytes;
+            j.out[j.nt] = cpu_out + (size_t) e * N;
+            ++j.nt;
+        }
+        return n_miss;
+    }
+
+    /// build_jobs_classic with its per-call containers kept between calls: the expert -> job table is an array, the
+    /// activation flags and the job vectors are reused.  The same jobs in the same order.
+    int build_jobs_glue(size_t li, int T, bool gpu_act, int32_t* miss) {
+        namespace C = strata::kernels::cpu;
+        const int N = (int) m->g.n_embd, Kp = (int) m->top_k;
+        const int n_ent = T * Kp;
+        Hy& H = hy[li];
+        const Layer& L = layer_at((int) li);
+        const uint8_t* act_base = gpu_act ? h_acts : acts;
+        if (job_open.size() < H.slot_of.size()) job_open.assign(H.slot_of.size(), -1);
+        if (tok_quant.size() < (size_t) T) tok_quant.resize((size_t) T);
+        std::fill(tok_quant.begin(), tok_quant.begin() + T, 0);
+        jobs.clear();
+        job_fmt.clear();
+        job_fmt.reserve((size_t) n_ent);
+        int n_miss = 0;
+        const bool defer = rows_deferred && li < m->layers.size();
+        if (defer) {
+            if (row_ids.size() < m->layers.size()) row_ids.resize(m->layers.size());
+            row_ids[li].assign(h_ids, h_ids + n_ent);
+        }
+        for (int e = 0; e < n_ent; ++e) {
+            const int x = h_ids[e];
+            if (!defer) H.score[(size_t) x] += 1.0;
+            miss[e] = H.slot_of[(size_t) x] < 0;
+            if (!miss[e]) continue;
+            ++n_miss;
+            const int t = e / Kp;
+            if (!gpu_act && !tok_quant[(size_t) t]) {
+                C::native_quant_act(H.fmt, h_h + (size_t) t * N, acts + (size_t) t * C::kNativeActBytes);
+                tok_quant[(size_t) t] = 1;
+            }
+            int at = job_open[(size_t) x];
+            if (at < 0 || jobs[(size_t) at].nt == C::MAXT) {
+                C::ExpertJobMulti j;
+                if (L.hblobs != nullptr) {
+                    j.blob = L.hblobs + (size_t) x * L.stride;
+                } else {
+                    const uint8_t* gate = L.src_g + (size_t) x * L.src_gsz;
+                    C::NativeFmt& f = job_fmt.emplace_back(H.fmt);
+                    f.up_off = (size_t) ((uintptr_t) (L.src_u + (size_t) x * L.src_gsz) - (uintptr_t) gate);
+                    f.down_off = (size_t) ((uintptr_t) (L.src_d + (size_t) x * L.src_dsz) - (uintptr_t) gate);
+                    j.blob = gate;
+                    j.fmt = &f;
+                }
+                jobs.push_back(j);
+                at = (int) jobs.size() - 1;
+                job_open[(size_t) x] = at;
+            }
+            C::ExpertJobMulti& j = jobs[(size_t) at];
+            j.nact[j.nt] = act_base + (size_t) t * C::kNativeActBytes;
+            j.out[j.nt] = cpu_out + (size_t) e * N;
+            ++j.nt;
+        }
+        for (int e = 0; e < n_ent; ++e) job_open[(size_t) h_ids[e]] = -1;
+        return n_miss;
+    }
+
+    /// STRATA_Q36_VERIFY_OVERLAP: the job list and the miss flags of the glue builder against the classic builder's, and
+    /// the device-quantized activations against the host quantizer's.
+    void verify_cpu_path(size_t li, int T, bool gpu_act, const int32_t* miss) {
+        namespace C = strata::kernels::cpu;
+        const int N = (int) m->g.n_embd, n_ent = T * (int) m->top_k;
+        Hy& H = hy[li];
+        const char* bad = nullptr;
+        if (ov.glue) {
+            std::vector<C::ExpertJobMulti> vj;
+            std::vector<C::NativeFmt> vf;
+            std::vector<int32_t> vm((size_t) n_ent);
+            build_jobs_classic(li, T, gpu_act, vj, vf, vm.data(), false);
+            if (vj.size() != jobs.size()) bad = "job count";
+            for (size_t i = 0; bad == nullptr && i < vj.size(); ++i) {
+                const C::ExpertJobMulti &a = vj[i], &b = jobs[i];
+                if (a.blob != b.blob || a.nt != b.nt) bad = "job blob or token count";
+                for (int k = 0; bad == nullptr && k < a.nt; ++k)
+                    if (a.nact[k] != b.nact[k] || a.out[k] != b.out[k]) bad = "job activation or output row";
+                if (bad == nullptr && (a.fmt == nullptr) != (b.fmt == nullptr)) bad = "job layout";
+                if (bad == nullptr && a.fmt != nullptr && (a.fmt->up_off != b.fmt->up_off || a.fmt->down_off != b.fmt->down_off))
+                    bad = "job layout offsets";
+            }
+            for (int e = 0; bad == nullptr && e < n_ent; ++e)
+                if ((vm[(size_t) e] != 0) != (miss[e] != 0)) bad = "miss flags";
+            ++ov_v_calls;
+            if (bad != nullptr) {
+                ++ov_v_bad;
+                std::fprintf(stderr, "strata-q36 VERIFY_OVERLAP glue: layer %zu T %d: %s differ\n", li, T, bad);
+            }
+        }
+        if (gpu_act) {
+            ov_ref_act.resize(C::kNativeActBytes);
+            for (int t = 0; t < T; ++t) {
+                C::native_quant_act(H.fmt, h_h + (size_t) t * N, ov_ref_act.data());
+                ++ov_v_calls;
+                if (!q36act::same_row(H.fmt.gu_act, N, ov_ref_act.data(), h_acts + (size_t) t * C::kNativeActBytes)) {
+                    ++ov_v_bad;
+                    std::fprintf(stderr, "strata-q36 VERIFY_OVERLAP quant: layer %zu row %d: device bytes differ from the host's\n", li, t);
+                }
+            }
+        }
+    }
+
+    /// Whether the device quantizer writes the host quantizer's bytes for this layer's format (a few rows of mixed
+    /// magnitude, once at placement): a build whose host quantizer differs keeps the host path.
+    bool probe_dev_quant(const strata::kernels::cpu::NativeFmt& f) {
+        namespace C = strata::kernels::cpu;
+        const int64_t n = f.n_embd;
+        if (f.had_gu || f.act_bytes > C::kNativeActBytes || !q36act::supported(f.gu_act, n)) return false;
+        constexpr int kRows = 4;
+        constexpr size_t kBytes = C::kNativeActBytes;
+        std::vector<float> x((size_t) kRows * (size_t) n);
+        uint32_t seed = 0x9e3779b9u;
+        for (size_t i = 0; i < x.size(); ++i) {
+            seed = seed * 1664525u + 1013904223u;
+            const float v = (float) (seed >> 8) / 16777216.f - 0.5f;
+            const size_t row = i / (size_t) n;
+            x[i] = row == 0 ? v : row == 1 ? v * 1e-3f : row == 2 ? v * 300.f : ((i / 256) % 2 ? 0.f : v);
+        }
+        float* dx = nullptr;
+        uint8_t* dd = nullptr;
+        CK(cudaMalloc(&dx, x.size() * 4));
+        CK(cudaMalloc(&dd, kRows * kBytes));
+        CK(cudaMemcpyAsync(dx, x.data(), x.size() * 4, cudaMemcpyHostToDevice, st));
+        q36act::launch(f.gu_act, dx, dd, n, kRows, kBytes, st);
+        CK(cudaGetLastError());
+        std::vector<uint8_t> dev(kRows * kBytes), host(kBytes);
+        CK(cudaMemcpyAsync(dev.data(), dd, dev.size(), cudaMemcpyDeviceToHost, st));
+        CK(cudaStreamSynchronize(st));
+        CK(cudaFree(dx));
+        CK(cudaFree(dd));
+        bool same = true;
+        for (int r = 0; r < kRows; ++r) {
+            C::native_quant_act(f, x.data() + (size_t) r * (size_t) n, host.data());
+            same = same && q36act::same_row(f.gu_act, n, host.data(), dev.data() + (size_t) r * kBytes);
+        }
+        return same;
+    }
+#endif
     /// The CPU half: the entries without a slot on the pool (ggml-cpu's arithmetic for the layer's formats), their
     /// rows uploaded and merged into the entries' rows.
     void moe_hybrid_cpu(size_t li, int T) {
@@ -3098,54 +3440,22 @@ struct Engine {
         Hy& H = hy[li];
         const Layer& L = layer_at((int) li);
         const auto tw = Clock::now();
+        if (ov.stats) {
+            ++ov_layers;
+            if (cudaEventQuery(ev_route) == cudaSuccess) ++ov_route_ready;
+        }
         while (cudaEventQuery(ev_route) == cudaErrorNotReady) {
+            if (ov.glue) cpu_relax();
         }
         const auto t0 = Clock::now();
         hy_wait_ms += std::chrono::duration<double, std::milli>(t0 - tw).count();
-        // the missed entries per expert (up to MAXT tokens per job)
-        jobs.clear();
-        job_fmt.clear();
-        job_fmt.reserve((size_t) n_ent);
-        std::vector<char> quantized((size_t) T, 0);
-        int n_miss = 0;
-        std::map<int, size_t> open;   // expert -> its job with room
-        const bool defer = rows_deferred && li < m->layers.size();
-        if (defer) {
-            if (row_ids.size() < m->layers.size()) row_ids.resize(m->layers.size());
-            row_ids[li].assign(h_ids, h_ids + n_ent);
-        }
-        for (int e = 0; e < n_ent; ++e) {
-            const int x = h_ids[e];
-            if (!defer) H.score[(size_t) x] += 1.0;
-            h_miss[e] = H.slot_of[(size_t) x] < 0;
-            if (!h_miss[e]) continue;
-            ++n_miss;
-            const int t = e / Kp;
-            if (!quantized[(size_t) t]) {
-                C::native_quant_act(H.fmt, h_h + (size_t) t * N, acts + (size_t) t * C::kNativeActBytes);
-                quantized[(size_t) t] = 1;
-            }
-            auto it = open.find(x);
-            if (it == open.end() || jobs[it->second].nt == C::MAXT) {
-                C::ExpertJobMulti j;
-                if (L.hblobs != nullptr) {
-                    j.blob = L.hblobs + (size_t) x * L.stride;
-                } else {   // the GGUF in place: the gate rows are the blob, up and down at their distance in the mapping
-                    const uint8_t* gate = L.src_g + (size_t) x * L.src_gsz;
-                    C::NativeFmt& f = job_fmt.emplace_back(H.fmt);
-                    f.up_off = (size_t) ((uintptr_t) (L.src_u + (size_t) x * L.src_gsz) - (uintptr_t) gate);   // modular: the
-                    f.down_off = (size_t) ((uintptr_t) (L.src_d + (size_t) x * L.src_dsz) - (uintptr_t) gate); // file's tensor order does not matter
-                    j.blob = gate;
-                    j.fmt = &f;
-                }
-                jobs.push_back(j);
-                it = open.insert_or_assign(x, jobs.size() - 1).first;
-            }
-            C::ExpertJobMulti& j = jobs[it->second];
-            j.nact[j.nt] = acts + (size_t) t * C::kNativeActBytes;
-            j.out[j.nt] = cpu_out + (size_t) e * N;
-            ++j.nt;
-        }
+        const bool gpu_act = dev_quant(li);
+        // the merge flags of the glue path travel with the rows: one upload
+        int32_t* const miss = ov.glue ? reinterpret_cast<int32_t*>(cpu_out + (size_t) n_ent * N) : h_miss;
+        int n_miss;
+        if (ov.glue) n_miss = build_jobs_glue(li, T, gpu_act, miss);
+        else n_miss = build_jobs_classic(li, T, gpu_act, jobs, job_fmt, miss, true);
+        if (ov.verify && (ov.glue || gpu_act)) verify_cpu_path(li, T, gpu_act, miss);
         hy_cpu += n_miss;
         hy_gpu += n_ent - n_miss;
         if (n_miss == 0) return;
@@ -3156,11 +3466,22 @@ struct Engine {
                 willneed(L.src_u + x * L.src_gsz, L.src_gsz);
                 willneed(L.src_d + x * L.src_dsz, L.src_dsz);
             }
+        if (ov.stats) {
+            hy_prep_ms += ms_since(t0);
+            hy_jobs += (long long) jobs.size();
+        }
         pool->run_split_multi_native(H.fmt, jobs.data(), (int) jobs.size());
         hy_cpu_ms += ms_since(t0);
-        CK(cudaMemcpyAsync(ecpu, cpu_out, (size_t) n_ent * N * 4, cudaMemcpyHostToDevice, st));
-        CK(cudaMemcpyAsync(d_miss, h_miss, (size_t) n_ent * 4, cudaMemcpyHostToDevice, st));
-        k_merge_cpu<<<n_ent, kThreads, 0, st>>>(eparts, ecpu, d_miss, N);
+        const auto te = ov.stats ? Clock::now() : t0;
+        if (ov.glue) {
+            CK(cudaMemcpyAsync(ecpu, cpu_out, ((size_t) n_ent * N + (size_t) n_ent) * 4, cudaMemcpyHostToDevice, st));
+            k_merge_cpu<<<n_ent, kThreads, 0, st>>>(eparts, ecpu, reinterpret_cast<const int32_t*>(ecpu + (size_t) n_ent * N), N);
+        } else {
+            CK(cudaMemcpyAsync(ecpu, cpu_out, (size_t) n_ent * N * 4, cudaMemcpyHostToDevice, st));
+            CK(cudaMemcpyAsync(d_miss, h_miss, (size_t) n_ent * 4, cudaMemcpyHostToDevice, st));
+            k_merge_cpu<<<n_ent, kThreads, 0, st>>>(eparts, ecpu, d_miss, N);
+        }
+        if (ov.stats) ov_enq_ms += ms_since(te);
 #else
         (void) li;
         (void) T;
@@ -3305,6 +3626,7 @@ struct Engine {
     /// after every chunk; false ends the read there (a cancelled request): the tokens processed are returned.
     template <class F> int64_t process(const int32_t* toks, int64_t n, F on_chunk_) {
         const int N = (int) m->g.n_embd;
+        join_commit();
         auto on_chunk = [&](int64_t done) -> bool {   // a callback returning void never cancels
             if constexpr (std::is_void_v<decltype(on_chunk_(done))>) {
                 on_chunk_(done);
@@ -3314,6 +3636,8 @@ struct Engine {
             }
         };
         if (n == 1) {
+            OvMark step_mark;
+            if (ov.stats) step_mark = ov_mark();
             CK(cudaStreamSynchronize(st));   // the pinned staging is free again
             hpin[0] = toks[0];
             hpin[1] = (int32_t) pos;
@@ -3330,6 +3654,7 @@ struct Engine {
             CK(cudaMemcpyAsync(hlast, hmain, (size_t) N * 4, cudaMemcpyDeviceToDevice, st));
             pos += 1;
             after_rows(1);
+            if (ov.stats) ov_report("decode", step_mark);
             on_chunk(1);
             return 1;
         }
@@ -3383,6 +3708,7 @@ struct Engine {
     /// it for the kept rows) and the sessions' positions stay.  The greedy picks end up in rows_pick (one per row), every
     /// row's logits in `logits`.  Without verify the sessions' positions advance by their rows.
     void run_rows(const Group* gr, int G, bool verify) {
+        join_commit();
         sess[(size_t) cur].pos = pos;
         CK(cudaStreamSynchronize(st));   // the pinned staging is free again
         int64_t pmax = 0;
@@ -3437,6 +3763,7 @@ struct Engine {
     /// After run_rows(.., verify = true): the GDN state of group g takes its first keep[g] rows (the conv history and the
     /// recurrence run again over the rows' kept inputs, as commit() does) and the session advances by keep[g].
     void commit_rows(const Group* gr, const int* keep, int G) {
+        join_commit();
         const auto& g = m->g;
         const int HK = (int) g.ssm_k_heads, HV = (int) g.ssm_v_heads, C = (int) g.ssm_conv_channels;
         sess[(size_t) cur].pos = pos;
@@ -3469,6 +3796,7 @@ struct Engine {
     float* logits_mr = nullptr;
     int32_t* pick_mr = nullptr;
     void mtp_rows(const MtpRow* rows, int T) {
+        join_commit();
         const auto& g = m->g;
         const int N = (int) g.n_embd;
         if (!logits_mr) {
@@ -3523,6 +3851,7 @@ struct Engine {
     /// pictures' offset (for a conversation read in one session that continues in another).
     void copy_session(int src, int dst) {
         if (src == dst) return;
+        join_commit();
         sess[(size_t) cur].pos = pos;
         const auto& g = m->g;
         const Sess& a = sess[(size_t) src];
@@ -3565,6 +3894,8 @@ struct Engine {
     int spec_step(int x_tok, const std::vector<int32_t>& fix, int D, std::vector<int32_t>& drafts, int32_t* picks,
                   const std::atomic<bool>* cancel = nullptr) {
         const int N = (int) m->g.n_embd;
+        OvMark step_mark;
+        if (ov.stats) step_mark = ov_mark();
         if (main_hybrid) D = std::min<int>(D, (int) (kRebalanceEvery - pos % kRebalanceEvery) - 1);
         const int T0 = (int) fix.size() + 1;   // the redo rows and the row of x
         CK(cudaStreamSynchronize(st));
@@ -3607,6 +3938,7 @@ struct Engine {
         hpin[1] = (int32_t) pos;
         CK(cudaMemcpyAsync(tok, hpin + 16, (size_t) T * 4, cudaMemcpyHostToDevice, st));
         CK(cudaMemcpyAsync(pos0, hpin + 1, 4, cudaMemcpyHostToDevice, st));
+        join_commit();
         rows_deferred = true;
         graph_run(gs().gv[T], [&] { forward(T, pos, T, use_graph, true); });
         rows_deferred = false;
@@ -3616,10 +3948,16 @@ struct Engine {
         while (a < D && hpin[2 + a] == drafts[(size_t) a]) ++a;
         if (cancel != nullptr && cancel->load()) a = 0;
         for (int i = 0; i <= a; ++i) picks[i] = hpin[2 + i];
-        commit(a + 1);
+        if (ov.commit) commit_overlapped(a + 1);
+        else commit(a + 1);
         CK(cudaMemcpyAsync(hlast, hmain + (size_t) a * N, (size_t) N * 4, cudaMemcpyDeviceToDevice, st));
         pos += a + 1;
         after_rows(a + 1);
+        if (ov.stats) {
+            char what[48];
+            std::snprintf(what, sizeof what, "spec D=%d kept=%d", D, a + 1);
+            ov_report(what, step_mark);
+        }
         return a;
     }
 
@@ -3860,14 +4198,34 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
     }
     const size_t T = (size_t) E.tmax, N = (size_t) g.n_embd, Kp = (size_t) m.top_k;
     CK(cudaHostAlloc((void**) &E.h_h, T * N * 4, cudaHostAllocDefault));
-    CK(cudaHostAlloc((void**) &E.cpu_out, T * Kp * N * 4, cudaHostAllocDefault));
+    const size_t merge_flag_bytes = E.ov.glue ? T * Kp * 4 : 0;   // the merge flags after the CPU rows: one upload
+    CK(cudaHostAlloc((void**) &E.cpu_out, T * Kp * N * 4 + merge_flag_bytes, cudaHostAllocDefault));
     CK(cudaHostAlloc((void**) &E.h_ids, T * Kp * 4, cudaHostAllocDefault));
     CK(cudaHostAlloc((void**) &E.h_miss, T * Kp * 4, cudaHostAllocDefault));
     CK(cudaHostAlloc((void**) &E.h_cnt, all.size() * (size_t) ne * 4, cudaHostAllocDefault));
     const size_t cpu_path_rows = mtp_only ? T : std::min<size_t>(T, (size_t) E.hybrid_t);   // rows a layer sends through the CPU path
-    CK(cudaMalloc(&E.ecpu, cpu_path_rows * Kp * N * 4));
+    CK(cudaMalloc(&E.ecpu, cpu_path_rows * Kp * N * 4 + (E.ov.glue ? cpu_path_rows * Kp * 4 : 0)));
     CK(cudaMalloc(&E.d_miss, cpu_path_rows * Kp * 4));
     E.acts = (uint8_t*) std::malloc(T * C::kNativeActBytes + 64);
+    if (E.ov.quant) {
+        CK(cudaMalloc(&E.d_acts, cpu_path_rows * C::kNativeActBytes));
+        CK(cudaHostAlloc((void**) &E.h_acts, cpu_path_rows * C::kNativeActBytes, cudaHostAllocDefault));
+        E.hy_dev_quant.assign(E.hy.size(), 0);
+        size_t n_hybrid = 0, n_dev = 0;
+        for (size_t li = 0; li < E.hy.size(); ++li) {
+            if (!E.lhy(li)) continue;
+            ++n_hybrid;
+            if (E.probe_dev_quant(E.hy[li].fmt)) {
+                E.hy_dev_quant[li] = 1;
+                ++n_dev;
+            }
+        }
+        std::fprintf(stderr, "strata-q36: overlap quant: the CPU path's activations of %zu of %zu hybrid layers are quantized "
+                     "on the GPU\n", n_dev, n_hybrid);
+    }
+    if (E.ov.any() || E.ov.stats || E.ov.verify)
+        std::fprintf(stderr, "strata-q36: overlap switches:%s%s%s%s%s\n", E.ov.quant ? " quant" : "", E.ov.glue ? " glue" : "",
+                     E.ov.commit ? " commit" : "", E.ov.stats ? " stats" : "", E.ov.verify ? " verify" : "");
     CK(cudaEventCreateWithFlags(&E.ev_route, cudaEventDisableTiming));
     if (staging) {
         CK(cudaStreamCreateWithFlags(&E.cst, cudaStreamNonBlocking));
@@ -4865,6 +5223,8 @@ int strata::qwen35::run(int argc, char** argv) {
         Engine& E;
         ~Report() {
             if (E.verify_k) std::fprintf(stderr, "strata-q36 VERIFY: %lld comparisons, %lld mismatches\n", E.v_calls, E.v_bad);
+            if (E.ov.verify)
+                std::fprintf(stderr, "strata-q36 VERIFY_OVERLAP: %lld comparisons, %lld mismatches\n", E.ov_v_calls, E.ov_v_bad);
             if (E.verify_k)
                 for (const auto& kv : E.v_by)
                     std::fprintf(stderr, "strata-q36 VERIFY   %s: %lld mismatches\n", kv.first.c_str(), kv.second);

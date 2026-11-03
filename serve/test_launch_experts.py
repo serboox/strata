@@ -17,14 +17,14 @@ class ExpertsUsedEnvironmentTests(unittest.TestCase):
 
     def test_the_count_reaches_the_engine_as_text(self):
         self.assertEqual(strata_launch.experts_used_env(6), {"STRATA_Q36_EXPERTS_USED": "6"})
-        self.assertEqual(strata_launch.engine_environment(None, 0, 6), {"STRATA_Q36_EXPERTS_USED": "6"})
+        self.assertEqual(strata_launch.engine_environment(None, 0, strata_launch.experts_used_env(6)), {"STRATA_Q36_EXPERTS_USED": "6"})
 
     def test_it_joins_the_kernel_and_cap_settings(self):
-        env = strata_launch.engine_environment(strata_launch.IQ_KERNELS_ENV, 2200.0, 5)
+        env = strata_launch.engine_environment(strata_launch.IQ_KERNELS_ENV, 2200.0, strata_launch.experts_used_env(5))
         self.assertEqual(env, {"STRATA_IQ_VBMI": "1", "STRATA_POOL_SPIN_US": "0", "STRATA_Q36_EXPERTS_USED": "5"})
 
     def test_the_config_carries_it(self):
-        env = strata_launch.engine_environment(None, 0, 7)
+        env = strata_launch.engine_environment(None, 0, strata_launch.experts_used_env(7))
         config = strata_launch.build_config(dict(strata_launch.PROFILES["auto"]), 8080, "greedy", 80.0, env)
         self.assertEqual(config["env"], {"STRATA_Q36_EXPERTS_USED": "7"})
 

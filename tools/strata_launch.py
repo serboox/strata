@@ -88,9 +88,26 @@ def experts_used_env(experts_used: int | None) -> dict:
     return {} if experts_used is None else {EXPERTS_USED_ENV: str(experts_used)}
 
 
-def engine_environment(kernel_env: dict | None, cpu_max_mhz: float, experts_used: int | None = None) -> dict | None:
-    env = {**(kernel_env or {}), **(CAPPED_ENV if cpu_max_mhz else {}), **experts_used_env(experts_used)}
+def engine_environment(kernel_env: dict | None, cpu_max_mhz: float, extra: dict | None = None) -> dict | None:
+    env = {**(kernel_env or {}), **(CAPPED_ENV if cpu_max_mhz else {}), **(extra or {})}
     return env or None
+
+
+OVERLAP_SWITCHES = ("quant", "glue", "commit")
+
+
+def overlap_list(text: str) -> str:
+    """A --overlap value: all, or a comma list of the engine's overlap switches."""
+    names = [name.strip() for name in text.split(",") if name.strip()]
+    unknown = [name for name in names if name != "all" and name not in OVERLAP_SWITCHES]
+    if not names or unknown:
+        raise argparse.ArgumentTypeError(f"{text!r}: use all or a comma list of {', '.join(OVERLAP_SWITCHES)}")
+    return ",".join(names)
+
+
+def overlap_environment(switches: str | None) -> dict | None:
+    """The engine environment of --overlap; None leaves STRATA_Q36_OVERLAP alone."""
+    return {"STRATA_Q36_OVERLAP": switches} if switches else None
 
 
 def uses_iq_experts(model: Path) -> bool:
@@ -358,6 +375,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--iq-kernels", choices=("auto", "on", "off"), default="auto",
                         help="the AVX-512 kernels for IQ3_S and IQ4_XS experts: auto (default) turns them on when the model has such "
                              "experts, on and off force it; the Q4_K_XL file is never affected")
+    parser.add_argument("--overlap", nargs="?", const="all", type=overlap_list, metavar="LIST",
+                        help="overlap GPU and CPU work inside a decode step (off by default): all, or a comma list of "
+                             f"{', '.join(OVERLAP_SWITCHES)}; the output is the same as without it (docs/TUNING.md)")
     parser.add_argument("--ram", help="memory budget of the server, e.g. 9G (page cache included); default: the profile's")
     parser.add_argument("--context", type=int, help="context window in tokens")
     parser.add_argument("--chunk", type=int, help="prompt chunk in tokens (more is faster, and takes VRAM)")
@@ -434,7 +454,8 @@ def main() -> int:
     (ROOT / "logs").mkdir(exist_ok=True)
     config_path = RUN_DIR / "qwen36.json"
     kernel_env = iq_kernel_env(args.iq_kernels, MODEL_FILE)
-    config = build_config(profile, args.port, args.sampling, args.max_temp, engine_environment(kernel_env, cpu_max_mhz, args.experts_used))
+    lever_env = {**experts_used_env(args.experts_used), **(overlap_environment(args.overlap) or {})}
+    config = build_config(profile, args.port, args.sampling, args.max_temp, engine_environment(kernel_env, cpu_max_mhz, lever_env))
     config_path.write_text(json.dumps(config, indent=1) + "\n", encoding="utf-8")
 
     server = [str(ROOT / ".venv" / "bin" / "python"), str(ROOT / "serve" / "server.py"), "--engine", "strata", "--config",
@@ -460,7 +481,9 @@ def main() -> int:
     print(f"strata-launch: profile {args.profile}, memory budget {profile['ram'] or 'none (elastic page cache)'}, context {profile['context']}, "
           f"port {args.port}, temperature limit {f'{args.max_temp:g} C' if args.max_temp > 0 else 'none'}, turbo {args.turbo}, "
           f"priority {args.priority}, model {MODEL_FILE.name}, iq kernels {iq_kernel_state(kernel_env)}"
-          + (f", cpu cap {cpu_max_mhz:g} MHz" if cpu_max_mhz else "") + (f", experts per token {args.experts_used}" if args.experts_used is not None else "") + (f", memory protection {memory_low / GIB:.1f} GiB" if memory_low else "")
+          + (f", overlap {args.overlap}" if args.overlap else "")
+          + (f", experts per token {args.experts_used}" if args.experts_used is not None else "")
+          + (f", cpu cap {cpu_max_mhz:g} MHz" if cpu_max_mhz else "") + (f", memory protection {memory_low / GIB:.1f} GiB" if memory_low else "")
           + (f", prewarm {prewarm_bytes / GIB:.1f} GiB" if prewarm_bytes else ""), file=sys.stderr)
     apply_turbo(args.turbo, args.dry_run)
     apply_priority(args.priority, args.dry_run)

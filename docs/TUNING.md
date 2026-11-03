@@ -413,6 +413,59 @@ tools/kld_experts.py --model models/qwen3.6-35b-a3b/<served>.gguf --ref-model <q
 - Watch: the tokens per second and the drafts' acceptance in the server log, the package temperature, and the KLD table above. A
   lower K also changes the prompt pass, so the quality of long contexts and of tool calls is worth a look before it is left on.
 
+## Overlapping the GPU and the CPU inside a step (opt-in)
+
+In the hybrid mode a layer is a chain: the GPU runs the mixer (attention or recurrent layer) and the router, the CPU pool runs
+the experts that have no slot in VRAM, the GPU merges them and goes on to the next layer. The resident experts and the shared
+expert already run beside the pool. What stays serial is the GPU mixer of layer l+1 behind the pool of layer l, the pool behind
+the GPU mixer of the same layer, and the host work between them. `STRATA_Q36_OVERLAP` (a comma list, or `all` / `1`) turns on
+the pieces below; the launcher takes `--overlap [LIST]`. Nothing is on by default, and with every switch off the engine runs
+the code it always ran. The output must be the same with any switch on: the first two change how bytes get to the pool,
+the third moves work to another stream, none changes an arithmetic step.
+
+| Switch | What it does | Expected gain |
+| --- | --- | --- |
+| `quant` | The CPU path's activations (Q8_K for the i-quants and k-quants, Q8_0 for Q4_0, Q5_0, Q8_0, IQ4_NL, MXFP4) are quantized by a GPU kernel (`src/qwen35/q36_act_quant.cuh`) with the host quantizer's arithmetic, and only the quantized bytes (2336 per row for 2048 values, not 8192) come back. A layer whose format the kernel does not cover, or whose startup probe differs from the host quantizer, keeps the host path. | Host quantization (a few microseconds per row and layer) and half the copy; under 1% of a step, estimated, not measured |
+| `glue` | `moe_hybrid_cpu` keeps its job tables between calls (no `std::map`, no per-call vectors), uploads the CPU rows and the merge flags in one copy instead of two, and the wait for the router pauses between polls. | Two copies less per layer, 20 to 30 microseconds of host and DMA time; about 1 ms of a 75 ms step, estimated |
+| `commit` | After a verify window the commit of the GDN state (`commit()`, 30 layers of two small kernels) runs on a side stream, so the next step's MTP forward starts at once; the next verify forward waits for it. The MTP block is attention only, so it shares nothing with the commit. | The commit's GPU time (an estimated 1.5 to 3 ms: it is 32 blocks per layer on a 20-SM card) leaves the critical path of speculative steps |
+
+`rows` (row wavefront across the rows of a verify window) is accepted in the list for forward compatibility and ignored; it
+is not built. The mixer of row t+1 needs row t's input to the layer (the GDN state, the KV cache), not row t's expert output,
+so the GPU part of row t+1 could run while the pool computes row t, and the existing kernels could be reused exactly by
+re-running rows 0..t of the conv and the recurrence for row t (the verify window does not write the state). It was not built
+because (1) rows would stop sharing a CPU job per expert, and the stats line below shows how much sharing there is (entries per
+weight set read); (2) every row would launch the whole layer again, about T times the launches per step on a host thread
+that also computes in the pool, in a mode that cannot use CUDA graphs; (3) the pool call blocks the thread that would have to
+launch the next row, so it needs a helper thread; (4) none of it can be proven bitwise without a model run. Measure the
+sharing and the GPU wait first (`STRATA_Q36_OVERLAP_STATS`): the gain is at most the GPU wait, and the cost grows with
+`entries / weight sets`.
+
+`STRATA_Q36_OVERLAP_STATS=1` (or N: every N-th step) prints one line per decode or speculative step to stderr:
+`total = GPU wait + host glue + pool + upload/merge enqueue + rest`. `GPU wait` is the time the host spun for the router
+(the GPU mixer that the CPU could not hide), `host glue` the job building before the pool, `pool` the pool run,
+`upload/merge enqueue` the host time to enqueue the CPU rows' copy and merge, `rest` everything else (launches, MTP, head,
+syncs). The line also gives the CPU entries and the weight sets they read, and in how many layers the router result had already arrived when the
+host looked for it (all of them: the host is the late one and enqueueing is the limit; none: the GPU mixer is what the CPU waits for). The times are host wall-clock and the stats
+never synchronize the stream, so they do not change the schedule; with `commit` the trailing commit is not in the line, so
+judge that switch by tokens per second.
+
+Checks, none needs more than seconds except the engine runs:
+
+- `ninja q36_act_quant_parity && ./q36_act_quant_parity`: the device quantizer against `native_quant_act` for 16 weight types,
+  3 widths and 8 value shapes (ties, exact halves, zero blocks, denormals, 1e30), 76800 rows, no model. It passes with
+  the AVX2 host quantizer and with `STRATA_NO_Q8K_AVX2=1` (ggml's reference).
+- `STRATA_Q36_VERIFY_OVERLAP=1` makes the engine run the old way next to the new one and compare bitwise: the device
+  activations against the host quantizer's for every row, the glue job lists and merge flags against the classic builder's
+  (same jobs, same order, same pointers), and one GDN layer's state after the side-stream commit against the same commit run
+  on a copy. It prints `VERIFY_OVERLAP: N comparisons, M mismatches` at exit; M must be 0. It slows the steps.
+- The same prompt with `STRATA_Q36_OVERLAP=all` and without must give the same tokens (greedy decoding, MTP on).
+
+Risks: `commit` is the only switch that changes ordering between streams: anything new that reads the GDN state or the verify
+buffers must call `join_commit()` first (the current entry points do). `quant` assumes the host quantizer is ggml's AVX2
+or reference one; the probe at placement keeps the host path on a build where it is not (the probe's synthetic rows go through
+`native_quant_act`, so `STRATA_ACT_DUMP` should not be combined with `quant`; with `quant` the dump would miss the real rows anyway). The GPU wait the switches cannot
+remove is the mixer of every layer, about 0.27 ms of the 0.7 ms per layer in the table above.
+
 ## Against llama.cpp
 
 llama.cpp b3fa6995 on the same machine (`-ngl 99 --n-cpu-moe 99 -t 4 -fa on`, experts on the CPU, no drafting), greedy
