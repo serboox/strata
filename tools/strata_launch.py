@@ -2,6 +2,7 @@ import argparse
 import json
 import math
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -128,20 +129,159 @@ def background_scope_works() -> bool:
     return result.returncode == 0 and result.stdout.strip() == "1"
 
 
-def scope_properties(memory_budget: str | None, background: bool) -> list:
+def scope_properties(memory_budget: str | None, background: bool, memory_low: int | None = None) -> list:
     properties = [f"MemoryMax={memory_budget}", "MemorySwapMax=0"] if memory_budget else []
+    if memory_low:
+        properties.append(f"MemoryLow={memory_low}")
     return properties + (BACKGROUND_PROPERTIES if background else [])
 
 
-def wrap_in_scope(server: list, properties: list) -> list:
-    """The server command inside its own systemd scope, which carries the memory limit and the background weights."""
-    if not properties:
+GIB = 1 << 30
+SIZE_UNITS = {"": 1, "K": 1 << 10, "M": 1 << 20, "G": GIB, "T": 1 << 40}
+PROTECT_MARGIN = 2 * GIB    # what the server needs next to the cached model: KV cache, buffers, the Python server
+CGROUP_ROOT = Path("/sys/fs/cgroup")
+
+
+def parse_size(text: str) -> int:
+    match = re.fullmatch(r"(\d+(?:\.\d+)?)([KMGT]?)", text.strip().upper())
+    if match is None:
+        raise ValueError(f"cannot read the size {text!r}")
+    return int(float(match.group(1)) * SIZE_UNITS[match.group(2)])
+
+
+def protect_bytes(io: str, budget: str | None, model_size: int) -> int | None:
+    """What to ask the kernel to keep in memory for the server: the cached model and the engine around it, within the budget.
+    None when the profile reads the model with O_DIRECT, which never fills the page cache."""
+    if io != "buffered":
+        return None
+    wanted = model_size + PROTECT_MARGIN
+    return min(wanted, parse_size(budget)) if budget else wanted
+
+
+def memory_available() -> int:
+    for line in Path("/proc/meminfo").read_text(encoding="ascii").splitlines():
+        if line.startswith("MemAvailable:"):
+            return int(line.split()[1]) * 1024
+    return 0
+
+
+def prewarm_plan(io: str, budget: str | None, model_size: int, available: int) -> tuple[int | None, str]:
+    """How many bytes of the model to read into the page cache before the server starts, or None and the reason not to."""
+    if io != "buffered":
+        return None, "this profile reads the model with O_DIRECT, so the page cache would not be used"
+    if budget and model_size > parse_size(budget):
+        return None, f"the model does not fit the {budget} budget"
+    needed = model_size + PROTECT_MARGIN
+    if available < needed:
+        return None, f"{available / GIB:.1f} GiB of memory is available and the model needs {needed / GIB:.1f} GiB, so reading it would push other programs out"
+    return model_size, ""
+
+
+def scope_ancestors(uid: int) -> list:
+    """The control groups above a new user scope: app.slice of the user manager and everything over it."""
+    manager = f"user.slice/user-{uid}.slice/user@{uid}.service"
+    return ["user.slice", f"user.slice/user-{uid}.slice", manager, f"{manager}/app.slice"]
+
+
+def protection_gaps(needed: int, uid: int | None = None, root: Path = CGROUP_ROOT) -> list:
+    """The levels above the server scope whose memory.low is below `needed`, as (path, value or None when unreadable).
+    The kernel honours the MemoryLow of the scope only up to the lowest value above it, and shares that value in proportion
+    among every scope that asks, so this is a necessary condition, not a guarantee."""
+    gaps = []
+    for path in scope_ancestors(os.getuid() if uid is None else uid):
+        try:
+            text = (root / path / "memory.low").read_text(encoding="ascii").strip()
+        except OSError:
+            gaps.append((path, None))
+            continue
+        if text != "max" and int(text) < needed:
+            gaps.append((path, int(text)))
+    return gaps
+
+
+def wrap_in_scope(server: list, properties: list, always: bool = False) -> list:
+    """The server command inside its own systemd scope, which carries the memory limit and the background weights.
+    Without properties the command is left alone unless `always` asks for a scope anyway."""
+    if not properties and not always:
         return server
     command = ["systemd-run", "--user", "--scope", "--quiet"]
     for prop in properties:
         command += ["-p", prop]
     # systemd-run reads a $ in its arguments as the start of a variable and $$ as one literal dollar
     return command + ["--"] + [argument.replace("$", "$$") for argument in server]
+
+
+def user_scope_works() -> bool:
+    """Whether systemd-run can start a user scope here: the program can exist while no user manager is running."""
+    try:
+        result = subprocess.run(["systemd-run", "--user", "--scope", "--quiet", "true"], capture_output=True, timeout=PROBE_TIMEOUT_SECONDS, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def scope_available(have_systemd: bool, base_properties: list, dry_run: bool, probe=user_scope_works) -> tuple[bool, str]:
+    """Whether memory protection and the prewarm can count on a scope of their own, and a warning when they cannot.
+    The properties that exist anyway already depend on a scope, so only a start that would run without one is probed."""
+    if not have_systemd:
+        return False, "systemd-run is not available, so memory protection is off and prewarm runs in the current control group"
+    if base_properties or dry_run or probe():
+        return True, ""
+    return False, "no user systemd manager is reachable, so memory protection is off and prewarm runs in the current control group"
+
+
+def plan_memory(protect: bool | None, prewarm: bool | None, io: str, budget: str | None, model_size: int, have_systemd: bool,
+                base_properties: list, dry_run: bool, available=memory_available, gaps=protection_gaps, probe=user_scope_works) -> tuple:
+    """What to do about keeping the model in memory: (MemoryLow bytes or None, bytes to prewarm or None, whether the prewarm gets a
+    scope of its own, messages). None means on unless switched off: it stays silent when it does not apply, and True says why."""
+    messages = []
+    memory_low = None
+    if protect is not False:
+        try:
+            memory_low = protect_bytes(io, budget, model_size)
+        except ValueError as error:
+            messages.append(f"memory protection skipped: {error}")
+        if memory_low is None and io != "buffered":
+            if protect:
+                messages.append("memory protection skipped: this profile reads the model with O_DIRECT, so the page cache is not used")
+        elif memory_low is not None and not have_systemd:
+            if protect:
+                messages.append("memory protection skipped: it needs systemd-run")
+            memory_low = None
+        elif memory_low is not None:
+            for path, value in gaps(memory_low):
+                allowed = "no memory.low" if value is None else f"{value / GIB:.1f} GiB"
+                messages.append(f"memory protection is only partial: /{path} allows {allowed}, the server asks for {memory_low / GIB:.1f} GiB "
+                                f"(see docs/TUNING.md, Keeping the model in memory)")
+    prewarm_bytes = None
+    if prewarm is not False:
+        try:
+            prewarm_bytes, reason = prewarm_plan(io, budget, model_size, available())
+        except (ValueError, OSError) as error:
+            prewarm_bytes, reason = None, str(error)
+        if prewarm_bytes is None and (prewarm or io == "buffered"):
+            messages.append(f"prewarm skipped: {reason}")
+    scope_for_prewarm = False
+    if memory_low or prewarm_bytes:
+        usable, warning = scope_available(have_systemd, base_properties, dry_run, probe)
+        if warning:
+            messages.append(warning)
+        if not usable:
+            memory_low = None
+        scope_for_prewarm = usable and bool(prewarm_bytes)
+    return memory_low, prewarm_bytes, scope_for_prewarm, messages
+
+
+# short forms that selected one flag before --protect-ram, --prewarm and their --no- forms made them ambiguous
+OLD_ABBREVIATIONS = {"--pro": "--profile", "--n": "--no-limit", "--no": "--no-limit", "--no-": "--no-limit"}
+
+
+def restore_old_abbreviations(arguments: list) -> list:
+    restored = []
+    for argument in arguments:
+        name, equals, value = argument.partition("=")
+        restored.append(OLD_ABBREVIATIONS.get(name, name) + equals + value)
+    return restored
 
 
 def ensure_tokenizer() -> None:
@@ -151,7 +291,7 @@ def ensure_tokenizer() -> None:
                     str(MODEL_DIR / "pack")], check=True)
 
 
-def main() -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Start the Qwen3.6-35B-A3B server inside a memory budget.")
     parser.add_argument("--profile", choices=list(PROFILES), default="auto")
     parser.add_argument("--ram", help="memory budget of the server, e.g. 9G (page cache included); default: the profile's")
@@ -169,10 +309,22 @@ def main() -> int:
     parser.add_argument("--priority", choices=("background", "normal"), default="background",
                         help="background (default): the server yields the CPU and the disk to everything else, so the machine "
                              "stays responsive while it works; normal: no change")
+    parser.add_argument("--protect-ram", action=argparse.BooleanOptionalAction, default=None,
+                        help="ask the kernel to keep the cached model in memory (MemoryLow on the server scope); soft, and only "
+                             "fully honoured when the levels above allow it, see docs/TUNING.md; on by default, "
+                             "--no-protect-ram turns it off")
+    parser.add_argument("--prewarm", action=argparse.BooleanOptionalAction, default=None,
+                        help="read the model file into the page cache before the server starts; skipped when the memory is not "
+                             "free for it; on by default, --no-prewarm turns it off")
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--no-limit", action="store_true", help="do not run the server in a memory-limited cgroup")
     parser.add_argument("--dry-run", action="store_true", help="write the config and print the command, start nothing")
-    args = parser.parse_args()
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args(restore_old_abbreviations(sys.argv[1:]))
     if not (args.max_temp == 0 or (math.isfinite(args.max_temp) and MIN_LIMIT_C <= args.max_temp <= MAX_LIMIT_C)):
         parser.error(f"--max-temp must be 0 (off) or from {MIN_LIMIT_C:g} to {MAX_LIMIT_C:g} degrees Celsius, not {args.max_temp:g}")
 
@@ -207,10 +359,19 @@ def main() -> int:
     if background and not (have_systemd and (args.dry_run or background_scope_works())):
         print("strata-launch: this machine does not give the server its own CPU weight, so only the idle scheduling class is set", file=sys.stderr)
         background = False
-    command = wrap_in_scope(server, scope_properties(memory_budget, background))
+    model_size = MODEL_FILE.stat().st_size
+    memory_low, prewarm_bytes, scope_for_prewarm, messages = plan_memory(
+        args.protect_ram, args.prewarm, profile["io"], memory_budget, model_size, have_systemd,
+        scope_properties(memory_budget, background), args.dry_run)
+    for message in messages:
+        print(f"strata-launch: {message}", file=sys.stderr)
+    if prewarm_bytes:
+        server = [server[0], str(ROOT / "tools" / "strata_prewarm.py"), "--limit", str(prewarm_bytes), str(MODEL_FILE), "--"] + server
+    command = wrap_in_scope(server, scope_properties(memory_budget, background, memory_low), always=scope_for_prewarm)
     print(f"strata-launch: profile {args.profile}, memory budget {profile['ram'] or 'none (elastic page cache)'}, context {profile['context']}, "
           f"port {args.port}, temperature limit {f'{args.max_temp:g} C' if args.max_temp > 0 else 'none'}, turbo {args.turbo}, "
-          f"priority {args.priority}", file=sys.stderr)
+          f"priority {args.priority}" + (f", memory protection {memory_low / GIB:.1f} GiB" if memory_low else "")
+          + (f", prewarm {prewarm_bytes / GIB:.1f} GiB" if prewarm_bytes else ""), file=sys.stderr)
     apply_turbo(args.turbo, args.dry_run)
     apply_priority(args.priority, args.dry_run)
     if args.dry_run:

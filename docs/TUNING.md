@@ -26,6 +26,47 @@ The CPU package reaches 100 C about ten seconds into a generation and the clocks
 short request can show 37 tok/s while the same request after a minute of load shows 25-28. Compare runs only from the
 same thermal state.
 
+## Keeping the model in memory
+
+Two different things can take the model out of memory. The swap takes memory of a process (the engine's buffers, the Python
+server), and the server's scope has `MemorySwapMax=0` when a budget is set, so it does not swap. The model file is another
+case: it sits in the page cache, which the kernel drops when another program needs the memory and reads back from the SSD on
+the next access. That is what makes the speed fall under pressure (the table above), and the `madvise(WILLNEED)` in the engine
+only asks for a read-ahead, it pins nothing.
+
+`--protect-ram` asks the kernel not to drop it: the server's scope gets `MemoryLow` of the model size plus 2 GiB, capped by the
+budget. The kernel then takes memory from every unprotected program first and touches the model only when nothing else is
+left. It is a soft guarantee, so it cannot cause an out-of-memory kill of another program. It applies only to the profiles
+that read through the page cache (`auto` and `max`); the `direct` profiles never fill it.
+
+The `MemoryLow` of a scope is honoured only up to the lowest `MemoryLow` of every level above it: `user.slice`,
+`user-1000.slice`, `user@1000.service` and the `app.slice` of the user manager. Without a value on each of them the setting
+does nothing. On this machine each is 24G, set by a drop-in `strata-memory-low.conf` in `/etc/systemd/system/user.slice.d`,
+`user-.slice.d`, `user@.service.d` and in `/etc/systemd/user/app.slice.d`. The launcher reads these levels (found from the user
+id) and prints a warning when one allows less than the server asks. That is a necessary condition, not a guarantee: the kernel
+shares the value of a level in proportion among every scope below it that asks for protection. By hand:
+
+    for d in user.slice user.slice/user-1000.slice user.slice/user-1000.slice/user@1000.service \
+             user.slice/user-1000.slice/user@1000.service/app.slice; do echo "$d $(cat /sys/fs/cgroup/$d/memory.low)"; done
+
+`--prewarm` reads the model file once before the server starts, in the same scope, so the pages are charged to it and
+protected by it. A cached page stays charged to the control group that read it first (the scope of an earlier run, or a shell),
+so the file is dropped from the cache and read again; a 1 GiB test file that another group had cached ended up as 1024 MiB in
+the scope's own page cache, and the read took under a second on the NVMe disk. The re-read costs the time of reading the file
+from the SSD even when it was cached. A page that another process has mapped stays with its owner, so the helper reports how
+much of the file ended up counted in the scope and warns when it is less than 90 %. A scope is created for the prewarm even
+when no other property asks for one; a probe checks that a user manager is reachable, and when it is not the launcher warns,
+leaves the protection off and runs the prewarm in the current control group. It is skipped when the profile reads with O_DIRECT, when the model
+does not fit the budget, and when less memory is available than the model needs, because reading it would push other
+programs out. Both are on by default and switch off with `--no-protect-ram` and `--no-prewarm`; with both switched off a
+start is the same as before, and the `direct` profiles (`lean`, `balanced`, `fast`) are the same either way. The prewarm
+makes the server ready later by the time the file takes to read.
+
+Checked: the values the kernel reports after the drop-ins, the scope's own `memory.stat` after a prewarm (a 1 GiB test file
+shows up as 1024 MiB of the scope's page cache), the launcher's command and warnings with `--dry-run`, and that a start with both
+flags switched off prints the same command as before. Not measured: how the model behaves under real memory pressure with
+`--protect-ram`.
+
 ## What each setting does
 
 | Setting | Value | Effect |
@@ -41,6 +82,8 @@ same thermal state.
 | `--max-temp` | 80 | while the CPU package or the GPU is at this many degrees or hotter, the engine is paused for a share of every half second, a bigger share the hotter it is; 0 turns the limit off |
 | `--turbo` | off | the CPU turbo boost at start: `off`, `on` or `keep`; `tools/turbo on|off|status` switches it at any time |
 | `--priority` | background | the server and the engine yield the CPU and the disk to every other program (see "Staying in the background"); `normal` leaves the priorities alone |
+| `--protect-ram` | on | ask the kernel to keep the cached model in memory (`MemoryLow` on the server's scope); soft, and only fully honoured when every level above allows it (see "Keeping the model in memory"); `--no-protect-ram` turns it off |
+| `--prewarm` | on | read the model file into the page cache before the server starts; skipped when the memory is not free for it; `--no-prewarm` turns it off |
 | `--prefetch` | on | read-ahead of an expert's ranges, issued only when the range is not cached |
 | `--stream-io` | direct | O_DIRECT reads for prompt chunks, so they do not push the hot experts out of the cache |
 
