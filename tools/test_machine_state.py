@@ -44,6 +44,36 @@ class ReadTests(unittest.TestCase):
         self.assertEqual(sorted(entry.split(":")[0] for entry in found), ["101", "103"])
 
 
+class CpuCapTests(unittest.TestCase):
+    def fake_cpus(self, limits):
+        root = scratch(self)
+        for index, value in enumerate(limits):
+            (root / f"cpu{index}" / "cpufreq").mkdir(parents=True)
+            (root / f"cpu{index}" / "cpufreq" / "scaling_max_freq").write_text(f"{value}\n")
+        (root / "cpufreq").mkdir()
+        return root
+
+    def test_the_snapshot_holds_every_limit_and_the_restore_puts_changed_ones_back(self):
+        root = self.fake_cpus([3300000, 3300000])
+        saved = machine_state.cpu_cap_snapshot(root)
+        self.assertEqual(sorted(saved.values()), ["3300000", "3300000"])
+        (root / "cpu1" / "cpufreq" / "scaling_max_freq").write_text("2200000")
+        self.assertEqual(machine_state.cpu_cap_restore(saved), [])
+        self.assertEqual((root / "cpu1" / "cpufreq" / "scaling_max_freq").read_text(), "3300000")
+
+    def test_a_file_that_cannot_be_written_is_reported(self):
+        root = self.fake_cpus([3300000])
+        saved = machine_state.cpu_cap_snapshot(root)
+        (root / "cpu0" / "cpufreq" / "scaling_max_freq").write_text("2200000")
+        with mock.patch.object(Path, "write_text", side_effect=PermissionError("denied")):
+            failures = machine_state.cpu_cap_restore(saved)
+        self.assertEqual(len(failures), 1)
+        self.assertIn("denied", failures[0])
+
+    def test_a_machine_without_cpufreq_has_an_empty_snapshot(self):
+        self.assertEqual(machine_state.cpu_cap_snapshot(scratch(self)), {})
+
+
 class CollectTests(unittest.TestCase):
     def collect(self, load=0.5, available_kib=20971520, turbo="off", processes=(), usage=None, **arguments):
         meminfo = f"MemTotal: 32000000 kB\nMemAvailable: {available_kib} kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n"

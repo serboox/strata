@@ -11,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import quant_bench
 
 GIB = 1 << 30
+CPU_ROOT = Path("/sys/devices/system/cpu")
 USAGE_FILE = Path.home() / ".claude" / "usage.json"
 PROCESS_MARKERS = ("strata-q36", "llama-server", "llama-bench", "llama-perplexity", "serve/server.py")
 
@@ -50,6 +51,31 @@ def running_processes(proc: Path = Path("/proc"), markers: tuple = PROCESS_MARKE
         if command and any(marker in command.split(" ")[0] or f" {marker}" in command for marker in markers) and "machine_state" not in command:
             found.append(f"{entry.name}: {command[:100]}")
     return found
+
+
+def cpu_cap_snapshot(root: Path = CPU_ROOT) -> dict:
+    """The highest-frequency limit (kHz text) of every CPU by file path, for `cpu_cap_restore`."""
+    snapshot = {}
+    for path in sorted(root.glob("cpu[0-9]*/cpufreq/scaling_max_freq")):
+        try:
+            snapshot[str(path)] = path.read_text().strip()
+        except OSError:
+            continue
+    return snapshot
+
+
+def cpu_cap_restore(snapshot: dict) -> list:
+    """Write the saved limits back where they differ; returns a message for each file that could not be put back."""
+    failures = []
+    for name, saved in snapshot.items():
+        path = Path(name)
+        try:
+            if path.read_text().strip() == saved:
+                continue
+            path.write_text(saved)
+        except OSError as error:
+            failures.append(f"{name}: {error}")
+    return failures
 
 
 def collect(disk_path: str = "/home", max_load: float = 1.0, min_available_gib: float = 0.0) -> dict:
