@@ -103,6 +103,12 @@ add_executable(iq_vbmi_bench EXCLUDE_FROM_ALL tests/iq_vbmi_bench.cpp)
 target_include_directories(iq_vbmi_bench PRIVATE ${_strata_include} ${_ggml_include} third_party/ggml)
 target_link_libraries(iq_vbmi_bench PRIVATE strata_kernels_cpu)
 
+# The device quantizer of the CPU path's activations against the host's native_quant_act (no model needed):
+# `ninja q36_act_quant_parity && ./q36_act_quant_parity`
+add_executable(q36_act_quant_parity EXCLUDE_FROM_ALL tests/q36_act_quant_parity.cu)
+target_include_directories(q36_act_quant_parity PRIVATE ${_strata_include} ${_ggml_include} src/qwen35)
+target_link_libraries(q36_act_quant_parity PRIVATE strata_kernels_cpu CUDA::cudart)
+
 # ---- CUDA kernels of the Qwen3.6 path
 add_library(strata_cuda_kernels STATIC
   src/kernels/cuda/dequant_bf16.cu src/kernels/cuda/iq_kernels.cu src/kernels/cuda/native_mmvq.cu
