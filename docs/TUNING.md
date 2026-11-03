@@ -348,7 +348,8 @@ Checks, none needs more than seconds except the engine runs:
 
 Risks: `commit` is the only switch that changes ordering between streams: anything new that reads the GDN state or the verify
 buffers must call `join_commit()` first (the current entry points do). `quant` assumes the host quantizer is ggml's AVX2
-or reference one; the probe at placement keeps the host path on a build where it is not. The GPU wait the switches cannot
+or reference one; the probe at placement keeps the host path on a build where it is not (the probe's synthetic rows go through
+`native_quant_act`, so `STRATA_ACT_DUMP` should not be combined with `quant`; with `quant` the dump would miss the real rows anyway). The GPU wait the switches cannot
 remove is the mixer of every layer, about 0.27 ms of the 0.7 ms per layer in the table above.
 
 ## Against llama.cpp

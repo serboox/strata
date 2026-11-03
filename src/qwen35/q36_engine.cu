@@ -2966,13 +2966,14 @@ struct Engine {
     /// STRATA_Q36_OVERLAP_STATS: one line per decode / speculative step.  Times are host wall-clock, so the GPU work
     /// that the step overlaps with the CPU shows up as the part of `rest` that is not launch time.
     struct OvMark {
-        Clock::time_point t0 = Clock::now();
+        Clock::time_point t0;
         double wait = 0, prep = 0, cpu = 0, enq = 0;
         long long cpu_n = 0, gpu_n = 0, jobs = 0, layers = 0, ready = 0;
     };
     long long ov_steps = 0;
     OvMark ov_mark() const {
         OvMark a;
+        a.t0 = Clock::now();
         a.wait = hy_wait_ms;
         a.prep = hy_prep_ms;
         a.cpu = hy_cpu_ms;
@@ -3404,7 +3405,7 @@ struct Engine {
         uint8_t* dd = nullptr;
         CK(cudaMalloc(&dx, x.size() * 4));
         CK(cudaMalloc(&dd, kRows * kBytes));
-        CK(cudaMemcpy(dx, x.data(), x.size() * 4, cudaMemcpyHostToDevice));
+        CK(cudaMemcpyAsync(dx, x.data(), x.size() * 4, cudaMemcpyHostToDevice, st));
         q36act::launch(f.gu_act, dx, dd, n, kRows, kBytes, st);
         CK(cudaGetLastError());
         std::vector<uint8_t> dev(kRows * kBytes), host(kBytes);
