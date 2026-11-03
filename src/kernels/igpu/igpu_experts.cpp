@@ -21,6 +21,8 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+constexpr int kWarmupWideCall = 9;   // ggml-vulkan switches its expert matmul at more than 8 entries per call
+
 double ms_since(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
 
 std::string lower(std::string s) {
@@ -156,6 +158,23 @@ struct ExpertShare::Impl {
 
     bool init(const Options& o, const std::vector<ExpertSource>& src, std::string& err) {
         opt = o;
+        const int64_t ne = opt.n_expert;
+        int n_layers = 0, max_resident = 0;
+        for (const ExpertSource& s : src) {
+            if (s.gate == nullptr) continue;
+            ++n_layers;
+            max_resident = std::max(max_resident, s.resident);
+        }
+        if (n_layers == 0) {
+            err = "no layer left to the iGPU (every routed expert is in VRAM)";
+            return false;
+        }
+        // experts past the resident block only: the iGPU does not hold what a VRAM slot already serves
+        per_layer = (int) std::min<int64_t>(ne - max_resident, std::max<int64_t>(1, (int64_t) (opt.share * (double) ne + 0.5)));
+        if (per_layer < 1) {
+            err = "the VRAM slots already hold every expert";
+            return false;
+        }
         dev = pick_device(opt.device, err);
         if (dev == nullptr) return false;
         device_name = ggml_backend_dev_description(dev);
@@ -164,19 +183,9 @@ struct ExpertShare::Impl {
             err = "cannot open the Vulkan device " + device_name;
             return false;
         }
-        const int64_t ne = opt.n_expert;
-        per_layer = (int) std::max<int64_t>(1, std::min<int64_t>(ne - 1, (int64_t) (opt.share * (double) ne + 0.5)));
         std::set<std::pair<int, int>> probed;
-        int n_layers = 0;
-        for (const ExpertSource& s : src) {
-            if (s.gate == nullptr) continue;
-            ++n_layers;
-            if (probed.insert({s.gu_type, s.d_type}).second && !probe_types(s.gu_type, s.d_type, err)) return false;
-        }
-        if (n_layers == 0) {
-            err = "no layer to take experts from";
-            return false;
-        }
+        for (const ExpertSource& s : src)
+            if (s.gate != nullptr && probed.insert({s.gu_type, s.d_type}).second && !probe_types(s.gu_type, s.d_type, err)) return false;
         ggml_init_params p = {ggml_tensor_overhead() * (src.size() * 3 + 4), nullptr, true};
         wctx = ggml_init(p);
         layers.resize(src.size());
@@ -241,8 +250,23 @@ struct ExpertShare::Impl {
             }
             break;
         }
+        warm_up(src);
         worker = std::thread([this] { loop(); });
         return true;
+    }
+
+    // Both ggml-vulkan paths (up to 8 entries, and more) build their pipelines on first use: do it here, once per format pair.
+    void warm_up(const std::vector<ExpertSource>& src) {
+        std::set<std::pair<int, int>> done;
+        std::vector<float> zeros((size_t) opt.n_embd, 0.0f), out((size_t) opt.n_embd);
+        for (size_t li = 0; li < src.size(); ++li) {
+            if (src[li].gate == nullptr || !done.insert({src[li].gu_type, src[li].d_type}).second) continue;
+            for (int n : {1, std::min(kWarmupWideCall, opt.max_entries)}) {
+                std::vector<Entry> entries((size_t) n, Entry{zeros.data(), (int) ((src[li].resident) % opt.n_expert), out.data()});
+                Stats unused;
+                run(li, entries, unused);
+            }
+        }
     }
 
     void loop() {
@@ -287,6 +311,7 @@ struct ExpertShare::Impl {
             idbuf.resize((size_t) m);
             for (int i = 0; i < m; ++i) {
                 const Entry& e = entries[first + (size_t) i];
+                if (e.expert < 0 || (size_t) e.expert >= w.compact.size()) fail("an entry's expert is out of range");
                 std::memcpy(xbuf.data() + (size_t) i * N, e.x, N * sizeof(float));
                 idbuf[(size_t) i] = w.compact[(size_t) e.expert];
                 if (idbuf[(size_t) i] < 0) fail("an entry's expert is not in the share");
@@ -329,7 +354,8 @@ bool ExpertShare::owns(size_t layer, int expert) const {
 void ExpertShare::submit(size_t layer, const Entry* entries, int n) {
     if (n <= 0) return;
     {
-        std::lock_guard<std::mutex> lock(impl_->mu);
+        std::unique_lock<std::mutex> lock(impl_->mu);
+        impl_->cv_done.wait(lock, [this] { return !impl_->has_job; });
         impl_->job.assign(entries, entries + n);
         impl_->job_layer = layer;
         impl_->has_job = true;

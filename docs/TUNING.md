@@ -331,7 +331,9 @@ What to watch: the package temperature as usual (the iGPU draws from the same pa
 frequency or a power limit), and `STRATA_IGPU_STATS=1`, which prints per decode step the entries that went to the iGPU, the
 worker's time, the CPU pool's time and the time the CPU side waited for the worker at the join. If the wait is large the iGPU is
 the bottleneck and the share is too high; if it is always zero and the pool time did not shrink, the iGPU gets too little.
-The first call per expert format takes 0.2 to 0.5 s (the driver builds its pipelines), which the warm-up absorbs. The worker is one
+The first call per expert format takes 0.2 to 0.5 s (the driver builds its pipelines); the start-up does one call of each kind. With
+a capped CPU run the pool without spin (`STRATA_POOL_SPIN_US=0`, which the launcher sets with the frequency cap) so that the worker thread
+is not starved by busy-waiting pool threads. The worker is one
 more thread next to the pool's. Only the decode and small-batch path uses the iGPU; a prompt chunk streamed through the staging
 buffers does not.
 
@@ -346,6 +348,9 @@ graph building, row transfer and the run on the device. On the Iris Xe, with the
 1.2 to 1.3 for 2, 1.7 for 4, 2.3 for 8 and 5 to 6.4 for 16; nearly all of it is the run on the device (the transfer is 0.13 to 0.24 ms,
 the graph 0.01). The iGPU is at least twice as slow per entry as the whole pool, so it can only take a few entries of a layer:
 `STRATA_IGPU_MAX_ENTRIES` (default 8) caps the entries one layer sends to it, the pool computes the others, also for the iGPU's experts.
+ggml-vulkan runs up to 8 entries per call through its vector kernels and more through its matrix kernels, which round the
+activations differently, so keep the cap at 8 or less if a row must not depend on how many other entries share its call
+(`igpu_parity` checks both paths; the rows of both are within the tolerance above).
 Known risks: the extra RAM, the shared
 bandwidth, an iGPU failure mid-run stops the engine (a wrong row would be worse), and a share chosen without statistics may
 overlap experts that later move into the VRAM slots (those entries then never reach the iGPU).

@@ -17,7 +17,10 @@ namespace {
 
 int64_t gEmbd = 512, gFf = 256, gExperts = 16;
 constexpr double kShare = 0.5;
-constexpr int kResident = 2, kMaxEntries = 16, kEntries = 40, kRows = 6;
+constexpr int kResident = 2, kMaxEntries = 16, kRows = 6;
+// ggml-vulkan runs up to 8 entries per call through its vector kernels and more through the matrix ones: both are checked
+constexpr int kCallSizes[] = {1, 3, 8, 9, 40};
+constexpr size_t kCallSizeCount = sizeof(kCallSizes) / sizeof(kCallSizes[0]);
 
 // The iGPU may not be worse than a few times the CPU path's own distance to exact arithmetic (both quantise the
 // activations differently); the CPU-to-iGPU distance has an absolute cap on top.
@@ -179,6 +182,7 @@ int main(int argc, char** argv) {
     std::vector<float> rows((size_t) (kRows * gEmbd));
     for (float& v : rows) v = std::normal_distribution<float>(0.f, 1.f)(rng);
     int failures = 0;
+    Spread by_call_size[kCallSizeCount];
     std::printf("%-18s %10s %10s %10s %10s %10s %10s %9s\n", "formats (gate,up/down)", "gpu~cpu max", "mean", "gpu~exact max", "mean",
                 "cpu~exact max", "mean", "ms/call");
     for (const Case& c : kCases) {
@@ -220,22 +224,27 @@ int main(int argc, char** argv) {
         int calls = 0;
         for (int li : {0, 2}) {
             const LayerData& l = layer[which[li]];
-            std::vector<ig::Entry> entries((size_t) kEntries);
-            std::vector<float> got((size_t) (kEntries * gEmbd)), cpu((size_t) gEmbd), ideal((size_t) gEmbd);
-            for (int i = 0; i < kEntries; ++i)
-                entries[(size_t) i] = {rows.data() + (size_t) (i % kRows) * gEmbd, owned[(size_t) i % owned.size()], got.data() + (size_t) i * gEmbd};
-            const auto t0 = std::chrono::steady_clock::now();
-            share->submit((size_t) li, entries.data(), kEntries);
-            share->wait();
-            total_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-            ++calls;
-            for (int i = 0; i < kEntries; ++i) {
-                const ig::Entry& en = entries[(size_t) i];
-                cpu_expert(l.gate, l.up, l.down, en.expert, en.x, cpu.data());
-                ideal_expert(l.gate, l.up, l.down, en.expert, en.x, ideal.data());
-                vs_cpu.add(rel_error(en.out, cpu.data(), gEmbd));
-                vs_ideal.add(rel_error(en.out, ideal.data(), gEmbd));
-                cpu_vs_ideal.add(rel_error(cpu.data(), ideal.data(), gEmbd));
+            for (size_t k = 0; k < kCallSizeCount; ++k) {
+                const int n = kCallSizes[k];
+                std::vector<ig::Entry> entries((size_t) n);
+                std::vector<float> got((size_t) (n * gEmbd)), cpu((size_t) gEmbd), ideal((size_t) gEmbd);
+                for (int i = 0; i < n; ++i)
+                    entries[(size_t) i] = {rows.data() + (size_t) (i % kRows) * gEmbd, owned[(size_t) i % owned.size()], got.data() + (size_t) i * gEmbd};
+                const auto t0 = std::chrono::steady_clock::now();
+                share->submit((size_t) li, entries.data(), n);
+                share->wait();
+                total_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                ++calls;
+                for (int i = 0; i < n; ++i) {
+                    const ig::Entry& en = entries[(size_t) i];
+                    cpu_expert(l.gate, l.up, l.down, en.expert, en.x, cpu.data());
+                    ideal_expert(l.gate, l.up, l.down, en.expert, en.x, ideal.data());
+                    const double to_cpu = rel_error(en.out, cpu.data(), gEmbd);
+                    vs_cpu.add(to_cpu);
+                    vs_ideal.add(rel_error(en.out, ideal.data(), gEmbd));
+                    cpu_vs_ideal.add(rel_error(cpu.data(), ideal.data(), gEmbd));
+                    by_call_size[k].add(to_cpu);
+                }
             }
         }
         const bool ok = bad_owns == 0 && vs_ideal.max <= kVsIdealFactor * cpu_vs_ideal.max + kVsIdealSlack && vs_cpu.max <= kVsCpuMax;
@@ -244,6 +253,9 @@ int main(int argc, char** argv) {
                     bad_owns ? " (owns() table wrong)" : "");
         failures += !ok;
     }
+    std::printf("iGPU against ggml-cpu, worst row over all formats, by entries per call:");
+    for (size_t k = 0; k < kCallSizeCount; ++k) std::printf("  %d: %.2e", kCallSizes[k], by_call_size[k].max);
+    std::printf("\n");
     std::printf("%s\n", failures ? "igpu_parity: FAILED" : "igpu_parity: all formats within tolerance");
     return failures ? 1 : 0;
 }

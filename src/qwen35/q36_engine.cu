@@ -1760,7 +1760,7 @@ struct Engine {
     int32_t* h_rb = nullptr;                // pinned [n_expert + 1]: the sorted entries' expert bounds of this layer
     int32_t* rb_rel = nullptr;              // device [n_expert + 1]: one group's bounds relative to its first row
     int stream_pos = 0;
-    long long hy_cpu = 0, hy_gpu = 0, hy_swaps = 0;   // entries computed on the CPU / GPU, slot replacements
+    long long hy_cpu = 0, hy_gpu = 0, hy_igpu = 0, hy_swaps = 0;   // entries computed on the CPU pool / GPU / iGPU, slot replacements
     long long hy_jobs = 0;   // expert weight sets the CPU pool read (one per distinct expert of a layer's batch)
     double hy_cpu_ms = 0, hy_wait_ms = 0, hy_prep_ms = 0;   // pool time; waiting for the router; job building before the pool
     // decode / verify rows: their routing is counted once the rows are kept (commit), so a verify window's rejected
@@ -3163,6 +3163,7 @@ struct Engine {
             ++j.nt;
         }
         hy_cpu += n_miss - (int) igpu_entries.size();
+        hy_igpu += (long long) igpu_entries.size();
         hy_gpu += n_ent - n_miss;
         if (n_miss == 0) return;
         if (igpu) igpu->submit(li, igpu_entries.data(), (int) igpu_entries.size());
@@ -3662,7 +3663,7 @@ struct Engine {
         CK(cudaStreamSynchronize(st));
         warming = false;
         for (Hy& H : hy) std::fill(H.score.begin(), H.score.end(), 0.0);
-        hy_cpu = hy_gpu = hy_swaps = 0;
+        hy_cpu = hy_gpu = hy_igpu = hy_swaps = 0;
         hy_cpu_ms = hy_wait_ms = hy_prep_ms = 0;
         hy_jobs = 0;
         if (igpu) igpu->reset_stats();
@@ -3817,6 +3818,7 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
         }
         std::fprintf(stderr, "strata-q36: every routed expert in VRAM (%.2f GiB) in %.1f s\n", (double) total / (1 << 30),
                      ms_since(t0) / 1000.0);
+        attach_igpu(E, all, 1);
         return true;
     }
 #if !defined(STRATA_Q36_CPU_POOL)
@@ -4933,7 +4935,7 @@ int strata::qwen35::run(int argc, char** argv) {
                 for (const auto& kv : E.v_by)
                     std::fprintf(stderr, "strata-q36 VERIFY   %s: %lld mismatches\n", kv.first.c_str(), kv.second);
             if (!E.m->hybrid) return;
-            const long long n = E.hy_cpu + E.hy_gpu;
+            const long long n = E.hy_cpu + E.hy_gpu + E.hy_igpu;
             std::fprintf(stderr, "strata-q36: hybrid experts: %lld of %lld batch entries on the GPU (%.1f%%), %lld on the "
                          "CPU pool in %.0f ms, %lld slot replacements\n", E.hy_gpu, n, n ? 100.0 * E.hy_gpu / n : 0.0,
                          E.hy_cpu, E.hy_cpu_ms, E.hy_swaps);

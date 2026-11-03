@@ -47,5 +47,5 @@
   },
   "quality_check": "build/igpu_parity",
   "parity_check": "not bit-identical: the iGPU uses float activations; igpu_parity bounds the error per format, and the same prompt under greedy sampling should give the same text as the share-off run for a few hundred tokens",
-  "notes": "Watch the package temperature (the iGPU shares the power budget), the extra RAM (about 4 GiB at share 0.25) and the STRATA_IGPU_STATS lines: a large join wait means the iGPU is the bottleneck; zero wait with an unchanged pool time means the share is too small. Compare tok/s against the same run with the switch off. STRATA_IGPU_MAX_ENTRIES (default 8) caps the entries per layer call; try 4 and 16 if the join wait or the pool time says the split is off."
+  "notes": "Watch the package temperature (the iGPU shares the power budget), the extra RAM (about 4 GiB at share 0.25) and the STRATA_IGPU_STATS lines: a large join wait means the iGPU is the bottleneck; zero wait with an unchanged pool time means the share is too small. Compare tok/s against the same run with the switch off. STRATA_IGPU_MAX_ENTRIES (default 8) caps the entries per layer call; try 4 and 16 if the join wait or the pool time says the split is off. Keep STRATA_IGPU_MAX_ENTRIES at 8 or less for rows that do not depend on the batch; run with STRATA_POOL_SPIN_US=0."
 }
