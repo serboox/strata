@@ -149,6 +149,51 @@ second, as without any limit, because the hardware still runs the CPU at full fr
 the engine. The whole model on the integrated GPU (llama.cpp with Vulkan) gave 10.8 to 11.3 tokens per second with the package at
 59 to 65 C, and 8.8 with the discrete card added by a layer split.
 
+## Measuring the cooling
+
+Cooling is physical: software can only measure it and switch the machine's own cooling profile. `tools/cooling_kit.py` is the
+protocol for that. For each CPU frequency cap (default 2.2, 2.4, 2.6 and 2.8 GHz) and each platform profile it runs the standard
+benchmark through `tools/quant_bench.py` (6 workers, `STRATA_POOL_SPIN_US=0`, the server's own 80 C limit, requests back to back
+without a cool-down between them), cools the package to 55 C before every step, and samples every 2 seconds the package
+temperature, the hottest core, every CPU's frequency, the package power, the three fan speeds and the platform profile. A step
+stops when the package reaches the limit, when its duration is over, or when the benchmark ends; the kit then puts back what it
+changed (the cap files, and the platform profile when it switched it) and says in the result what it restored.
+
+```sh
+# check the sensors for 20 seconds, no benchmark
+python3 tools/cooling_kit.py --sample-only 20
+# the plan and the exact commands, nothing runs
+python3 tools/cooling_kit.py --dry-run --setup "laptop on stand, fans cleaned"
+# the measurement (four steps of 5 to 9 minutes each, plus the cool-downs)
+python3 tools/cooling_kit.py --setup "laptop on stand, fans cleaned" --duration 300
+# also compare the platform's cooling profiles (asks for the password in a dialog for every switch)
+python3 tools/cooling_kit.py --setup "..." --profiles balanced,performance --apply-profile
+```
+
+`--setup` is a free-text label of the physical conditions (stand, cleaned fans, room, a cooling pad) kept in every result, so two
+runs can be compared with the changed condition in view. The results go to `run/experiments/cooling/<time>/`: `samples.csv`
+(one row per sample and step), `result.json`, `table.txt` and `chart.svg` (`--png` also renders a PNG). The one-screen table has,
+per step, the sustained speed (the median of the second half of the requests, the heat-soaked state) next to the first request's,
+the seconds until the package first reached 75 C and 80 C, the mean and the peak package temperature and the CPU fan's mean and
+maximum RPM; `result.json` also has the times counted from the start of the first request (the model loading is not heat) and the
+mean and peak power.
+
+What the kit does not pretend:
+
+- **The fan sensors.** The fan driver on this laptop (`bitland_mifs`, hwmon `fan1` CPU, `fan2` GPU, `fan3` SYS) read 0 RPM while the
+  package was at 70 C. A fan that reads 0 for the whole run is reported as an unreliable sensor (idle fan or dead sensor, and "most
+  likely not wired" when the package got hot), never as a stopped fan, and its columns show `n/a`. `--sample-only` shows this in
+  seconds.
+- **Power.** The RAPL counter (`/sys/class/powercap/intel-rapl:0/energy_uj`) is readable by root only here. The kit says so and
+  prints the command that opens it until the next reboot (`sudo -A chmod a+r ...`); it never runs sudo on its own.
+- **The platform profile** (`/sys/firmware/acpi/platform_profile`, here `low-power balanced balanced-performance performance`)
+  belongs to root. Asking for a profile other than the current one without `--apply-profile` stops the kit and prints the command
+  to paste. With `--apply-profile` the kit runs `sudo -A tee` for each switch (the password dialog names the reason) and puts the
+  first profile back at the end, also after Ctrl+C or a failed step.
+- **The 80 C limit** stays enforced by the server's own governor (it pauses the engine near the limit), so a step that holds 79 C
+  shows lower speed rather than a higher temperature; the time to 80 C is then empty. The kit's own stop at the limit is the second
+  guard. The duration counts from the start of the step, with 240 seconds for the model to load added.
+
 ## Staying in the background
 
 The model keeps three or four cores busy for as long as it generates. At the default priority the browser, the editor and the

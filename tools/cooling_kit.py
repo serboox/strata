@@ -545,7 +545,7 @@ def parse_args(argv: list | None = None):
                         help="platform profiles to test, from /sys/firmware/acpi/platform_profile_choices (default: the current one)")
     parser.add_argument("--apply-profile", action="store_true", help="let the kit switch the platform profile with `sudo -A tee` (asks for the password in a "
                         "dialog) and put the first one back at the end")
-    parser.add_argument("--duration", type=float, default=DEFAULT_DURATION_S, help="seconds of load per step after the model is loaded")
+    parser.add_argument("--duration", type=float, default=DEFAULT_DURATION_S, help=f"seconds per step; {STARTUP_ALLOWANCE_S:.0f} s for the model to load are added")
     parser.add_argument("--limit", type=float, default=DEFAULT_LIMIT_C, help="stop a step when the package reaches this many degrees; also the server's own limit")
     parser.add_argument("--start-temp", type=float, default=DEFAULT_START_TEMP_C, help="cool down to this package temperature before each step")
     parser.add_argument("--cool-timeout", type=float, default=900.0)
