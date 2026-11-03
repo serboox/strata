@@ -74,6 +74,39 @@ bool cpu_avx512_ok() {
     return ok;
 }
 
+bool cpu_bmi2_fma_f16c_ok() {
+    static const bool ok = [] {
+#if defined(_MSC_VER)
+        int leaf1[4], leaf7[4];
+        __cpuidex(leaf1, 1, 0);
+        __cpuidex(leaf7, 7, 0);
+        const unsigned ecx1 = (unsigned) leaf1[2], ebx7 = (unsigned) leaf7[1];
+#else
+        unsigned eax = 0, ebx7 = 0, ecx1 = 0, ecx7 = 0, edx = 0;
+        __cpuid_count(1, 0, eax, ebx7, ecx1, edx);
+        __cpuid_count(7, 0, eax, ebx7, ecx7, edx);
+#endif
+        return ((ecx1 >> 12) & 1u) && ((ecx1 >> 29) & 1u) && ((ebx7 >> 8) & 1u);
+    }();
+    return ok;
+}
+
+bool cpu_avx512_bitalg_ok() {
+    static const bool ok = [] {
+        if (!cpu_avx512_ok() || !cpu_bmi2_fma_f16c_ok()) return false;
+#if defined(_MSC_VER)
+        int x[4];
+        __cpuidex(x, 7, 0);
+        const unsigned ecx = (unsigned) x[2];
+#else
+        unsigned eax = 0, ebx = 0, ecx = 0, edx = 0;
+        __cpuid_count(7, 0, eax, ebx, ecx, edx);
+#endif
+        return ((ecx >> 12) & 1u) != 0;
+    }();
+    return ok;
+}
+
 bool cpu_avx512bw_ok() {
     static const bool ok = [] {
         if (const char* f = std::getenv("STRATA_FORCE_AVX2"); f != nullptr && f[0] == '1') return false;

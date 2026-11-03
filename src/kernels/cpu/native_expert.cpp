@@ -6,6 +6,8 @@
 #include "strata/kernels/cpu/iq_avx512.hpp"
 #include "strata/kernels/cpu/iq_avx2.hpp"
 #include "strata/kernels/cpu/iq_avx1.hpp"
+#include "strata/kernels/cpu/iq3s_vbmi.hpp"
+#include "strata/kernels/cpu/iq4xs_vnni.hpp"
 #include "strata/kernels/cpu/kq_avx2.hpp"
 #include "strata/kernels/cpu/kq_avx512.hpp"
 #include "strata/kernels/cpu/nvfp4_avx2.hpp"
@@ -248,6 +250,26 @@ void native_quant_h(const NativeFmt& f, const float* h, void* dst) {
     traits(f.d_act)->from_float(h, dst, f.n_ff);
 }
 
+// AVX-512 kernels for the i-quants of UD-IQ4_XS files (iq3s_vbmi.cpp, iq4xs_vnni.cpp). They use byte permutes, not gathers, which are
+// slow under the Downfall microcode. Off by default: STRATA_IQ_VBMI=1 turns them on, STRATA_NO_IQ_VBMI=1 always turns them off.
+bool iq_vbmi_requested() {
+    static const bool on = [] {
+        const char* want = std::getenv("STRATA_IQ_VBMI");
+        return want != nullptr && want[0] == '1' && want[1] == 0 && std::getenv("STRATA_NO_IQ_VBMI") == nullptr;
+    }();
+    return on;
+}
+
+bool iq3s_vbmi_enabled() {
+    static const bool on = iq_vbmi_requested() && cpu_avx512_ok() && cpu_avx512_bitalg_ok();
+    return on;
+}
+
+bool iq4xs_vnni_enabled() {
+    static const bool on = iq_vbmi_requested() && cpu_avx512_ok() && cpu_bmi2_fma_f16c_ok();
+    return on;
+}
+
 int native_gu_mt_min(int gu_type) {
     // #152: from how many tokens the multi-token kernels run (ggml's vec_dot below that).  The default 2 is the
     // measured-fastest rule, but a token's expert rows then round differently alone than in a group, so greedy output
@@ -305,6 +327,10 @@ void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* 
         static std::once_flag announced;
         std::call_once(announced, [] { std::fprintf(stderr, "strata ab: GATE=STRATA_CPU_IQ_ALL_EXACT1 active=1\n"); });
         iq256_gu_rows_exact_one(f.gu_type, blob, f.gu_row, f.up_off, (int) f.n_embd, act[0], ff[0], r0, r1);
+        return;
+    }
+    if (f.gu_type == 21 && iq3s_vbmi_enabled()) {   // every group size: a token's rows do not depend on the drafting
+        iq3s_vbmi_gu_rows(blob, f.gu_row, f.up_off, (int) f.n_embd, act, nt, ff, r0, r1);
         return;
     }
     const int mt_min = native_gu_mt_min(f.gu_type);   // #152
@@ -419,6 +445,10 @@ void native_down_rows(const NativeFmt& f, const uint8_t* blob, const void* const
     static const bool avx1 = !cpu_avx2_ok() && cpu_avx1_ok() && std::getenv("STRATA_NO_IQ128") == nullptr;
     if (avx1 && iq128_down_supported(f.d_type)) {
         iq128_down_rows(f.d_type, blob + f.down_off, f.d_row, (int) f.n_ff, hq, nt, out, r0, r1);
+        return;
+    }
+    if (f.d_type == 23 && f.tail_off == 0 && iq4xs_vnni_enabled()) {   // every group size, like the IQ3_S gate/up rows
+        iq4xs_vnni_rows(blob + f.down_off, f.d_row, (int) f.n_ff, hq, nt, out, r0, r1);
         return;
     }
     const int n = (int) f.n_ff;

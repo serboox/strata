@@ -46,6 +46,12 @@ struct ExpertLayout {
 bool cpu_avx512_ok();
 /// Whether this CPU runs AVX-512F + AVX-512BW + AVX-512VL + AVX-512DQ (e.g. Skylake-X i9-9920X) for iq_avx512.cpp.
 bool cpu_avx512bw_ok();
+/// BMI2, FMA and F16C, which the AVX-512 kernels of iq3s_vbmi.cpp and iq4xs_vnni.cpp also use; every AVX-512 CPU has them, a
+/// hypervisor may mask them.
+bool cpu_bmi2_fma_f16c_ok();
+/// Whether this CPU runs what cpu_avx512_ok() needs plus AVX-512 BITALG (Ice Lake and newer, Zen 4) and cpu_bmi2_fma_f16c_ok(): the
+/// IQ3_S byte-permute kernel (iq3s_vbmi.cpp).
+bool cpu_avx512_bitalg_ok();
 /// Whether this CPU (and its OS) runs the AVX2 kernels (AVX, AVX2, FMA, F16C): the floor of every expert kernel
 /// (q2_avx2.cpp, iq_avx2.cpp, and ggml-cpu in the portable build).  STRATA_FORCE_AVX2 does not change it.
 bool cpu_avx2_ok();

@@ -140,6 +140,31 @@ generated tokens are identical in the three modes (same checksum over 600 tokens
 Through the real server without a memory limit: 32.1 / 32.0 before, 36.2 / 36.9 / 39.1 after. The capped profiles were
 not measured again.
 
+## IQ3_S and IQ4_XS kernels (opt-in)
+
+The experts of an Unsloth UD-IQ4_XS file are mostly IQ3_S (gate and up) with IQ4_XS down. ggml's IQ3_S dot and the older AVX-512
+IQ3_S kernel look the 512-entry grid up with scalar loads (instruction-bound, 3.7 instructions per cycle); gathers do not help
+on a CPU with the Downfall microcode (`gather_data_sampling: Mitigation: Microcode`). `src/kernels/cpu/iq3s_vbmi.cpp` replaces
+the lookup by byte permutes (AVX-512 VBMI, two grid weights packed per byte) and takes the sign bits with a bit shuffle
+(BITALG); `src/kernels/cpu/iq4xs_vnni.cpp` looks the IQ4_XS nibbles up with `vpshufb` and sums with VNNI. Both work for any
+number of tokens, so a token's rows do not depend on the drafting. They are off by default: `STRATA_IQ_VBMI=1` turns them on,
+`STRATA_NO_IQ_VBMI=1` always turns them off, and a CPU without AVX-512 VBMI, BITALG, VNNI, BMI2, FMA and F16C ignores the flag.
+
+Synthetic experts (2048 by 512), four threads on cores 0 to 3, one token per expert, weights streamed from memory, the laptop
+not idle (`ninja iq_vbmi_bench && ./iq_vbmi_bench --bench --threads 4`, and the engine's own dispatch for the last three rows):
+
+| Experts | per second | read, GB/s |
+| --- | --- | --- |
+| Q4_K gate/up and down (Q4_K_XL) | 22.0 thousand | 38.9 |
+| IQ3_S gate/up and IQ4_XS down, ggml and the older kernels | 9.6 thousand | 14.0 |
+| the same with `STRATA_IQ_VBMI=1` | 25.1 thousand | 36.6 |
+
+On one thread the IQ3_S gate/up of an expert takes 340 us with ggml and 115 us with the new kernel, the IQ4_XS down 72 against 34 us. At 4 and 8 tokens per expert (prompt chunks) the gain stays: 1.9 and 1.6 times for gate/up, 3.0 and 2.6 times for down.
+The new kernels match ggml's dot to a relative 1e-7 for 1 to 12 tokens (`./iq_vbmi_bench` fails above 1e-6); they are not bit-identical
+because the order of the float additions differs. The Q4_K_XL path does not use them. A grafted UD-IQ4_XS file (MTP block from
+the Q4_K_XL, `tools/gguf_graft.py`) loads and answers with and without the flag, with the same 378 characters of greedy text; its
+speed through the server is not yet measured on a free machine.
+
 ## Against llama.cpp
 
 llama.cpp b3fa6995 on the same machine (`-ngl 99 --n-cpu-moe 99 -t 4 -fa on`, experts on the CPU, no drafting), greedy

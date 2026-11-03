@@ -1,0 +1,12 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+
+namespace strata::kernels::cpu {
+
+/// IQ4_XS rows: out[t][r] = row_r . act[t] for rows [r0, r1) and `nt` tokens (activations as Q8_K), with a nibble lookup and VNNI dot
+/// products. Callers must check cpu_avx512_ok() first.
+void iq4xs_vnni_rows(const uint8_t* rows, size_t row_bytes, int n, const void* const* act, int nt, float* const* out, int r0, int r1);
+
+}  // namespace strata::kernels::cpu
