@@ -1,0 +1,17 @@
+{
+  "name": "overlap",
+  "lever": 2,
+  "title": "Overlap GPU and CPU work inside a hybrid decode or verify step (quant, glue, commit)",
+  "variants": [
+    {"name": "all", "env": {"STRATA_Q36_OVERLAP": "all"}, "engine_args": [], "launcher_args": ["--overlap"]},
+    {"name": "quant", "env": {"STRATA_Q36_OVERLAP": "quant"}, "engine_args": [], "launcher_args": ["--overlap", "quant"]},
+    {"name": "glue", "env": {"STRATA_Q36_OVERLAP": "glue"}, "engine_args": [], "launcher_args": ["--overlap", "glue"]},
+    {"name": "commit", "env": {"STRATA_Q36_OVERLAP": "commit"}, "engine_args": [], "launcher_args": ["--overlap", "commit"]},
+    {"name": "all_stats", "env": {"STRATA_Q36_OVERLAP": "all", "STRATA_Q36_OVERLAP_STATS": "1"}, "engine_args": [], "launcher_args": ["--overlap"]},
+    {"name": "all_verify", "env": {"STRATA_Q36_OVERLAP": "all", "STRATA_Q36_VERIFY_OVERLAP": "1"}, "engine_args": [], "launcher_args": ["--overlap"]}
+  ],
+  "needs": {"build_option": "", "model_file": "any model that runs in the hybrid mode (experts on the CPU pool), e.g. the UD-IQ4_XS file; MTP on (--mtp 2 or 3) for the commit switch", "root": false},
+  "quality_check": "",
+  "parity_check": "Greedy output with and without the lever must be identical: same prompt, same --mtp, compare the token ids. all_verify must end with 'VERIFY_OVERLAP: N comparisons, 0 mismatches'. Model-free: ninja q36_act_quant_parity && ./q36_act_quant_parity (0 mismatches).",
+  "notes": "Compare tokens per second of all, quant, glue and commit against the lever off from the same thermal state (package at or below 55 C at the start of each run). all_stats prints one timing line per step on stderr: total = GPU wait + host glue + pool + upload/merge enqueue + rest, and the CPU entries against the weight sets read (the sharing across the rows of a verify window); all_verify slows the steps and is a correctness run, not a timing run. With commit the trailing GDN commit is not in the stats line: judge it by tokens per second."
+}

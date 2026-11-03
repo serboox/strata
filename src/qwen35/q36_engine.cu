@@ -1768,6 +1768,7 @@ struct Engine {
     long long ov_v_calls = 0, ov_v_bad = 0;
     cudaStream_t sc = nullptr;                          // ov.commit: the GDN state commit runs here
     cudaEvent_t ev_commit_in = nullptr, ev_commit_out = nullptr;
+    float* sc_hc = nullptr;                             // the side-stream commit's own conv output (never read back)
     bool commit_pending = false;                        // the commit on `sc` has not been joined by `st` yet
     float *vc_S = nullptr, *vc_conv = nullptr, *vc_hc = nullptr;   // verify: one layer's state commit run the old way
     int vc_layer = -1;
@@ -2947,14 +2948,15 @@ struct Engine {
 
     /// After a verify window of T rows: the GDN state takes the first n_keep rows (conv history and recurrence run
     /// again over the rows' kept inputs).
-    void commit(int n_keep, cudaStream_t cs = nullptr) {
+    void commit(int n_keep, cudaStream_t cs = nullptr, float* conv_out = nullptr) {
         const auto& g = m->g;
         const int HK = (int) g.ssm_k_heads, HV = (int) g.ssm_v_heads, C = (int) g.ssm_conv_channels;
         if (cs == nullptr) cs = st;
+        if (conv_out == nullptr) conv_out = hc;
         for (size_t l = 0; l < m->layers.size(); ++l) {
             const Layer& L = m->layers[l];
             if (L.attn) continue;
-            k_conv_seq<<<C / 128, 128, 0, cs>>>(conv[l], v_qkv[l], L.conv, hc, C, 2 * HK, m->eps, n_keep, true);
+            k_conv_seq<<<C / 128, 128, 0, cs>>>(conv[l], v_qkv[l], L.conv, conv_out, C, 2 * HK, m->eps, n_keep, true);
             k_gdn_seq<<<HV, dim3(128, 4), 0, cs>>>(S[l], v_hc[l], C, v_alpha[l], v_beta[l], z, L.ssm_norm, m->eps,
                                                    nullptr, HK, HV, n_keep, true);
         }
@@ -2965,7 +2967,7 @@ struct Engine {
     struct OvMark {
         Clock::time_point t0 = Clock::now();
         double wait = 0, prep = 0, cpu = 0, enq = 0;
-        long long cpu_n = 0, gpu_n = 0;
+        long long cpu_n = 0, gpu_n = 0, jobs = 0;
     };
     long long ov_steps = 0;
     OvMark ov_mark() const {
@@ -2976,6 +2978,7 @@ struct Engine {
         a.enq = ov_enq_ms;
         a.cpu_n = hy_cpu;
         a.gpu_n = hy_gpu;
+        a.jobs = hy_jobs;
         return a;
     }
     void ov_report(const char* what, const OvMark& a) {
@@ -2983,25 +2986,27 @@ struct Engine {
         const double total = ms_since(a.t0), wait = hy_wait_ms - a.wait, prep = hy_prep_ms - a.prep;
         const double cpu_all = hy_cpu_ms - a.cpu, enq = ov_enq_ms - a.enq;
         std::fprintf(stderr, "strata-q36 OVERLAP %s: total %.2f ms = GPU wait %.2f + host glue %.2f + pool %.2f + upload/merge "
-                     "enqueue %.2f + rest %.2f; experts: %lld on the CPU, %lld on the GPU\n", what, total, wait, prep,
-                     cpu_all - prep, enq, total - wait - cpu_all - enq, hy_cpu - a.cpu_n, hy_gpu - a.gpu_n);
+                     "enqueue %.2f + rest %.2f; expert entries: %lld on the CPU (%lld weight sets read), %lld on the GPU\n", what,
+                     total, wait, prep, cpu_all - prep, enq, total - wait - cpu_all - enq, hy_cpu - a.cpu_n, hy_jobs - a.jobs,
+                     hy_gpu - a.gpu_n);
     }
 
-    /// ov.commit: commit() on a side stream, so the next step's MTP forward (attention only: it reads neither the GDN
-    /// state nor hc / z) starts without waiting for it.  Everything that reads or moves the GDN state, or reuses the
-    /// verify buffers the commit reads, calls join_commit() first (spec_step's next verify forward, process, the batch
-    /// rows, select, reset, copy_session, the checkpoints).
+    /// ov.commit: commit() on a side stream, so the next step's MTP forward (attention only: it neither reads nor
+    /// writes the GDN state or the verify buffers) starts without waiting for it.  Everything that reads or moves the
+    /// GDN state, or reuses the verify buffers the commit reads, calls join_commit() first (spec_step's next verify
+    /// forward, process, the batch rows, select, reset, copy_session, the checkpoints).
     void commit_overlapped(int n_keep) {
         if (sc == nullptr) {
             CK(cudaStreamCreateWithFlags(&sc, cudaStreamNonBlocking));
             CK(cudaEventCreateWithFlags(&ev_commit_in, cudaEventDisableTiming));
             CK(cudaEventCreateWithFlags(&ev_commit_out, cudaEventDisableTiming));
+            CK(cudaMalloc(&sc_hc, (size_t) kVerify * m->g.ssm_conv_channels * 4));
         }
         join_commit();
         CK(cudaEventRecord(ev_commit_in, st));
         CK(cudaStreamWaitEvent(sc, ev_commit_in, 0));
         if (ov.verify) verify_commit_begin();
-        commit(n_keep, sc);
+        commit(n_keep, sc, sc_hc);
         if (ov.verify) verify_commit_end(n_keep);
         CK(cudaEventRecord(ev_commit_out, sc));
         commit_pending = true;
@@ -3444,7 +3449,10 @@ struct Engine {
                 willneed(L.src_u + x * L.src_gsz, L.src_gsz);
                 willneed(L.src_d + x * L.src_dsz, L.src_dsz);
             }
-        if (ov.stats) hy_prep_ms += ms_since(t0);
+        if (ov.stats) {
+            hy_prep_ms += ms_since(t0);
+            hy_jobs += (long long) jobs.size();
+        }
         pool->run_split_multi_native(H.fmt, jobs.data(), (int) jobs.size());
         hy_cpu_ms += ms_since(t0);
         const auto te = ov.stats ? Clock::now() : t0;
