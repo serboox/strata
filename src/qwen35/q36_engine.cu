@@ -1765,6 +1765,7 @@ struct Engine {
     std::vector<int32_t> job_open;   // ov.glue: expert -> the index of its job with room, -1 for none
     std::vector<char> tok_quant;     // ov.glue: the row's activation is quantized on the host already
     double ov_enq_ms = 0;            // host time spent enqueuing the CPU rows' upload and merge
+    long long ov_layers = 0, ov_route_ready = 0;   // hybrid layers run / those whose router result had already arrived
     long long ov_v_calls = 0, ov_v_bad = 0;
     cudaStream_t sc = nullptr;                          // ov.commit: the GDN state commit runs here
     cudaEvent_t ev_commit_in = nullptr, ev_commit_out = nullptr;
@@ -2967,7 +2968,7 @@ struct Engine {
     struct OvMark {
         Clock::time_point t0 = Clock::now();
         double wait = 0, prep = 0, cpu = 0, enq = 0;
-        long long cpu_n = 0, gpu_n = 0, jobs = 0;
+        long long cpu_n = 0, gpu_n = 0, jobs = 0, layers = 0, ready = 0;
     };
     long long ov_steps = 0;
     OvMark ov_mark() const {
@@ -2979,6 +2980,8 @@ struct Engine {
         a.cpu_n = hy_cpu;
         a.gpu_n = hy_gpu;
         a.jobs = hy_jobs;
+        a.layers = ov_layers;
+        a.ready = ov_route_ready;
         return a;
     }
     void ov_report(const char* what, const OvMark& a) {
@@ -2986,9 +2989,10 @@ struct Engine {
         const double total = ms_since(a.t0), wait = hy_wait_ms - a.wait, prep = hy_prep_ms - a.prep;
         const double cpu_all = hy_cpu_ms - a.cpu, enq = ov_enq_ms - a.enq;
         std::fprintf(stderr, "strata-q36 OVERLAP %s: total %.2f ms = GPU wait %.2f + host glue %.2f + pool %.2f + upload/merge "
-                     "enqueue %.2f + rest %.2f; expert entries: %lld on the CPU (%lld weight sets read), %lld on the GPU\n", what,
-                     total, wait, prep, cpu_all - prep, enq, total - wait - cpu_all - enq, hy_cpu - a.cpu_n, hy_jobs - a.jobs,
-                     hy_gpu - a.gpu_n);
+                     "enqueue %.2f + rest %.2f; expert entries: %lld on the CPU (%lld weight sets read), %lld on the GPU; router result "
+                     "already there when the host looked: %lld of %lld layers\n", what, total, wait, prep, cpu_all - prep, enq,
+                     total - wait - cpu_all - enq, hy_cpu - a.cpu_n, hy_jobs - a.jobs, hy_gpu - a.gpu_n,
+                     ov_route_ready - a.ready, ov_layers - a.layers);
     }
 
     /// ov.commit: commit() on a side stream, so the next step's MTP forward (attention only: it neither reads nor
@@ -3427,6 +3431,10 @@ struct Engine {
         Hy& H = hy[li];
         const Layer& L = layer_at((int) li);
         const auto tw = Clock::now();
+        if (ov.stats) {
+            ++ov_layers;
+            if (cudaEventQuery(ev_route) == cudaSuccess) ++ov_route_ready;
+        }
         while (cudaEventQuery(ev_route) == cudaErrorNotReady) {
             if (ov.glue) cpu_relax();
         }

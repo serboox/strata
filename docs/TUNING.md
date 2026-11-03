@@ -330,7 +330,8 @@ sharing and the GPU wait first (`STRATA_Q36_OVERLAP_STATS`): the gain is at most
 `total = GPU wait + host glue + pool + upload/merge enqueue + rest`. `GPU wait` is the time the host spun for the router
 (the GPU mixer that the CPU could not hide), `host glue` the job building before the pool, `pool` the pool run,
 `upload/merge enqueue` the host time to enqueue the CPU rows' copy and merge, `rest` everything else (launches, MTP, head,
-syncs). The line also gives the CPU entries and the weight sets they read. The times are host wall-clock and the stats
+syncs). The line also gives the CPU entries and the weight sets they read, and in how many layers the router result had already arrived when the
+host looked for it (all of them: the host is the late one and enqueueing is the limit; none: the GPU mixer is what the CPU waits for). The times are host wall-clock and the stats
 never synchronize the stream, so they do not change the schedule; with `commit` the trailing commit is not in the line, so
 judge that switch by tokens per second.
 
