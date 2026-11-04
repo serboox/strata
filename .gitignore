@@ -9,3 +9,4 @@ __pycache__/
 *.log
 .claude/napkin.md
 /docs_private/
+/docs/experiments/
