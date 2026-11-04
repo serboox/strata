@@ -149,6 +149,30 @@ second, as without any limit, because the hardware still runs the CPU at full fr
 the engine. The whole model on the integrated GPU (llama.cpp with Vulkan) gave 10.8 to 11.3 tokens per second with the package at
 59 to 65 C, and 8.8 with the discrete card added by a layer split.
 
+### The cap with the faster kernels
+
+After the Q4_K, Q5_K, IQ3_S and IQ4_XS kernels were sped up (see "Cycles per block" below), the cap was measured again with the
+Q4_K_XL file on the real server: the 80 C limit, MTP 2, 6 workers, no pool spin, two warm-up requests and then eight requests of 900
+tokens back to back with no cooling in between, the whole file in the page cache (the bench refuses to measure otherwise), all
+rows on the same evening:
+
+| cap | median tokens/s | range | package peak | mean of the first 5 requests / of the last 3 |
+| --- | --- | --- | --- | --- |
+| 2.0 GHz | 32.2 | 31.5 to 32.8 | 76 C | 32.4 / 31.9 |
+| 2.1 GHz | 33.1 | 32.6 to 33.7 | 77 C | 33.2 / 33.0 |
+| 2.2 GHz, run 1 | 33.8 | 30.1 to 34.6 | 78 C | 34.1 / 30.3 |
+| 2.2 GHz, a repeat | 32.8 | 29.4 to 34.4 | 79 C | 33.4 / 30.8 |
+| 2.4 GHz | 29.3 | 24.7 to 36.0 | 78 C | 31.7 / 26.9 |
+
+At 2.1 GHz the speed stays flat over the whole series (the server announced a pause of the engine 3 times, 2 times at 2.0 GHz, against
+8 times at 2.2 and at 2.4 GHz). At 2.2 GHz the first requests are faster, then the package reaches 78 C, the server announces the pauses of the engine
+and the speed is about 30.5; at 2.4 GHz it is 25-29. Short requests that
+start on a cool CPU behave the other way: 200 tokens at 2.4 GHz gave 33.1 tokens per second against 32.1 at 2.2 GHz (medians of
+four runs and three, the cold first run of 2.2 GHz left out, +3 %; the package peaked at 69 C against 67 C), and a request of
+1200 tokens 36.9 against 34.75 (two runs each, a spread larger than the difference). So the default cap of the `auto` profile is
+2100 MHz, which kept the speed flat in the longest runs; for short requests that start cool, 2400 MHz gave a few percent
+more than 2200 (2100 was not measured with them), and `--cpu-max-mhz` sets another value. One machine and one prompt; two runs at 2.2 GHz differ by 1 token per second.
+
 ## Measuring the cooling
 
 Cooling is physical: software can only measure it and switch the machine's own cooling profile. `tools/cooling_kit.py` is the
@@ -937,7 +961,8 @@ model), the server's own limit at 80 C, each step started with the package at 55
 | 2.4 GHz, low-power profile | 20.8 | 19.1 | never | never | 65 C | after its duration |
 
 The higher the cap, the faster the first request and the lower the sustained speed, because the pauses of the temperature governor
-take over: 2.2 GHz stays the best cap on this machine. A continuous run at 2.2 GHz still reaches the 80 C limit after a few
+take over: 2.2 GHz stays the best of the caps tried then on this machine (with the kernels of that day; the later sweep is in
+"The cap with the faster kernels"). A continuous run at 2.2 GHz still reaches the 80 C limit after a few
 minutes (the hottest sample was 82 C, a sampling step over the limit); only short requests that start cool, as in the lever
 runs above, stay at 70 C. The three fan sensors of this laptop (`bitland_mifs`) read 0 for the whole run although the package
 reached 83 C, so the kit reports them as unreliable and gives no fan numbers. The platform profile does matter. `powerprofilesctl set power-saver`
