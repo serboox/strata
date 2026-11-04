@@ -851,15 +851,19 @@ model), the server's own limit at 80 C, each step started with the package at 55
 | 2.4 GHz | 26.6 | 30.0 | 61 s | 177 s | 83 C | at the 80 C limit |
 | 2.6 GHz | 21.7 | 30.6 | 45 s | never | 79 C | after its duration |
 | 2.8 GHz | - | - | 6 s | 6 s | 80 C | at the 80 C limit, during the model load |
+| 2.2 GHz, low-power profile | 20.7 | 19.1 | never | never | 63 C | after its duration |
+| 2.4 GHz, low-power profile | 20.8 | 19.1 | never | never | 65 C | after its duration |
 
 The higher the cap, the faster the first request and the lower the sustained speed, because the pauses of the temperature governor
 take over: 2.2 GHz stays the best cap on this machine. A continuous run at 2.2 GHz still reaches the 80 C limit after a few
 minutes (the hottest sample was 82 C, a sampling step over the limit); only short requests that start cool, as in the lever
 runs above, stay at 70 C. The three fan sensors of this laptop (`bitland_mifs`) read 0 for the whole run although the package
-reached 83 C, so the kit reports them as unreliable and gives no fan numbers. The platform profile could not be tested: the
-firmware refuses `performance` (`power-profiles-daemon` reports it as degraded because of the operating temperature and the write
-to `/sys/firmware/acpi/platform_profile` fails with "Operation not supported"), and the other profiles need a root write whose
-password dialog was not answered. The power counter was not read, for the same reason. A physical change (a stand, cleaned fans)
+reached 83 C, so the kit reports them as unreliable and gives no fan numbers. The platform profile does matter. `powerprofilesctl set power-saver`
+(the platform profile `low-power`, set without root) holds the package at 63 to 65 C but costs a third of the speed, 20.7 and 20.8
+tokens per second at 2.2 and 2.4 GHz, and the cap stops mattering because the firmware limits the power itself. The profile above
+`balanced` could not be tested: the firmware refuses `performance` (`power-profiles-daemon`, which runs as root, reports it as
+degraded because of the operating temperature and the write to `/sys/firmware/acpi/platform_profile` fails with "Operation not
+supported"), and `balanced-performance` needs a direct root write whose password dialog was not answered. The power counter was not read, for the same reason. A physical change (a stand, cleaned fans)
 is what the kit is for: run it again with another `--setup` text and compare the table.
 
 ## Benchmarking pitfalls
