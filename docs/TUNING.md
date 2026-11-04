@@ -135,10 +135,10 @@ frequency, and the voltage with it, is lowered. Sustained speed of the IQ4_XS fi
 | 2.2 GHz, 6 workers | 31.1 and 29.8 (two runs) | 77 and 78 C |
 | 2.4 GHz, 6 workers | 24.9 (the pauses return) | 80 C |
 
-The default profile `auto` holds the cap by itself: `strata-serve` runs with `--cpu-max-mhz 2200`, 6 workers and no pool spin (the
-setting of the table, `STRATA_POOL_SPIN_US=0`) and puts the old limits back when it stops (Ctrl+C and SIGTERM included; after a
+The default profile `auto` holds the cap by itself: `strata-serve` runs with `--cpu-max-mhz 2100`, 6 workers and no pool spin (the
+spin and workers of the table, `STRATA_POOL_SPIN_US=0`; the cap itself is explained below) and puts the old limits back when it stops (Ctrl+C and SIGTERM included; after a
 `kill -9` run `tools/cpucap reset`). `--cpu-max-mhz 0` turns the cap off, the profiles with a memory budget (`lean` to `max`) run
-without it, and 2200 MHz is two thirds of this laptop's 3.3 GHz, so another CPU needs its own value. The Q4_K_XL file at the same setting gave 29.4 tokens per second with a peak of 74 C, within 5 percent of IQ4_XS, so the file is to be chosen by memory (Q4_K_XL wants about 23 GB of free RAM, IQ4_XS about 18 GB) and quality, not by speed. `tools/cpucap status|set MHZ|reset` does the same by
+without it, and 2100 MHz is about two thirds of this laptop's 3.3 GHz, so another CPU needs its own value. The Q4_K_XL file at 2.2 GHz and the same workers and spin gave 29.4 tokens per second with a peak of 74 C, within 5 percent of IQ4_XS, so the file is to be chosen by memory (Q4_K_XL wants about 23 GB of free RAM, IQ4_XS about 18 GB) and quality, not by speed. `tools/cpucap status|set MHZ|reset` does the same by
 hand. The limits belong to root. A tmpfiles rule makes them group-writable for `wheel`, the way the turbo switch is:
 `z- /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq 0664 root wheel -` (kept in the machine's restore repository);
 without it the server says which limits it could not write and runs without the cap. The cap is machine-wide like the turbo
@@ -343,7 +343,7 @@ cycles per block.
 
 At the 2.2 GHz cap with 4 threads the Q4_K gate/up kernel reads 29.5 GB/s before and 46.1 after with one token, and 13.5 and
 20.4 with three tokens; the package power from the CPU's energy counter is 16.1 and 18.2 W with one token and 16.7 and 17.1 W
-with three, so the energy per byte is 28 to 32 % lower. A full decode at the launcher's defaults (2.2 GHz cap, 6 workers, no pool
+with three, so the energy per byte is 28 to 32 % lower. A full decode at the launcher's defaults of that day (2.2 GHz cap, 6 workers, no pool
 spin, MTP 2, a 1.5K prompt, 200 tokens, the CPU cooled to 55 C before each request, the old and the new engine alternating in the
 order ABBAABBA): 27.4 tokens per second before and 32.2 after (medians of four runs, +17.5 %), the engine's gate/up counter 4550
 and 3472 ms, the same 114 of 174 drafts accepted, the same tokens, the package at most 67 C. One machine, one prompt; the first
@@ -409,7 +409,7 @@ below 2^24. Both kernels still give the bits of the previous version: a frozen c
 the engine on the UD-IQ4_XS file with the MTP block gave the same 96 greedy tokens with the old and the new kernels at 1.5K and 14K
 prompts, MTP 0 and 2.
 
-Through the engine's command line at the launcher's defaults (2.2 GHz cap, 6 pool workers, no pool spin, `STRATA_IQ_VBMI=1`, MTP 2,
+Through the engine's command line at the launcher's defaults of that day (2.2 GHz cap, 6 pool workers, no pool spin, `STRATA_IQ_VBMI=1`, MTP 2,
 a 1.5K prompt, 200 tokens, the CPU cooled to 55 C before each request, the old and the new engine alternating in the order
 ABBAABBA) the UD-IQ4_XS file decodes 31.2 tokens per second before and 34.25 after (medians of four runs, +9.8 %), the engine's
 gate/up counter 15836 and 12776 ms, the same 114 of 170 drafts accepted, the same tokens, the package at most 73 C. The four runs
@@ -796,7 +796,7 @@ Not measured (needs root, the password prompt was not answered): raw NVMe agains
 Five changes are meant to make the IQ4_XS file faster on this laptop without turbo, overclocking or going above 80 C. Each is
 off by default, and with its switch off the engine behaves as before. `tools/lever_matrix.py` is the runner for testing them:
 it reads one definition file per lever from `tools/levers.d/*.json`, plans runs and executes them one at a time through
-`tools/quant_bench.py` with the thermal rules of this document (the 2200 MHz cap, 6 workers, `STRATA_POOL_SPIN_US=0`, the 80 C
+`tools/quant_bench.py` with the thermal rules used for these measurements (the 2200 MHz cap, 6 workers, `STRATA_POOL_SPIN_US=0`, the 80 C
 limit, a wait for the package to cool to 55 C before every run). The measurements of 3 and 4 November are in "What was measured" at the end of this section. The runner's baseline sets `STRATA_IQ_VBMI=1` as the launcher does for the IQ models: without the IQ kernels the baseline is about 16.8 tokens per second instead of 30.5.
 
 | # | Lever | Switch | Needs | What proves it |

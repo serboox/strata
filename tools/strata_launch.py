@@ -67,7 +67,7 @@ IQ_KERNELS_OFF_ENV = {"STRATA_IQ_VBMI": "0"}
 
 # The setting measured on the author's laptop (i7-11370H, turbo off, 80 C limit): the highest CPU frequency, the pool workers
 # and the pool spin that held 30 tokens per second for minutes instead of 11 to 15; see "The frequency cap" in docs/TUNING.md.
-DEFAULT_CPU_MAX_MHZ = 2200.0
+DEFAULT_CPU_MAX_MHZ = 2100.0
 CAPPED_WORKERS = 6
 CAPPED_ENV = {"STRATA_POOL_SPIN_US": "0"}
 

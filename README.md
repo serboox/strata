@@ -10,8 +10,9 @@ at hand: the numbers below are measured on it, and other GPUs and models are mea
 - **About 37 tokens per second** when generating in a short burst on a cool CPU with the turbo boost on and 23 GB of RAM free for
   the page cache; the speed falls gradually, not to zero, when memory is short.
 - **Steady speed on a hot laptop.** The CPU of a laptop reaches 80 C within seconds under this load, so the server keeps the
-  CPU and the GPU under a temperature limit (80 C by default) and holds the highest CPU frequency at 2.2 GHz. With that setting
-  the model holds **27 to 31 tokens per second for minutes** instead of 11 to 15 (see "Steady speed under a temperature limit").
+  CPU and the GPU under a temperature limit (80 C by default) and holds the highest CPU frequency at 2.1 GHz. With a cap like that
+  the model holds **27 to 33 tokens per second for minutes** instead of 11 to 15 without one (33 is the Q4_K_XL file at 2.1 GHz, the
+  lower figures are earlier measurements of the UD-IQ4_XS file at 2.2 GHz; see "Steady speed under a temperature limit").
 - **A 64K-token window** (65,536 by default, 69,391 at most) in 4 GB of VRAM, with a q8 K/V cache.
 - **About 200 tokens per second** when reading a prompt, and **checkpoints** of the conversation start, so a new agent
   session reads about 20 tokens instead of 1,500.
@@ -47,7 +48,7 @@ default). The CPU turbo boost is off by default (`--turbo`), and the server yiel
 
 Reading memory barely heats the CPU: four threads read 55.6 GB/s for two minutes with the package at 56 to 61 C. The heat comes
 from the arithmetic of the expert kernels, and it falls faster than the speed when the highest CPU frequency, and the voltage
-with it, is lowered. A lower cap lets the model run without pauses. Sustained speed of the UD-IQ4_XS file with MTP, turbo off,
+with it, is lowered. A lower cap makes the pauses rarer or removes them. Sustained speed of the UD-IQ4_XS file with MTP, turbo off,
 80 C limit, eight requests of 900 tokens after two warm-up requests, one or two runs per row, on the author's laptop:
 
 | setting | tokens/s (median) | peak temperature |
@@ -60,9 +61,9 @@ with it, is lowered. A lower cap lets the model run without pauses. Sustained sp
 | 2.2 GHz, 6 workers | 31.1 and 29.8 (two runs) | 77 and 78 C |
 | 2.4 GHz, 6 workers | 24.9 (the pauses return) | 80 C |
 
-The default profile `auto` holds the cap by itself: `bin/strata-serve` runs with `--cpu-max-mhz 2200`, 6 workers and no pool spin, the
-setting measured above, and puts the old limits back when it stops. `--cpu-max-mhz 0` turns the cap off, the profiles with a memory
-budget (`lean` to `max`) run without it, and another value suits another CPU: 2200 MHz is two thirds of this laptop's 3.3 GHz. The
+The default profile `auto` holds the cap by itself: `bin/strata-serve` runs with `--cpu-max-mhz 2100`, 6 workers and no pool spin (2.1 GHz kept the speed
+flat in the longest runs, see "Heat and turbo" in docs/TUNING.md), and puts the old limits back when it stops. `--cpu-max-mhz 0` turns the cap off, the profiles with a memory
+budget (`lean` to `max`) run without it, and another value suits another CPU: 2100 MHz is about two thirds of this laptop's 3.3 GHz. The
 limit files belong to root: without the tmpfiles rule below the server says which files it could not write and runs without the
 cap, and after a `kill -9` the limits stay low until `tools/cpucap reset`.
 `tools/cpucap status|set MHZ|reset` does the same by hand. The limits belong to root, so a tmpfiles rule makes them group-writable
@@ -127,7 +128,7 @@ keep the cached model in memory and read it in before the start; the read-in is 
 with O_DIRECT, and the protection is soft and depends on the control groups above the server (see "Keeping the model in memory" in
 [docs/TUNING.md](docs/TUNING.md)).
 `--max-temp C` (80 by default, 0 turns it off), `--turbo off|on|keep` (off by default; `tools/turbo on|off|status` does the same on
-its own) and `--cpu-max-mhz MHZ` (2200 with the `auto` profile, 0 turns it off) are described in "Heat and turbo" in [docs/TUNING.md](docs/TUNING.md).
+its own) and `--cpu-max-mhz MHZ` (2100 with the `auto` profile, 0 turns it off) are described in "Heat and turbo" in [docs/TUNING.md](docs/TUNING.md).
 `--context` and `--chunk` change the context window and the prompt chunk, the two things that compete for the 4 GB of
 VRAM. Everything the launcher does is visible with `--dry-run`.
 
