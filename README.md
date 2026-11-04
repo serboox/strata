@@ -18,7 +18,8 @@ at hand: the numbers below are measured on it, and other GPUs and models are mea
   session reads about 20 tokens instead of 1,500.
 - **`tools/spi`**, which runs pi in a sandbox: only the folder you start it in and pi's own session folder are writable, no `sudo`,
   no files of yours outside those folders, no secrets, no network of its own: the local server, a read-only `gh` and the public web
-  (through a filtering proxy) are reached over sockets.
+  (through a filtering proxy) are reached over sockets. It runs local models only: it starts the UD-IQ4_XS model by default and
+  `/model` in pi switches to another local one (docs/PI.md).
 
 ## How it fits in a small machine
 

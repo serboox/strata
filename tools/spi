@@ -8,6 +8,7 @@ set -euo pipefail
 PORT=${STRATA_PORT:-8080}
 AGENT_DIR=${SPI_AGENT_DIR:-$HOME/.pi/agent-local}
 CWD=$(pwd -P)
+SPI_DIR=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
 
 for tool in bwrap socat curl node pi; do
     command -v "$tool" >/dev/null 2>&1 || { echo "spi: $tool is not installed" >&2; exit 1; }
@@ -29,14 +30,40 @@ case "$first" in
 esac
 
 [ -f "$AGENT_DIR/models.json" ] && [ -f "$AGENT_DIR/settings.json" ] || { echo "spi: $AGENT_DIR needs models.json and settings.json (the local profile)" >&2; exit 1; }
-[ -f "$AGENT_DIR/extensions/strata/index.ts" ] || echo "spi: warning: $AGENT_DIR/extensions/strata is missing, pi runs without the loop guard and the cheaper compaction" >&2
+EXTENSION_MISSING=0
+# the guard is in the installed extension only when its module is there and index.ts loads it
+[ -f "$AGENT_DIR/extensions/strata/src/local-only.ts" ] && grep -q installLocalOnly "$AGENT_DIR/extensions/strata/index.ts" 2>/dev/null || EXTENSION_MISSING=1
 mkdir -p "$AGENT_DIR/sessions"
+MODELS_CONFIG=${SPI_MODELS:-$AGENT_DIR/local-models.json}
+SERVER_MODE=bridge
+CHECKOUT_ROOT=
+[ -x "$SPI_DIR/../bin/strata-serve" ] && CHECKOUT_ROOT=$(cd "$SPI_DIR/.." && pwd -P)
 # spi --shell [command]: the same sandbox with a shell (or the command) instead of pi, to see what the model sees
 if [ "${1:-}" = "--shell" ]; then
     shift
     RUN=("${@:-bash}")
 else
-    curl -fsS -m 3 "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1 || { echo "spi: no Strata server on port $PORT, start it with bin/strata-serve" >&2; exit 1; }
+    # spi runs local models only: what names another provider, takes a key, loads other extensions or fetches packages is refused here (plain pi has it)
+    refuse() { echo "spi: $1 is not available in spi, which runs local models only; plain pi has it" >&2; exit 2; }
+    if [ "$EXTENSION_MISSING" = 1 ]; then
+        echo "spi: $AGENT_DIR/extensions/strata is missing or too old (no local-only guard): it keeps pi to local models, so pi does not start without it" >&2
+        exit 1
+    fi
+    case "${1:-}" in install|remove|uninstall|update|auth|mcp|config) refuse "pi $1" ;; esac
+    for arg in "$@"; do
+        [ "$arg" = "--" ] && break
+        case "$arg" in
+            --provider|--provider=*|--api-key|--api-key=*|--extension|--extension=*|-e|--no-extensions|-ne|--approve|-a) refuse "$arg" ;;
+        esac
+    done
+    if curl -fsS -m 3 "http://127.0.0.1:$PORT/v1/models" >/dev/null 2>&1; then
+        echo "spi: a server already answers on port $PORT: it keeps its own model and /model cannot switch it" >&2
+    elif [ -f "$MODELS_CONFIG" ] && [ -f "$SPI_DIR/spi_models.py" ] && command -v python3 >/dev/null 2>&1; then
+        SERVER_MODE=models
+    else
+        echo "spi: no Strata server on port $PORT and no $MODELS_CONFIG to start one from; start it with bin/strata-serve" >&2
+        exit 1
+    fi
     RUN=(pi "$@")
 fi
 
@@ -44,16 +71,32 @@ SOCK=${XDG_RUNTIME_DIR:-/tmp}/spi-$$.sock
 GH_SOCK=${XDG_RUNTIME_DIR:-/tmp}/spi-$$-gh.sock
 WEB_SOCK=${XDG_RUNTIME_DIR:-/tmp}/spi-$$-web.sock
 WEB_PORT=3128
-socat UNIX-LISTEN:"$SOCK",fork,mode=600 TCP:127.0.0.1:"$PORT" &
+AUTH_FILE=${XDG_RUNTIME_DIR:-/tmp}/spi-$$-auth.json
+# the model manager starts the server of the model that is asked for, replaces it when another one is asked for and stops it with spi
+if [ "$SERVER_MODE" = models ]; then
+    python3 -I "$SPI_DIR/spi_models.py" --socket "$SOCK" --config "$MODELS_CONFIG" ${STRATA_ROOT:+--root "$STRATA_ROOT"} ${CHECKOUT_ROOT:+--fallback-root "$CHECKOUT_ROOT"} \
+        ${SPI_SERVER_PORT:+--port "$SPI_SERVER_PORT"} --server-log "$AGENT_DIR/server.log" --log "$AGENT_DIR/models.log" --parent-pid $$ &
+else
+    socat UNIX-LISTEN:"$SOCK",fork,mode=600 TCP:127.0.0.1:"$PORT" &
+fi
 BRIDGE=$!
 GH_BROKER=
 WEB_PROXY=
-trap 'kill "$BRIDGE" $GH_BROKER $WEB_PROXY 2>/dev/null || true; rm -f "$SOCK" "$GH_SOCK" "$WEB_SOCK"' EXIT
+trap 'kill "$BRIDGE" $GH_BROKER $WEB_PROXY 2>/dev/null || true
+      if [ "$SERVER_MODE" = models ]; then echo "spi: stopping the model server..." >&2; wait "$BRIDGE" 2>/dev/null || true; fi
+      rm -f "$SOCK" "$GH_SOCK" "$WEB_SOCK" "$AUTH_FILE"' EXIT
 for _ in $(seq 1 30); do [ -S "$SOCK" ] && break; sleep 0.1; done
+if [ "$SERVER_MODE" = models ] && { ! kill -0 "$BRIDGE" 2>/dev/null || [ ! -S "$SOCK" ]; }; then
+    echo "spi: the model manager did not start (see its message above and $AGENT_DIR/models.log)" >&2
+    exit 1
+fi
+# credentials cannot be saved in the sandbox: pi finds an empty file that is read-only, so a login has nowhere to go
+rm -f "$AUTH_FILE"
+printf '{}\n' > "$AUTH_FILE"
+chmod 444 "$AUTH_FILE"
 
 # gh in the sandbox has no token and no network of its own: a read-only broker on the host answers it over a socket (SPI_GH=0 turns it off)
 GH_ARGS=()
-SPI_DIR=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
 if [ "${SPI_GH:-1}" != 0 ]; then
     if [ -f "$SPI_DIR/spi_gh_broker.py" ] && [ -f "$SPI_DIR/spi_gh_shim.py" ] && command -v gh >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
         rm -f "$GH_SOCK"
@@ -104,6 +147,7 @@ ARGS=(
     --ro-bind "$NODE_DIR" "$NODE_DIR"
     --ro-bind "$AGENT_DIR/models.json" "$HOME/.pi/agent/models.json"
     --ro-bind "$AGENT_DIR/settings.json" "$HOME/.pi/agent/settings.json"
+    --ro-bind "$AUTH_FILE" "$HOME/.pi/agent/auth.json"
     --bind "$AGENT_DIR/sessions" "$HOME/.pi/agent/sessions"
     --ro-bind-try "$AGENT_DIR/extensions" "$HOME/.pi/agent/extensions"
     --bind "$CWD" "$CWD"
@@ -114,6 +158,7 @@ ARGS=(
     --setenv HOME "$HOME" --setenv USER "$(id -un)" --setenv LOGNAME "$(id -un)" --setenv SHELL /bin/bash
     --setenv TERM "${TERM:-xterm-256color}" --setenv LANG "${LANG:-C.UTF-8}"
     --setenv PI_OFFLINE 1
+    --setenv SPI_LOCAL_ONLY 1
 )
 for f in passwd group nsswitch.conf hosts localtime ssl pki ld.so.cache ld.so.conf ld.so.conf.d alternatives os-release profile profile.d bashrc inputrc; do
     ARGS+=(--ro-bind-try "/etc/$f" "/etc/$f")

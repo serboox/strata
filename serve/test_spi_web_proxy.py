@@ -19,6 +19,7 @@ import spi_web_proxy as proxy_module
 from spi_web_proxy import (
     Refused,
     WebProxy,
+    is_provider_host,
     is_public_address,
     parse_authority,
     parse_request,
@@ -638,7 +639,38 @@ class PlainHttpTests(ProxyTestCase):
         await self.eventually_logged(f"ALLOW POST 127.0.0.1:{port}")
 
 
+class ProviderHostTests(unittest.TestCase):
+    def test_hosts_of_model_providers_are_recognised_with_their_subdomains(self):
+        for host in ("api.openai.com", "API.OpenAI.com.", "eu.api.openai.com", "my-resource.openai.azure.com", "api.anthropic.com", "claude.ai",
+                     "us-central1-aiplatform.googleapis.com", "bedrock-runtime.eu-west-1.amazonaws.com", "openrouter.ai", "api.groq.com"):
+            with self.subTest(host=host):
+                self.assertTrue(is_provider_host(host))
+
+    def test_other_hosts_stay_reachable(self):
+        for host in ("example.com", "docs.python.org", "github.com", "api.github.com", "platform.openai.com", "notopenai.com", "evilapi.openai.com.example.com",
+                     "storage.googleapis.com", "s3.eu-west-1.amazonaws.com", "huggingface.co", "127.0.0.1", "[::1]"):
+            with self.subTest(host=host):
+                self.assertFalse(is_provider_host(host))
+
+
 class RefusalTests(ProxyTestCase):
+    async def test_a_model_provider_is_refused_before_resolving_or_connecting(self):
+        calls = []
+
+        async def resolve(host, port):
+            calls.append(host)
+            return ["8.8.8.8"]
+
+        await self.start_proxy(resolve=resolve)
+        with mock.patch.object(WebProxy, "connect", new=mock.AsyncMock()) as connect:
+            for raw in (b"CONNECT api.openai.com:443 HTTP/1.1\r\n\r\n", b"GET http://api.anthropic.com/v1/messages HTTP/1.1\r\n\r\n"):
+                with self.subTest(raw=raw):
+                    reply = await self.exchange(raw)
+                    self.assertEqual(self.status_of(reply), 403)
+                    self.assertIn(b"local models only", reply)
+            connect.assert_not_called()
+        self.assertEqual(calls, [])
+
     async def test_local_private_and_odd_targets_never_connect(self):
         proxy = await self.start_proxy()
         with mock.patch.object(WebProxy, "connect", new=mock.AsyncMock()) as connect:

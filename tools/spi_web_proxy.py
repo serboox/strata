@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import asyncio
+import fnmatch
 import ipaddress
 import json
 import os
@@ -19,6 +20,18 @@ from urllib.parse import urlsplit
 
 # every port except the ones used to send mail, which would make the proxy a spam relay
 DENIED_PORTS = frozenset({25, 465, 587})
+# the API and sign-in hosts of model providers: spi runs local models only. Providers are too many for a list to be complete, so
+# this narrows the way to a hosted model and does not close it
+PROVIDER_HOST_PATTERNS = (
+    "api.openai.com", "auth.openai.com", "chatgpt.com", "*.openai.azure.com",
+    "api.anthropic.com", "console.anthropic.com", "platform.claude.com", "claude.ai",
+    "generativelanguage.googleapis.com", "aiplatform.googleapis.com", "*-aiplatform.googleapis.com", "cloudcode-pa.googleapis.com",
+    "bedrock-runtime.*.amazonaws.com", "openrouter.ai", "api.mistral.ai", "api.x.ai", "api.groq.com", "api.together.xyz",
+    "api.deepseek.com", "api.cohere.com", "api.cohere.ai", "api.perplexity.ai", "api.fireworks.ai", "api.cerebras.ai",
+    "integrate.api.nvidia.com", "router.huggingface.co", "api-inference.huggingface.co", "api.moonshot.ai", "api.moonshot.cn",
+    "open.bigmodel.cn", "api.z.ai", "api.minimax.io", "dashscope.aliyuncs.com", "dashscope-intl.aliyuncs.com", "api.ai21.com",
+    "api.githubcopilot.com", "api.individual.githubcopilot.com", "models.github.ai",
+)
 VPN_MODES = ("hosts", "block", "allow")
 # a route this narrow leads to a particular host or small network (a company endpoint), a wider one to a provider or a CDN
 NARROW_ROUTE_PREFIX = {4: 23, 6: 48}
@@ -62,6 +75,11 @@ class Refused(Exception):
         super().__init__(reason)
         self.status = status
         self.reason = reason
+
+
+def is_provider_host(host: str) -> bool:
+    name = host.rstrip(".").lower()
+    return any(name == pattern or fnmatch.fnmatchcase(name, pattern) or name.endswith("." + pattern) for pattern in PROVIDER_HOST_PATTERNS)
 
 
 def normalized_address(text: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
@@ -406,6 +424,8 @@ class WebProxy:
             label = f"{request.method} {request.target.host}:{request.target.port}"
             if not self.port_allowed(request.target.port):
                 raise Refused(403, f"port {request.target.port} is not allowed")
+            if is_provider_host(request.target.host):
+                raise Refused(403, f"{request.target.host} belongs to a model provider, and spi runs local models only")
             addresses = await self.public_addresses(request.target)
             upstream_reader, upstream_writer = await self.connect(addresses, request.target.port)
             if request.method == "CONNECT":

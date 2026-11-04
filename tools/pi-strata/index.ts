@@ -4,9 +4,11 @@ import { resolve } from "node:path";
 import { Type } from "@earendil-works/pi-ai";
 import { defineTool, findCutPoint } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { matchesKey } from "@earendil-works/pi-tui";
 import { NumberedReads, readView, stripLineNumbers } from "./src/code-view.ts";
 import { buildCompaction, planCompaction, type EntryLike, type PreparationLike } from "./src/compaction.ts";
 import { DEFAULT_DOOR, DoorGuard, adviceFor, refusalReason, sitesOfResult, webCall, type DoorConfig } from "./src/door-guard.ts";
+import { installLocalOnly, localOnlyRequested } from "./src/local-only.ts";
 import { DEFAULT_GUARD, LoopGuard, type GuardConfig } from "./src/loop-guard.ts";
 import { SUMMARY_SYSTEM_PROMPT } from "./src/summary.ts";
 import { SAFE_NORMALIZE, capOutput, commandShape, estimateTokens, normalizeOutput } from "./src/text.ts";
@@ -93,6 +95,7 @@ const webFetchTool = defineTool({
 });
 
 export default function strataAgent(pi: ExtensionAPI) {
+  if (localOnlyRequested(process.env)) installLocalOnly(pi, { isSubmitKey: (data) => matchesKey(data, "enter") });
   const config = loadConfig();
   if (config.web.enabled) pi.registerTool(webFetchTool);
   const guard = new LoopGuard(config.guard);

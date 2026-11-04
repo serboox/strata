@@ -90,16 +90,63 @@ push with your keys.
 | no controlling terminal: the model's commands cannot type into your shell | `--new-session`; because of it the kernel sends no SIGWINCH, so `spi` polls the window size and forwards each change to pi by hand |
 | an empty environment: no `SSH_AUTH_SOCK`, no tokens in variables | `--clearenv` |
 | no `sudo` (the "no new privileges" flag is set) and no capabilities | `--cap-drop ALL` |
-| no network of its own, except a bridge to the Strata server on `127.0.0.1:8080` | `--unshare-net` plus `socat` over a socket |
+| no network of its own, except a bridge to the local model server on `127.0.0.1:8080` | `--unshare-net` plus `socat` over a socket to the host ([below](#local-models-and-switching-between-them)) |
 | the public web, through a filtering proxy: public addresses only, any port but the mail ports; nothing on the host, in the local network or behind the VPN | a proxy on the host behind another socket ([below](#web-access-in-the-sandbox)) |
 | `gh`, read-only, for the repositories of the folder: the token stays outside | a broker on the host behind a second socket ([below](#gh-in-the-sandbox)) |
-| its own profile, `models.json` and `settings.json` read-only, sessions kept | `~/.pi/agent-local` |
+| its own profile, `models.json` and `settings.json` read-only, sessions kept; an empty `auth.json` that cannot be written | `~/.pi/agent-local` |
 
-It refuses to start in `/`, in your home directory itself or in a hidden folder of it, and checks that the server answers.
+It refuses to start in `/`, in your home directory itself or in a hidden folder of it, and starts the local model server or checks that one answers.
 Checked here: from the sandbox the home canary, a sibling folder, `~/.ssh` and `auth.json` do not exist, `touch /usr/bin/x`,
 `rm /usr/bin/true` and `echo x > /etc/passwd` fail with "Read-only file system", `sudo` refuses, `curl --noproxy '*'
 https://example.com` cannot resolve a name, and `rm -rf --no-preserve-root /` removes nothing outside the mounted folder (the host's `/usr/bin`,
 canary files and secrets were intact afterwards).
+
+### Local models, and switching between them
+
+`spi` runs local models only; plain `pi` outside it keeps every provider. In `spi`:
+
+- `--provider`, `--api-key`, `--extension` (`-e`), `--no-extensions` (`-ne`) and `--approve` (`-a`) are refused, and so are the commands
+  `pi install`, `remove`, `uninstall`, `update`, `auth`, `mcp` and `config`;
+- `auth.json` is an empty file that cannot be written, so `/login` has nowhere to keep a key, and the environment is empty, so no key
+  comes from a variable;
+- `models.json` lists the local models only, and it is read-only;
+- the Strata extension, which `spi` switches on with `SPI_LOCAL_ONLY=1`, empties the catalog of every provider whose address is not
+  `127.0.0.1`, `localhost` or `[::1]` (the built-in ones and those of other extensions, `/model`, `/scoped-models` and `Ctrl+P` included),
+  refuses `/login` and `/logout`, switches back from a non-local model and stops a request that would go to one, and does not trust
+  project-local extensions, skills, prompts and settings of the folder (`AGENTS.md` is still read);
+- the web proxy refuses the API and sign-in hosts of the known model providers (`PROVIDER_HOST_PATTERNS` in `tools/spi_web_proxy.py`).
+  The list cannot be complete: it narrows the way to a hosted model and does not close it. A second `pi` that the model starts from
+  its shell without the extension (`PI_CODING_AGENT_DIR=$(mktemp -d) pi -ne`), or a `curl` with a key it was given, is outside what the
+  extension can stop; only the proxy list and the empty environment stand in the way.
+
+When no server answers on port 8080, `spi` starts the one of a local model through the model manager (`tools/spi_models.py`) and stops
+it when `spi` ends. The models it may start are listed in `~/.pi/agent-local/local-models.json` (the path can be changed with
+`SPI_MODELS`):
+
+```json
+{
+  "root": "~/path/to/strata",
+  "default": "qwen3.6-35b-a3b-iq4xs",
+  "models": {
+    "qwen3.6-35b-a3b-iq4xs": {"file": "models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp.gguf"},
+    "qwen3.6-35b-a3b-q4kxl": {"file": "models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf", "args": ["--profile", "auto"]}
+  }
+}
+```
+
+A model id is the `id` of an entry in `models.json`, so `/model` in pi lists the same models. The first one (`default`) starts with `spi`.
+The UD-IQ4_XS file is the default because it processes a prompt 1.5 to 1.7 times faster than Q4_K_XL (see "Which file to run" in the
+README). When another model is chosen with `/model` or `Ctrl+P`, the next request makes the manager finish the request that is running,
+stop the server, start the other one and pass the request on: the first answer after a switch waits for the load, about ten seconds
+with the files in the page cache and longer from the SSD. Only one model is in memory at a time. The manager answers `GET /v1/models`
+itself (the local models and which one is loaded), replaces the `model` of a request with the name the server knows itself by, and
+refuses a model that is not in the list with a 404.
+
+The server of the manager listens on `127.0.0.1:8081` (`SPI_SERVER_PORT`), so it does not meet a server that you started yourself;
+its output is in `server.log` and the manager's own in `models.log`, both in the profile folder. A server that already answers on
+port 8080 is used as it is: it keeps its own model, and `/model` cannot switch it. `STRATA_ROOT` names the Strata folder when the config
+has no `"root"`; `spi` run from `tools/` of the checkout finds it by itself. When `spi` ends, it waits for the server to stop, which
+puts the CPU frequency cap back.
 
 ### gh in the sandbox
 
@@ -165,7 +212,7 @@ model is part of what you fear.
 Install and use:
 
 ```sh
-install -m 755 tools/spi tools/spi_gh_broker.py tools/spi_gh_shim.py tools/spi_web_proxy.py ~/.local/bin/    # the .py files stay next to spi
+install -m 755 tools/spi tools/spi_gh_broker.py tools/spi_gh_shim.py tools/spi_web_proxy.py tools/spi_models.py ~/.local/bin/    # the .py files stay next to spi
 mkdir -p ~/.pi/agent-local                  # put models.json (above) in it, and this settings.json:
 ```
 
@@ -241,12 +288,12 @@ loses its time, and none of it is the decoding speed:
 | `tool_result` (closed doors) | Tells a model that keeps knocking on a site that turns it away that this is pointless and where else to look. The sites of a call are the URL of `web_fetch` or the addresses in a `curl` or `wget` command (`www.`, the port, case, a trailing dot and an IDN spelling do not matter; a result is credited to the final address after redirects, and a command with several addresses is not credited to any). A result counts as a refusal when its first significant status is 403 (the proxy's "Connection established" line and redirects are skipped, and a page that shows `HTTP/2 403` in its text after a 200 does not count), or, when it has no status, the title is "Just a moment..." or "Access Denied", or the web proxy refused the address, or the name does not resolve; 401 (a login) and 429 (a pause) do not count. The refused result gets a note at its end: the site turns programs away, every page of it will do the same, and the ways round it that work from the sandbox (a Bing search through `web_fetch`, the maker's or another shop's site, a price-comparison site, an API or a feed, `web.archive.org`, or asking the user for the text); from the second refusal the note says how many times it was turned away. Nothing is blocked by default. `"doors": {"block": true}` in `config.json` also stops the calls that name a site after `refusalsBeforeBlock` (2) refusals for `blockMinutes` (30), a name inside the command text included (`host=shop.test; curl "https://$host/"`); `"enabled": false` turns the notes off. The count is dropped when the site answers normally with some output and at a new session. |
 | tool `web_fetch` | Opens an http or https URL and returns it as text: a page is reduced to its readable text (the `<main>` or `<article>` part when it has real content, without scripts, styles, navigation and blank lines, and with a run of eight or more short list items joined into one line), JSON and plain text come as they are, a charset is honoured, redirects are followed, at most 2 MB are read. A result is about 5,000 characters and names the `offset` for the next part, so a long page is read in pieces. A Cloudflare browser check, a refused address, a missing host and a timeout are reported in words. Turn it off with `"web": {"enabled": false}` in `config.json`. Inside `spi` it goes through the web proxy; plain `pi` fetches directly. |
 
-Install (the sandbox of `tools/spi` mounts the folder read-only and `spi` warns on start when `extensions/strata` is missing; plain `pi` can load it with `pi -e tools/pi-strata/index.ts`):
+Install (the sandbox of `tools/spi` mounts the folder read-only and `spi` does not start pi when `extensions/strata` is missing, because that extension keeps it to local models; plain `pi` can load it with `pi -e tools/pi-strata/index.ts`, where it leaves every provider alone unless `SPI_LOCAL_ONLY=1` is set):
 
 ```sh
 mkdir -p ~/.pi/agent-local/extensions
 cp -r tools/pi-strata ~/.pi/agent-local/extensions/strata
-install -m 755 tools/spi tools/spi_gh_broker.py tools/spi_gh_shim.py tools/spi_web_proxy.py ~/.local/bin/   # the copy that mounts extensions, gh and the proxy
+install -m 755 tools/spi tools/spi_gh_broker.py tools/spi_gh_shim.py tools/spi_web_proxy.py tools/spi_models.py ~/.local/bin/   # the copy that mounts extensions, gh and the proxy
 ```
 
 Settings go in an optional `config.json` next to `index.ts`: `guard` (`minChars`, `window`, `nudgeAt`, `blockAt`,
@@ -284,6 +331,8 @@ Checks: `cd tools/pi-strata && node --test test/*.test.ts` (unit tests), `node s
 
 | Symptom | Cause |
 | --- | --- |
-| `ECONNREFUSED` or a connection error on `127.0.0.1:8080` | the server is not running: start `bin/strata-serve`; for another address change `baseUrl` |
+| `ECONNREFUSED` or a connection error on `127.0.0.1:8080` | the server is not running: start `bin/strata-serve`, or run `spi` with a `local-models.json`; for another address change `baseUrl` |
+| `spi: the model manager did not start` | the config is missing or wrong, or the Strata folder is unknown: read the message above it and `models.log` |
+| a 503 from the manager, "already taken" or "ended with code" | port 8081 is used by another program, or the server of the model failed to start: see `server.log` |
 | empty reply, 400 in the server log | the request is larger than the window, see context files above |
 | first reply after a long pause is slow | the page cache lost the experts; speed returns after a few requests |
