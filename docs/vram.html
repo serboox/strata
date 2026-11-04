@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Что хранится в VRAM: Strata, Qwen3.6-35B-A3B на RTX 3050 Ti 4 ГБ</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--ink:#1c2430;--muted:#5b6573;--line:#d9dee5;--accent:#2b6fd6;--ok:#2f9e5a;--warn:#e08a2b;--bad:#d62b2b;--c1:#2b6fd6;--c2:#e08a2b;--c3:#2f9e5a;--c4:#9b59b6;--c5:#17a2b8;--c6:#d62b2b;--c7:#8a8f98}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 system-ui,"Segoe UI",Roboto,Arial,sans-serif}
+main{max-width:1020px;margin:0 auto;padding:24px 16px 80px}
+h1{font-size:28px;line-height:1.2;margin:8px 0 6px}
+h2{font-size:22px;margin:40px 0 10px;padding-top:8px;border-top:1px solid var(--line)}
+h3{font-size:17px;margin:24px 0 6px}
+p{margin:8px 0}
+.lead{color:var(--muted);font-size:17px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:12px 0}
+.note{border-left:4px solid var(--accent);background:#eef4fd;padding:10px 14px;border-radius:6px;margin:12px 0}
+.warn{border-left-color:var(--warn);background:#fdf3e7}
+.ok{border-left-color:var(--ok);background:#eaf6ee}
+table{border-collapse:collapse;width:100%;font-size:14.5px}
+th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
+th{background:#eef1f5;font-weight:600}
+td.n,th.n{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+.tw{overflow-x:auto}
+code{background:#eef1f5;border-radius:4px;padding:1px 5px;font-size:13.5px}
+pre{background:#101820;color:#e6edf3;border-radius:8px;padding:12px 14px;overflow-x:auto;font-size:13.5px}
+.b{display:inline-block;border-radius:999px;padding:0 8px;font-size:12px;font-weight:600;color:#fff;white-space:nowrap}
+.b.m{background:var(--ok)}.b.c{background:var(--accent)}.b.e{background:var(--warn)}
+svg{width:100%;height:auto;display:block}
+.sw{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:6px;vertical-align:-1px}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:760px){.grid2{grid-template-columns:1fr}h1{font-size:24px}}
+label{display:block;font-size:14px;color:var(--muted);margin-top:8px}
+input[type=range]{width:100%}
+select,input[type=number]{font:inherit;padding:4px 6px;border:1px solid var(--line);border-radius:6px}
+.big{font-size:26px;font-weight:700}
+</style>
+</head>
+<body>
+<main>
+
+<h1>Что именно хранится в VRAM</h1>
+<p class="lead">Strata, Qwen3.6-35B-A3B (UD-IQ4_XS с блоком MTP), видеокарта RTX 3050 Ti Laptop на 4 ГБ. Состояние на 3 ноября 2026, конфигурация по умолчанию: контекст 65536 ячеек, блок промпта 512, KV-кэш в q8, одна сессия, MTP 2 черновика.</p>
+
+<div class="note ok">
+<b>Коротко.</b> В VRAM лежит только «плотная» часть модели, которую считает видеокарта на каждом токене (внимание, рекуррентные слои GDN, общий эксперт, роутеры, голова вывода): <b>1.92 ГиБ</b>. Рядом лежат кэш внимания (<b>748 МиБ</b> при контексте 65536), состояние GDN (<b>63 МиБ</b>), рабочие буферы и контекст CUDA. Всего процесс движка занимает <b>3496 МиБ</b>, свободно остаётся около <b>0.27 ГиБ</b>. Маршрутизируемые эксперты (14.6 ГиБ) и таблица эмбеддингов (0.5 ГиБ) <b>в VRAM не лежат</b>: эксперты читает из оперативной памяти CPU, таблица эмбеддингов закреплена в RAM, и видеокарта берёт из неё нужные строки по PCIe.
+</div>
+
+<p>Оговорка о числах. Каждое число ниже помечено, откуда оно взято:
+<span class="b m">измерено</span> (лог движка, <code>nvidia-smi</code>, заголовок файла GGUF),
+<span class="b c">посчитано</span> (по формулам из кода движка и геометрии модели),
+<span class="b e">оценка</span> (остаток, который я не смогла разложить по статьям без запуска движка под отладчиком).</p>
+
+<h2>1. Общая картина</h2>
+<div class="card">
+<svg viewBox="0 0 960 190" role="img" aria-label="Состав VRAM">
+  <rect width="960" height="190" fill="#fff"/>
+  <text x="10" y="22" font-size="15" font-weight="700" fill="#1c2430">3496 МиБ занято процессом движка (из ~3773 МиБ, доступных CUDA; номинально карта 4096 МиБ)</text>
+  <g font-family="system-ui,Arial,sans-serif" font-size="12">
+    <rect x="10"  y="40" width="526" height="48" fill="#2b6fd6"/><text x="20" y="69" fill="#fff" font-size="13" font-weight="700">Веса на GPU 1962 МиБ</text>
+    <rect x="536" y="40" width="201" height="48" fill="#e08a2b"/><text x="546" y="69" fill="#fff" font-size="13" font-weight="700">KV-кэш 748</text>
+    <rect x="737" y="40" width="17"  height="48" fill="#2f9e5a"/>
+    <rect x="754" y="40" width="36"  height="48" fill="#9b59b6"/>
+    <rect x="790" y="40" width="160" height="48" fill="#8a8f98"/><text x="798" y="69" fill="#fff" font-size="13" font-weight="700">остаток ~591</text>
+  </g>
+  <g font-size="12" fill="#1c2430" font-family="system-ui,Arial,sans-serif">
+    <rect x="10" y="108" width="12" height="12" fill="#2b6fd6"/><text x="28" y="119">веса GPU: 1962 МиБ, измерено по заголовку и логу</text>
+    <rect x="10" y="128" width="12" height="12" fill="#e08a2b"/><text x="28" y="139">K/V-кэш q8: 748 МиБ, посчитано</text>
+    <rect x="10" y="148" width="12" height="12" fill="#2f9e5a"/><text x="28" y="159">состояние GDN: 63 МиБ, посчитано</text>
+    <rect x="10" y="168" width="12" height="12" fill="#9b59b6"/><text x="28" y="179">буферы движка: 53 + scratch 80 МиБ, посчитано и из лога</text>
+    <rect x="420" y="108" width="12" height="12" fill="#8a8f98"/><text x="438" y="119">остаток ~591 МиБ: контекст CUDA, cuBLAS, ядра, прочее (оценка)</text>
+    <rect x="420" y="128" width="12" height="12" fill="#e6e9ee" stroke="#d9dee5"/><text x="438" y="139">свободно ~277 МиБ после запуска (из лога: 0.27 ГиБ)</text>
+  </g>
+</svg>
+</div>
+<p>Что сказали измерения. Во время прогона <code>nvidia-smi</code> показывал для процесса движка <b>3496 МиБ</b> (вся карта 3527 МиБ, остальное приходится на рабочий стол). Лог движка при старте: «1.92 GiB on the GPU», «scratch buffers 80 MiB», «context 65536 cells ... 0.27 GiB of VRAM free». Значит CUDA видит около 3773 МиБ (3496 + 277), то есть около 323 МиБ из 4096 номинальных занимает драйвер и прошивка.</p>
+
+<h2>2. Веса модели в VRAM: 1.92 ГиБ</h2>
+<p>Это всё, что не относится к маршрутизируемым экспертам и таблице эмбеддингов. Числа по заголовку файла <code>Qwen3.6-35B-A3B-UD-IQ4_XS-mtp.gguf</code> (<span class="b m">измерено</span>; сумма 1961.8 МиБ равна строке лога «1.92 GiB on the GPU»).</p>
+<div class="tw"><table>
+<thead><tr><th>Что это</th><th>Сколько тензоров</th><th>Тип</th><th class="n">МиБ</th><th>Зачем в VRAM</th></tr></thead>
+<tbody>
+<tr><td><b>Слои GDN</b> (30 из 40: рекуррентная «линейная» attention): <code>attn_qkv</code>, <code>attn_gate</code>, <code>ssm_out</code>, <code>ssm_alpha</code>, <code>ssm_beta</code>, свёртка, A, dt, нормы</td><td>240</td><td>Q8_0 1020.0, F32 18.8</td><td class="n">1038.8</td><td>Считаются на каждом токене всеми 30 слоями; GPU делает это быстро, читая 1 ГБ за токен</td></tr>
+<tr><td><b>Полное внимание</b> (10 слоёв: 3, 7, 11, ... 39): <code>attn_q</code>, <code>attn_k</code>, <code>attn_v</code>, <code>attn_output</code></td><td>40</td><td>Q8_0</td><td class="n">276.2</td><td>Каждый токен проходит их; здесь же лежит KV-кэш</td></tr>
+<tr><td><b>Общий эксперт</b> (shared expert, один на слой, считается всегда): gate, up, down</td><td>160</td><td>Q8_0 127.5, F32 0.3</td><td class="n">127.8</td><td>Считается для каждого токена, поэтому лежит рядом с вниманием</td></tr>
+<tr><td><b>Роутеры</b> (выбор 8 из 256 экспертов): <code>ffn_gate_inp</code>, F32 по 2 МиБ на слой</td><td>40</td><td>F32</td><td class="n">80.0</td><td>Нужен до выбора экспертов, считается на GPU в полной точности</td></tr>
+<tr><td><b>Голова вывода</b> (<code>output.weight</code>, 248 320 токенов × 2048)</td><td>1</td><td>Q6_K</td><td class="n">397.9</td><td>Логиты каждого токена и каждого черновика. У Q4_K_XL здесь Q8_0 (515.3 МиБ)</td></tr>
+<tr><td><b>Блок MTP</b> без экспертов (<code>blk.40</code>: внимание, <code>nextn.eh_proj</code>, общий эксперт, роутер)</td><td>17</td><td>Q8_0 39.3, BF16 1.0</td><td class="n">40.4</td><td>Черновики следующих токенов; эксперты блока MTP считает CPU (0.45 ГиБ в RAM)</td></tr>
+<tr><td>Нормы слоёв и выходная норма</td><td>131</td><td>F32</td><td class="n">0.7</td><td>Крошечные</td></tr>
+<tr><td><b>Итого</b></td><td></td><td></td><td class="n"><b>1961.8</b></td><td>= 1.916 ГиБ</td></tr>
+</tbody></table></div>
+
+<div class="card">
+<h3>Почему здесь Q8_0, а не Q4?</h3>
+<p>Названия «UD-IQ4_XS» и «UD-Q4_K_XL» описывают <b>рецепт</b> квантования Unsloth Dynamic, а не один тип на весь файл: слои подбираются по чувствительности. Основная масса байтов действительно хранится в 3-5-битных типах, а небольшие плотные тензоры, через которые проходит каждый токен, Unsloth держит в Q8_0. Разбивка по типам для обоих файлов (<span class="b m">измерено</span> по заголовкам):</p>
+<div class="tw"><table>
+<thead><tr><th>Группа</th><th class="n">UD-IQ4_XS-mtp, МиБ</th><th class="n">UD-Q4_K_XL, МиБ</th><th>Типы</th><th>Где лежит</th></tr></thead>
+<tbody>
+<tr><td>Эксперты, gate и up</td><td class="n">8800.0</td><td class="n">11520.0</td><td>IQ3_S (3.44 бита) / Q4_K (4.5 бита)</td><td>RAM (кэш страниц), считает CPU</td></tr>
+<tr><td>Эксперты, down (и 3 слоя Q6_K)</td><td class="n">5662.0 + 464.0 MTP</td><td class="n">7040.0 + 630.0, из них 464 MTP</td><td>IQ4_XS, Q6_K, Q5_K / Q5_K, Q6_K</td><td>RAM</td></tr>
+<tr><td>Всё остальное в Q8_0: внимание, GDN, общий эксперт, блок MTP</td><td class="n">1463.0</td><td class="n">1463.0</td><td>Q8_0</td><td><b>VRAM</b></td></tr>
+<tr><td>Таблица эмбеддингов <code>token_embd</code></td><td class="n">515.3</td><td class="n">515.3</td><td>Q8_0</td><td>закреплённая память RAM, строки читает GPU по PCIe</td></tr>
+<tr><td>Голова вывода</td><td class="n">397.9</td><td class="n">515.3</td><td>Q6_K / Q8_0</td><td><b>VRAM</b></td></tr>
+<tr><td>Роутеры, нормы</td><td class="n">80.7</td><td class="n">80.7</td><td>F32</td><td><b>VRAM</b></td></tr>
+<tr><td><b>Весь файл</b></td><td class="n"><b>17403</b></td><td class="n"><b>21785</b></td><td></td><td></td></tr>
+</tbody></table></div>
+<p>Итог: у обоих файлов около 86-88 % байтов приходится на эксперты в «четвёрочных» типах, и около 11 % на Q8_0 (1978 МиБ у IQ4_XS, 2494 МиБ у Q4_K_XL). Q8_0 вы видите потому, что смотрите на то, что лежит на GPU: именно этот слой модели Unsloth оставляет почти без потерь, чтобы не портить каждый токен. Эксперты, которых за токен активно только 8 из 256, квантуются агрессивно. Это обычный подход Unsloth Dynamic; точный перечень слоёв, которым оставили высокую точность, определяется их калибровкой и в нашем коде не настраивается.</p>
+</div>
+
+<h2>3. Что в VRAM не лежит</h2>
+<div class="grid2">
+<div class="card">
+<h3>Маршрутизируемые эксперты: 14.1 ГиБ + 0.45 ГиБ у MTP</h3>
+<p>256 экспертов на слой × 40 слоёв, на токен активны 8. Движок читает их «на месте» из отображённого файла GGUF (кэш страниц RAM), считает их пул из 4 потоков CPU, а результат отправляет на GPU. В логе: «hybrid experts: 0 of 256 per layer in VRAM, all 14.66 GiB read in place from the mapped GGUF». Один эксперт IQ4_XS занимает 1.39 МиБ (gate+up 0.86 МиБ, down 0.53 МиБ); свободных 277 МиБ хватило бы на 198 экспертов из 10240, это 1.9 %. По замерам из <code>docs/TUNING.md</code> 75 экспертов покрывают всего 0.8 % обращений, поэтому кэш горячих экспертов в VRAM почти ничего не даёт.</p>
+</div>
+<div class="card">
+<h3>Таблица эмбеддингов: 0.5 ГиБ</h3>
+<p>По умолчанию лежит в закреплённой памяти RAM, и GPU читает нужные строки напрямую по PCIe (комментарий в коде: «Host (the default): in pinned host memory the GPU reads through PCIe»). На токен нужна одна строка в 2 КиБ, поэтому это почти ничего не стоит, а в VRAM экономит 0.5 ГиБ.</p>
+<h3>Контрольные точки префикса, tokenizer, сам файл</h3>
+<p>Контрольные точки (<code>--ckpt 6</code>), очереди запросов, токенайзер и GGUF живут в RAM и на диске, не в VRAM.</p>
+</div>
+</div>
+
+<h2>4. Состояние сессии</h2>
+<h3>4.1. KV-кэш внимания: 748 МиБ при контексте 65536 <span class="b c">посчитано</span></h3>
+<p>Полное внимание только в 10 слоях из 40, плюс один слой блока MTP: 11 слоёв с кэшем. У модели 2 KV-головы по 256 значений. В режиме <code>--kv q8</code> строка головы хранится блоками по 32 значения (2 байта масштаб + 32 байта значений = 34 байта), то есть 8 блоков = <b>272 байта</b> на голову. Ячейка K и V вместе: 2 головы × 272 × 2 (K и V) = 1088 байт на слой, 11 слоёв: <b>11 968 байт на ячейку</b>. Это число совпадает с «+11 968 байт на ячейку» в <code>docs/TUNING.md</code>.</p>
+<p>При контексте 65536: 11 968 × 65 536 = 784 334 848 байт = <b>748 МиБ</b>. В режиме f16 было бы 2 × 512 байт на голову, 22 528 байт на ячейку и 1408 МиБ, поэтому по умолчанию используется q8.</p>
+<h3>4.2. Состояние GDN: 63 МиБ на сессию <span class="b c">посчитано</span></h3>
+<p>У каждого из 30 слоёв GDN есть фиксированное рекуррентное состояние, не зависящее от длины контекста: матрица <code>S</code> размером 32 головы × 128 × 128 в F32 (2 МиБ) и состояние свёртки 8192 канала × 3 в F32 (96 КиБ). Итого 2 195 456 байт на слой, 65 863 680 байт или <b>62.8 МиБ</b> на сессию. Если у сервера несколько параллельных сессий (<code>--batch</code>), каждая получает свой комплект K/V и GDN.</p>
+
+<h2>5. Рабочие буферы и контекст CUDA</h2>
+<p>Размеры для блока промпта 512 токенов (<span class="b c">посчитано</span> по <code>Engine::init</code>, <code>kVerify = 8</code>):</p>
+<div class="tw"><table>
+<thead><tr><th>Буфер</th><th>Форма</th><th class="n">МиБ</th></tr></thead>
+<tbody>
+<tr><td><code>x</code>, <code>h</code>, <code>y</code>, <code>hmain</code> (скрытые состояния)</td><td>4 × 512 × 2048 × F32</td><td class="n">16.0</td></tr>
+<tr><td>логиты проверочного окна <code>logits</code></td><td>8 × 248 320 × F32</td><td class="n">7.6</td></tr>
+<tr><td>логиты черновика <code>logits_m</code></td><td>248 320 × F32</td><td class="n">0.95</td></tr>
+<tr><td>оценки внимания <code>att_s</code> + <code>att_p16</code> (<code>--att-scores 4</code>)</td><td>2 Mi значений F32 и F16</td><td class="n">12.0</td></tr>
+<tr><td>частичные суммы split-K <code>sk_part</code></td><td>16 × 512 × 257 × F32</td><td class="n">8.0</td></tr>
+<tr><td>активации в q8_1: <code>q8</code>, <code>xq</code>, <code>x16</code></td><td>512 строк по 4096 и 2048</td><td class="n">7.4</td></tr>
+<tr><td>роутер <code>logits_r</code>, веса, служебное</td><td>512 × 257 × F32 и др.</td><td class="n">0.7</td></tr>
+<tr><td><b>Итого перечисленных</b></td><td></td><td class="n"><b>52.6</b></td></tr>
+<tr><td>общие scratch-буферы GDN / внимания / MoE</td><td>из лога: «scratch buffers 80 MiB»</td><td class="n">80.0 <span class="b m">измерено</span></td></tr>
+</tbody></table></div>
+<p>Остаток до измеренных 3496 МиБ: 3496 − (1961.8 + 748.0 + 62.8 + 52.6 + 80.0) = <b>591 МиБ</b> <span class="b e">оценка</span>. Это контекст CUDA процесса (драйвер, таблицы страниц; типично 200-300 МиБ на такой карте), рабочие области cuBLAS и cuBLASLt, рабочая область GEMM для промпта, буферы MMQ и нативных ядер экспертов, и загруженные модули ядер. Ядра грузятся лениво (<code>CUDA_MODULE_LOADING=LAZY</code>): без этого сотни мегабайт ушли бы на модули ядер сразу при старте, а на 4 ГБ каждая сотня мегабайт на счету. Разложить остаток по статьям можно, только запустив движок с трассировкой <code>cudaMalloc</code>; я этого сейчас не делала, потому что Вы просили отложить всё, что связано с запусками.</p>
+
+<div class="note warn">
+<b>Чего в VRAM нет, хотя могли бы подумать.</b> Копий Q8_0-весов в «упакованном» виде для быстрых ядер: они отключены (<code>STRATA_Q8_PACKED=0</code>), иначе плотные веса занимали бы вдвое больше. Экспертов-слотов: 0 из 256 на слой (при <code>--expert-slots N</code> каждый слот стоит 1.39 МиБ на слой, то есть 56 МиБ на слот сразу для 40 слоёв). Буфера подкачки экспертов для длинных промптов: в логе «0.00 GiB staging».
+</div>
+
+<h2>6. Как это меняется</h2>
+<div class="card">
+<p>Калькулятор: свободная VRAM при других настройках. Это <span class="b e">оценка</span> по формуле, откалиброванной на одном замере (3496 МиБ при контексте 65536, q8, одна сессия, блок 512, <code>--att-scores 4</code>); для другого блока промпта или другого файла она сдвинется.</p>
+<div class="grid2">
+<div>
+<label>Контекст, ячеек: <b id="ctxv">65536</b><input id="ctx" type="range" min="4096" max="131072" step="1024" value="65536"></label>
+<label>Тип KV-кэша <select id="kv"><option value="11968">q8 (по умолчанию)</option><option value="22528">f16</option></select></label>
+<label>Параллельных сессий <input id="ses" type="number" min="1" max="4" value="1"></label>
+</div>
+<div>
+<p>K/V-кэш всех сессий: <span class="big" id="kvo">748</span> МиБ</p>
+<p>Состояние GDN всех сессий: <b id="gdn">63</b> МиБ</p>
+<p>Занято процессом: <b id="used">3496</b> МиБ из 3773</p>
+<p>Свободно: <span class="big" id="free">277</span> МиБ <span id="verdict"></span></p>
+<p>Столько экспертов IQ4_XS влезло бы в слоты: <b id="fit">198</b> (из 10240)</p>
+</div>
+</div>
+</div>
+<ul>
+<li><b>Контекст.</b> Каждые 8192 ячейки стоят 93.5 МиБ в q8. Контекст 16K освободил бы около 0.55 ГиБ, то есть примерно 400 экспертов (3.9 %): слишком мало, чтобы окупить потерю длинного окна.</li>
+<li><b>Блок промпта (<code>--chunk</code>) и <code>--att-scores</code>.</b> Растут буферы: около 0.5 МиБ на токен блока и 12 МиБ на каждые 4 Mi значений оценок. По таблице в <code>docs/TUNING.md</code> блок 1024 уже не помещается рядом с контекстом 32768 на Q4_K_XL.</li>
+<li><b>Голова вывода.</b> Q6_K у IQ4_XS экономит 117 МиБ против Q8_0 у Q4_K_XL: по этой причине у IQ4_XS остаётся 0.27 ГиБ свободных вместо примерно 0.14 ГиБ.</li>
+<li><b>Слоты экспертов в VRAM</b> (<code>--expert-slots</code>): каждый слот на 40 слоёв стоит 56 МиБ. На 277 МиБ влезло бы около 4 слотов на слой, то есть 1.6 % экспертов.</li>
+<li><b>Слоты в закреплённой памяти RAM</b> (новая опция <code>--host-slots</code> в ветке <code>qwen_host_slots</code>, ещё не проверена замером): слоты лежат в RAM, а GPU читает их по PCIe напрямую (проверено: 6.0 ГБ/с, <code>pageableMemoryAccess</code> работает). VRAM они не занимают.</li>
+</ul>
+
+<h2>7. Как проверить самому</h2>
+<pre># сколько занимает процесс движка (во время работы сервера)
+nvidia-smi --query-compute-apps=pid,used_memory --format=csv
+
+# разбивка типов тензоров любого GGUF по группам
+python3 -c "
+import sys, collections
+sys.path.insert(0, 'tools'); import gguf_reader
+g = gguf_reader.GGUFFile('models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp.gguf')
+print(g.by_type())"
+
+# строки лога движка со стартовым учётом VRAM
+grep -E 'on the GPU|scratch buffers|context .* cells|hybrid experts' logs/strata-qwen36.log</pre>
+
+<h2>8. Откуда числа</h2>
+<ul>
+<li>Типы и размеры тензоров: заголовок файла GGUF, <code>tools/gguf_reader.py</code>.</li>
+<li>Геометрия: метаданные GGUF (<code>qwen35moe.*</code>): 40 слоёв плюс блок MTP, внимание каждые 4 слоя, 16 голов, 2 KV-головы, длина головы 256, 256 экспертов, 8 активных, <code>ssm.state_size = 128</code>, <code>ssm.time_step_rank = 32</code>, <code>ssm.inner_size = 4096</code>, <code>ssm.group_count = 16</code>, <code>ssm.conv_kernel = 4</code>, словарь 248 320.</li>
+<li>Формулы и размещение: <code>src/qwen35/q36_engine.cu</code> (<code>kv_row_bytes</code>, <code>kv_bytes</code>, <code>Engine::init</code>, <code>place_experts</code>).</li>
+<li>Измерения: лог движка при старте и <code>nvidia-smi</code> во время прогона 3 ноября; <code>docs/TUNING.md</code>, раздел «What fits in 4 GB of VRAM».</li>
+</ul>
+
+</main>
+<script>
+(function(){
+  var TOTAL=3772.5, BASE=3496-748.0-62.81; // everything that does not depend on the context
+  var ctx=document.getElementById('ctx'), kv=document.getElementById('kv'), ses=document.getElementById('ses');
+  function upd(){
+    var cells=+ctx.value, per=+kv.value, n=Math.max(1,Math.min(4,+ses.value||1));
+    var kvMiB=cells*per*n/1048576, gdnMiB=62.81*n, used=BASE+kvMiB+gdnMiB, free=TOTAL-used;
+    document.getElementById('ctxv').textContent=cells;
+    document.getElementById('kvo').textContent=kvMiB.toFixed(0);
+    document.getElementById('gdn').textContent=gdnMiB.toFixed(0);
+    document.getElementById('used').textContent=used.toFixed(0);
+    document.getElementById('free').textContent=Math.max(free,0).toFixed(0);
+    document.getElementById('fit').textContent=Math.max(0,Math.floor(Math.max(free,0)/1.39));
+    document.getElementById('verdict').textContent=free<0?'(не поместится)':free<100?'(на грани)':'';
+  }
+  [ctx,kv,ses].forEach(function(e){e.addEventListener('input',upd)});
+  upd();
+})();
+</script>
+</body>
+</html>
