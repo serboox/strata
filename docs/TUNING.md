@@ -348,7 +348,9 @@ speed through the server is not yet measured on a free machine.
 
 The dense matrices (attention, GDN, shared expert, MTP projection, embeddings) are Q8_0 in every file and sit in video memory
 (about 1.6 GB), where every decode step reads them again. Q6_K stores the same weights in 0.82 bytes instead of 1.06, 23 percent
-fewer bytes, for a small speed gain that is expected to be 3 to 4 percent (not measured yet). The router, the norms, the GDN
+fewer bytes. Measured on 4 November: +1.1 percent in speed, inside the noise of a run (0.5 percent between two baselines), and a quality
+cost of 0.0124 mean KL divergence against the plain file (the best token is the same in 95.1 percent of positions, the perplexity
+unchanged within its error). The Q8_0-only fast paths are lost, which eats the saved bytes. Not worth using. The router, the norms, the GDN
 `ssm_a`/`alpha`/`beta`/`dt`/`conv` tensors and all expert tensors are never touched. The switch is a different model file, so there
 is nothing to turn on in the engine and the Q8_0 file keeps working unchanged.
 
@@ -394,8 +396,11 @@ nothing; the setting is for a measured trade, not for a default.
   not touched. The count applies to every pass: decode, verify windows, prompt chunks and the MTP block.
 - Kernels: the fused router and grouping kernel, the plain router and the combine kernel take any K from 1 to 8; K = 8 runs
   the same kernel instances and launches as before.
-- Expected gain: the expert part of a step falls about with K, so 6 of 8 may give up to 20% more tokens per second. This is
-  an estimate from the step table below, not a measurement; the drafts' acceptance (MTP) may fall with it and eat some of it.
+- Measured gain (4 November, IQ4_XS with MTP, 2.2 GHz cap): 7 of 8 +17.2 percent, 6 of 8 +20.9 percent, 5 of 8 +35.3 percent in
+  tokens per second against the baseline of the same session (30.4 and 30.5), package at most 67 C.
+- Measured quality cost, against the same file at 8 experts (16 thousand tokens of documents and code, 512-token chunks):
+  K=7 mean KLD 0.0254, best token the same in 93.1 percent, perplexity +1.7 percent; K=6 0.0602, 89.3 percent, +5.4 percent;
+  K=5 0.1222, 85.3 percent, +10.8 percent. Quality on tasks (tool calls, agent runs) was not measured.
 - Quality gate: `tools/kld_experts.py` runs llama.cpp's KL-divergence test. It saves the reference logits of a larger file once
   (`--ref-model`, e.g. the Q8_0 one), then measures the served file (`--model`) at each count on the same text and prints one
   line per count: mean KLD, the 99th percentile of KLD, how often the top token is the same, and the perplexity ratio. The line
@@ -428,6 +433,11 @@ the third moves work to another stream, none changes an arithmetic step.
 | `quant` | The CPU path's activations (Q8_K for the i-quants and k-quants, Q8_0 for Q4_0, Q5_0, Q8_0, IQ4_NL, MXFP4) are quantized by a GPU kernel (`src/qwen35/q36_act_quant.cuh`) with the host quantizer's arithmetic, and only the quantized bytes (2336 per row for 2048 values, not 8192) come back. A layer whose format the kernel does not cover, or whose startup probe differs from the host quantizer, keeps the host path. | Host quantization (a few microseconds per row and layer) and half the copy; under 1% of a step, estimated, not measured |
 | `glue` | `moe_hybrid_cpu` keeps its job tables between calls (no `std::map`, no per-call vectors), uploads the CPU rows and the merge flags in one copy instead of two, and the wait for the router pauses between polls. | Two copies less per layer, 20 to 30 microseconds of host and DMA time; about 1 ms of a 75 ms step, estimated |
 | `commit` | After a verify window the commit of the GDN state (`commit()`, 30 layers of two small kernels) runs on a side stream, so the next step's MTP forward starts at once; the next verify forward waits for it. The MTP block is attention only, so it shares nothing with the commit. | The commit's GPU time (an estimated 1.5 to 3 ms: it is 32 blocks per layer on a 20-SM card) leaves the critical path of speculative steps |
+
+Measured on 4 November (IQ4_XS with MTP, 2.2 GHz cap, 6 workers, IQ kernels on, 900-token greedy answer, two baselines at 30.4 and
+30.5 tokens per second): all three switches +2.8 percent, `quant` alone +1.6, `glue` alone 0.0, `commit` alone +0.4. The text of every
+run is identical to the baseline's over the whole answer, and `STRATA_Q36_VERIFY_OVERLAP=1` on a token run compared 25216 values with
+0 mismatches. A difference under about 2 percent is inside the noise of a run.
 
 `rows` (row wavefront across the rows of a verify window) is accepted in the list for forward compatibility and ignored; it
 is not built. The mixer of row t+1 needs row t's input to the layer (the GDN state, the KV cache), not row t's expert output,
@@ -471,8 +481,11 @@ remove is the mixer of every layer, about 0.27 ms of the 0.7 ms per layer in the
 In the hybrid mode the CPU pool computes every expert that has no VRAM slot. The integrated GPU can take part of that work: it
 computes a fixed share of each layer's routed experts through ggml's Vulkan backend while the pool computes the others, for the
 same token at the same time. Measured earlier with llama.cpp (the whole model on the iGPU alone): 10 to 11 tok/s at about 59 C,
-because the iGPU does the arithmetic instead of the CPU cores. Whether the split gains anything is not measured yet: the iGPU and
-the cores share the memory bandwidth and the package's power budget, and every layer pays for a launch and a join.
+because the iGPU does the arithmetic instead of the CPU cores. Measured on 4 November: it does not gain, it loses. With up to 8
+entries per layer on the iGPU the speed fell from about 30.5 to 10.9 tokens per second (share 0.25) and 11.7 (share 0.35); with at most
+one entry per layer (`STRATA_IGPU_MAX_ENTRIES=1`) it was 16.1 against 31.1. One iGPU call takes about 2 ms even for one entry, as long as
+the whole CPU pool needs for a layer, so the pool waits for the iGPU in every layer (the statistics line shows a join wait of 40 to
+190 ms per step). The code stays, off by default; do not turn it on for this model on this machine.
 
 Turning it on:
 
@@ -705,7 +718,7 @@ Five changes are meant to make the IQ4_XS file faster on this laptop without tur
 off by default, and with its switch off the engine behaves as before. `tools/lever_matrix.py` is the runner for testing them:
 it reads one definition file per lever from `tools/levers.d/*.json`, plans runs and executes them one at a time through
 `tools/quant_bench.py` with the thermal rules of this document (the 2200 MHz cap, 6 workers, `STRATA_POOL_SPIN_US=0`, the 80 C
-limit, a wait for the package to cool to 55 C before every run). Nothing in this section has been measured yet.
+limit, a wait for the package to cool to 55 C before every run). The measurements of 3 and 4 November are in "What was measured" at the end of this section. The runner's baseline sets `STRATA_IQ_VBMI=1` as the launcher does for the IQ models: without the IQ kernels the baseline is about 16.8 tokens per second instead of 30.5.
 
 | # | Lever | Switch | Needs | What proves it |
 | --- | --- | --- | --- | --- |
@@ -764,6 +777,63 @@ flags); `system` levers are not run by the runner (the cooling kit does them) an
 environment of a run is the baseline's (`STRATA_POOL_SPIN_US=0`) plus each selected variant's plus `--env`; the same variable with
 different values from two sources is an error that names both, the same value twice is fine, and identical engine arguments are
 passed once. `python3 tools/lever_matrix.py --help` prints the same schema.
+
+### What was measured
+
+On 3 and 4 November 2026, on the laptop this guide is about, with the machine free, turbo off, the CPU capped at 2.2 GHz, 6 pool
+workers, `STRATA_POOL_SPIN_US=0`, `STRATA_IQ_VBMI=1`, the IQ4_XS file with the MTP block, a code prompt, 900 tokens, three measured
+requests after two warm-up ones, every request started with the package at 55 C or below. The engine is the branch
+`levers_integration` with every switch off for the baseline. The two baselines of the first session were 30.4 and 30.5 tokens per
+second, the later sessions 30.4 to 31.2; the package never went above 70 C. Each session starts and ends with a baseline run.
+
+| Lever and setting | Tokens/s | Against the baseline | Text against the baseline | Quality |
+| --- | --- | --- | --- | --- |
+| baseline (switches off) | 30.4, 30.5 | - | - | - |
+| overlap, all three switches | 31.3 | +2.8 % | identical | the same output |
+| overlap, `quant` / `glue` / `commit` alone | 30.9 / 30.5 / 30.6 | +1.6 / 0.0 / +0.4 % | identical | the same output |
+| iGPU experts, share 0.25 / 0.35, up to 8 entries per layer | 10.9 / 11.7 | -64 / -61 % | differs after about 100 tokens | float rounding |
+| iGPU experts, share 0.25, one entry per layer | 16.1 (baseline 31.1) | -48 % | differs after about 100 tokens | float rounding |
+| 7 of 8 experts | 35.7 | +17.2 % | differs | KLD 0.025, same best token in 93.1 % |
+| 6 of 8 experts | 36.8 | +20.9 % | differs | KLD 0.060, same best token in 89.3 % |
+| 5 of 8 experts | 41.2 | +35.3 % | differs | KLD 0.122, same best token in 85.3 % |
+| dense part in Q6_K | 30.9 (baseline 30.6) | +1.1 % | differs | KLD 0.0124, same best token in 95.1 % |
+| overlap + 7 experts | 36.0 (baseline 30.8) | +17.1 % | differs | as 7 experts |
+| overlap + 6 experts | 38.1 (baseline 30.9) | +23.1 % | differs | as 6 experts |
+| overlap + dense Q6_K | 31.9 (baseline 30.8) | +3.8 % | differs | as Q6_K |
+| 7 experts + dense Q6_K | 35.5 (baseline 30.8) | +15.3 % | differs | not measured together |
+| overlap + 7 experts + dense Q6_K | 35.8 (baseline 31.1) | +15.2 % | differs | not measured together |
+
+The KL divergence is `tools/kld_experts.py` against the same IQ4_XS file at 8 experts (llama.cpp, 32 chunks of 512 tokens of this
+project's documents and code, the second half of each chunk scored); the Q6_K row compares the Q6_K variant of the plain IQ4_XS
+file with the plain file at 8 experts. The perplexity ratios are 1.017, 1.054 and 1.108 for 7, 6 and 5 experts and 0.9996 for
+Q6_K. The drafts' acceptance of the MTP block was 0.635 for the baseline, 0.708, 0.656 and 0.669 for 7, 6 and 5 experts.
+
+What to take from it: the overlap is a small, free gain; 7 of 8 experts is the one setting that gives a large gain at a moderate
+price in quality, 6 and 5 cost visibly more; the iGPU split and the Q6_K dense part do not pay. The quality numbers measure how far
+the output distribution moves; they do not say what happens on tasks (tool calls, agent runs), which is not measured. The iGPU
+lines were taken with `STRATA_IGPU_STATS=1`: about 230 entries in 42 calls per step, 150 to 230 ms of iGPU time per step against
+60 to 100 ms of CPU pool time, and a join wait of 40 to 190 ms per step. The variants with shares 0.15 and the caps 2 and 4 were
+not measured: the cap-1 run showed that even one entry per layer loses.
+
+**Cooling kit (lever 1), balanced profile, 4 November.** `tools/cooling_kit.py --caps 2.2,2.4,2.6`, the IQ4_XS file with the MTP
+block, requests back to back for 300 s per step (the clock counts from the start of the step, which includes the load of the
+model), the server's own limit at 80 C, each step started with the package at 55 C or below:
+
+| Cap | Sustained tokens/s | First request | Package at 75 C after | Package at 80 C after | Hottest sample | The step ended |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2.2 GHz | 30.3 | 28.2 | 8 s | 468 s | 82 C | at the 80 C limit |
+| 2.4 GHz | 26.6 | 30.0 | 61 s | 177 s | 83 C | at the 80 C limit |
+| 2.6 GHz | 21.7 | 30.6 | 45 s | never | 79 C | after its duration |
+
+The higher the cap, the faster the first request and the lower the sustained speed, because the pauses of the temperature governor
+take over: 2.2 GHz stays the best cap on this machine. A continuous run at 2.2 GHz still reaches the 80 C limit after a few
+minutes (the hottest sample was 82 C, a sampling step over the limit); only short requests that start cool, as in the lever
+runs above, stay at 70 C. The three fan sensors of this laptop (`bitland_mifs`) read 0 for the whole run although the package
+reached 83 C, so the kit reports them as unreliable and gives no fan numbers. The platform profile could not be tested: the
+firmware refuses `performance` (`power-profiles-daemon` reports it as degraded because of the operating temperature and the write
+to `/sys/firmware/acpi/platform_profile` fails with "Operation not supported"), and the other profiles need a root write whose
+password dialog was not answered. The power counter was not read, for the same reason. A physical change (a stand, cleaned fans)
+is what the kit is for: run it again with another `--setup` text and compare the table.
 
 ## Benchmarking pitfalls
 
