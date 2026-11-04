@@ -350,7 +350,9 @@ The dense matrices (attention, GDN, shared expert, MTP projection, embeddings) a
 (about 1.6 GB), where every decode step reads them again. Q6_K stores the same weights in 0.82 bytes instead of 1.06, 23 percent
 fewer bytes. Measured on 4 November: +1.1 percent in speed, inside the noise of a run (0.5 percent between two baselines), and a quality
 cost of 0.0124 mean KL divergence against the plain file (the best token is the same in 95.1 percent of positions, the perplexity
-unchanged within its error). The Q8_0-only fast paths are lost, which eats the saved bytes. Not worth using. The router, the norms, the GDN
+unchanged within its error). The Q8_0-only fast paths are lost, which eats the saved bytes. With all groups (embeddings and the MTP projection too) the
+time of a step falls by 3.2 percent on the code prompt and 0.5 percent on a text prompt; the +9.7 percent in tokens per second
+of the code prompt is mostly a higher draft acceptance on that text. Not worth using. The router, the norms, the GDN
 `ssm_a`/`alpha`/`beta`/`dt`/`conv` tensors and all expert tensors are never touched. The switch is a different model file, so there
 is nothing to turn on in the engine and the Q8_0 file keeps working unchanged.
 
@@ -397,7 +399,8 @@ nothing; the setting is for a measured trade, not for a default.
 - Kernels: the fused router and grouping kernel, the plain router and the combine kernel take any K from 1 to 8; K = 8 runs
   the same kernel instances and launches as before.
 - Measured gain (4 November, IQ4_XS with MTP, 2.2 GHz cap): 7 of 8 +17.2 percent, 6 of 8 +20.9 percent, 5 of 8 +35.3 percent in
-  tokens per second against the baseline of the same session (30.4 and 30.5), package at most 67 C.
+  tokens per second against the baseline of the same session (30.4 and 30.5), package at most 67 C. Per step, which does not depend
+  on how often the drafts are accepted, the gains are +10.8, +19.0 and +32.1 percent (7 experts: +8.6 percent on a second prompt).
 - Measured quality cost, against the same file at 8 experts (16 thousand tokens of documents and code, 512-token chunks):
   K=7 mean KLD 0.0254, best token the same in 93.1 percent, perplexity +1.7 percent; K=6 0.0602, 89.3 percent, +5.4 percent;
   K=5 0.1222, 85.3 percent, +10.8 percent. Quality on tasks (tool calls, agent runs) was not measured.
@@ -791,12 +794,16 @@ second, the later sessions 30.4 to 31.2; the package never went above 70 C. Each
 | baseline (switches off) | 30.4, 30.5 | - | - | - |
 | overlap, all three switches | 31.3 | +2.8 % | identical | the same output |
 | overlap, `quant` / `glue` / `commit` alone | 30.9 / 30.5 / 30.6 | +1.6 / 0.0 / +0.4 % | identical | the same output |
+| overlap with the timing line (`all_stats`) / with the self-check (`all_verify`) | 31.5 / 29.6 (baseline 30.8) | +2.0 / -4.0 % | identical | the same output |
 | iGPU experts, share 0.25 / 0.35, up to 8 entries per layer | 10.9 / 11.7 | -64 / -61 % | differs after about 100 tokens | float rounding |
 | iGPU experts, share 0.25, one entry per layer | 16.1 (baseline 31.1) | -48 % | differs after about 100 tokens | float rounding |
+| iGPU experts, share 0.25, at most 2 / 4 entries per layer | 12.3 / 10.4 (baseline 30.8) | -60 / -66 % | differs | float rounding |
+| iGPU experts, share 0.15, up to 8 entries per layer | 11.5 (baseline 30.8) | -63 % | differs | float rounding |
 | 7 of 8 experts | 35.7 | +17.2 % | differs | KLD 0.025, same best token in 93.1 % |
 | 6 of 8 experts | 36.8 | +20.9 % | differs | KLD 0.060, same best token in 89.3 % |
 | 5 of 8 experts | 41.2 | +35.3 % | differs | KLD 0.122, same best token in 85.3 % |
-| dense part in Q6_K | 30.9 (baseline 30.6) | +1.1 % | differs | KLD 0.0124, same best token in 95.1 % |
+| dense part in Q6_K, attention, GDN and shared expert | 30.9 (baseline 30.6) | +1.1 % | differs | KLD 0.0124, same best token in 95.1 % |
+| dense part in Q6_K, all groups (with embeddings and the MTP projection) | 33.8 (baseline 30.8) | +9.7 % | differs | KLD 0.0125, same best token in 95.1 % |
 | overlap + 7 experts | 36.0 (baseline 30.8) | +17.1 % | differs | as 7 experts |
 | overlap + 6 experts | 38.1 (baseline 30.9) | +23.1 % | differs | as 6 experts |
 | overlap + dense Q6_K | 31.9 (baseline 30.8) | +3.8 % | differs | as Q6_K |
@@ -808,12 +815,31 @@ project's documents and code, the second half of each chunk scored); the Q6_K ro
 file with the plain file at 8 experts. The perplexity ratios are 1.017, 1.054 and 1.108 for 7, 6 and 5 experts and 0.9996 for
 Q6_K. The drafts' acceptance of the MTP block was 0.635 for the baseline, 0.708, 0.656 and 0.669 for 7, 6 and 5 experts.
 
+**Tokens per second against the time of a step.** One decode step yields a varying number of tokens, because the MTP drafts are
+accepted more or less often, and that depends on the text. When the text differs (fewer experts, the Q6_K file, the iGPU) the
+tokens per second mix the speed of the engine with the luck of the drafts, so the time of one step is the fair measure
+(`lever_matrix` prints both in the run files: the decode time divided by half the offered drafts). Per step, on the code prompt and
+on a second, text prompt (series 9, 30.5 tokens per second baseline):
+
+| Setting | Code prompt: per step / tokens per second | Text prompt: per step / tokens per second | Draft acceptance (code, text; baseline 0.635, 0.615) |
+| --- | --- | --- | --- |
+| overlap, all three | +2.6 % / +2.8 % | +1.6 % / +1.5 % | same |
+| 7 of 8 experts | +10.8 % / +17.2 % | +8.6 % / +6.4 % | 0.708, 0.596 |
+| 6 of 8 experts | +19.0 % / +20.9 % | +18.9 % / +20.0 % | 0.656, 0.629 |
+| 5 of 8 experts | +32.1 % / +35.3 % | - | 0.669 |
+| dense Q6_K, three groups | +0.9 % / +1.1 % | - | 0.635 |
+| dense Q6_K, all groups | +3.2 % / +9.7 % | +0.5 % / +2.9 % | 0.720, 0.644 |
+
+So the reliable gains are about +2 % for the overlap, +9 to +11 % for 7 experts, +19 % for 6 and +32 % for 5; the larger
+tokens-per-second figures of 7 experts and of the all-groups Q6_K file on the code prompt come from a higher draft acceptance on
+that text and do not repeat on the text prompt. The step of the baseline is 73 to 75 ms for 2.2 to 2.3 tokens.
+
 What to take from it: the overlap is a small, free gain; 7 of 8 experts is the one setting that gives a large gain at a moderate
 price in quality, 6 and 5 cost visibly more; the iGPU split and the Q6_K dense part do not pay. The quality numbers measure how far
 the output distribution moves; they do not say what happens on tasks (tool calls, agent runs), which is not measured. The iGPU
 lines were taken with `STRATA_IGPU_STATS=1`: about 230 entries in 42 calls per step, 150 to 230 ms of iGPU time per step against
-60 to 100 ms of CPU pool time, and a join wait of 40 to 190 ms per step. The variants with shares 0.15 and the caps 2 and 4 were
-not measured: the cap-1 run showed that even one entry per layer loses.
+60 to 100 ms of CPU pool time, and a join wait of 40 to 190 ms per step. The variants with share 0.15 and with the caps 2 and 4
+were measured too (series 8): every one of them loses 60 to 66 percent.
 
 **Cooling kit (lever 1), balanced profile, 4 November.** `tools/cooling_kit.py --caps 2.2,2.4,2.6`, the IQ4_XS file with the MTP
 block, requests back to back for 300 s per step (the clock counts from the start of the step, which includes the load of the
@@ -824,6 +850,7 @@ model), the server's own limit at 80 C, each step started with the package at 55
 | 2.2 GHz | 30.3 | 28.2 | 8 s | 468 s | 82 C | at the 80 C limit |
 | 2.4 GHz | 26.6 | 30.0 | 61 s | 177 s | 83 C | at the 80 C limit |
 | 2.6 GHz | 21.7 | 30.6 | 45 s | never | 79 C | after its duration |
+| 2.8 GHz | - | - | 6 s | 6 s | 80 C | at the 80 C limit, during the model load |
 
 The higher the cap, the faster the first request and the lower the sustained speed, because the pauses of the temperature governor
 take over: 2.2 GHz stays the best cap on this machine. A continuous run at 2.2 GHz still reaches the 80 C limit after a few
