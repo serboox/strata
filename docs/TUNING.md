@@ -863,7 +863,7 @@ reached 83 C, so the kit reports them as unreliable and gives no fan numbers. Th
 tokens per second at 2.2 and 2.4 GHz, and the cap stops mattering because the firmware limits the power itself. The profile above
 `balanced` could not be tested: the firmware refuses `performance` (`power-profiles-daemon`, which runs as root, reports it as
 degraded because of the operating temperature and the write to `/sys/firmware/acpi/platform_profile` fails with "Operation not
-supported"), and `balanced-performance` needs a direct root write whose password dialog was not answered. The power counter was not read, for the same reason. A physical change (a stand, cleaned fans)
+supported"), and `balanced-performance` needs a direct root write; that test was declined, so it was not run. The power counter was not read, for the same reason. A physical change (a stand, cleaned fans)
 is what the kit is for: run it again with another `--setup` text and compare the table.
 
 ## Benchmarking pitfalls
