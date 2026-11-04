@@ -476,6 +476,14 @@ against 32.2, inside the spread of the IQ4_XS runs), needs 18.3 GB of page cache
 is 6 C higher (73 against 67 C); its KL
 divergence is larger (the published figures are 0.033 against 0.012, no task-level quality was measured). One machine, one prompt.
 
+The same runs give the time to process the 1.5K-token prompt: the IQ4_XS file 14.23 s before and 11.4 s after the faster kernels
+(medians of four runs, 105 and 132 tokens per second), the Q4_K_XL file 17.4 to 17.5 s in all eight runs, before and after. With a
+14K-token prompt (one run per file and engine, from the regression check: the engine's default of 4 CPU threads, the cap and the
+pool spin not recorded) the IQ4_XS file took 103.2 s before and 95.0 s after, the Q4_K_XL file 162.9 and 162.0 s, so its prompt speed
+stayed at 86 tokens per second. The log of the Q4_K_XL file says "prompt experts on MMQ (int8)" (kernels from `libstrata_kq.so`),
+that of the IQ4_XS file "prompt experts on the native grouped kernels"; whether this is why the rewritten Q4_K kernels did not change
+the prompt time was not examined. The table of both files is in the README under "Which file to run".
+
 ## Dense part in Q6_K (a file variant, opt-in)
 
 The dense matrices (attention, GDN, shared expert, MTP projection, embeddings) are Q8_0 in every file and sit in video memory

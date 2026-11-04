@@ -95,11 +95,25 @@ gathers, which are slow on CPUs that have the Downfall microcode. They give the 
 micro-benchmark of a whole expert (IQ3_S gate and up, IQ4_XS down) counts 25.1k experts per second against 9.6k for the old path. `--iq-kernels auto|on|off` switches them
 (`auto`, the default, turns them on for a file with IQ experts; `STRATA_IQ_VBMI=1` does the same for the engine on its own).
 
-**Which file to run.** With the frequency cap the two files run at about the same speed (Q4_K_XL 29.4 tokens per second at 74 C,
-IQ4_XS 29.8 to 31.1 at 77 to 78 C), so the choice is about memory and quality. Q4_K_XL, the default, has the smaller loss against
-BF16 (Unsloth's KLD chart gives IQ4_XS a KLD 2.8 times larger; accuracy on tasks is not measured for this model) and needs about
-23 GB of free RAM for full speed. IQ4_XS needs about 18 GB, so it is the better file when a browser and chat programs hold part of
-the memory; without a cap it is also the faster one (14.7 against 12.9 tokens per second).
+**Which file to run.** Measured on this laptop with the 2.2 GHz cap, 6 workers, no pool spin and MTP 2. Decode is 200 tokens after
+a 1.5K-token prompt, the median of four runs; "before" is the engine before the faster CPU kernels of 4 November. Prefill is the time
+to process the prompt, the median of the same four runs. The 14K-token prompt is one run per file and engine of the regression
+check, with the engine's default of 4 CPU threads; the cap and the pool spin of those runs are not recorded.
+
+| | UD-IQ4_XS | UD-Q4_K_XL |
+| --- | --- | --- |
+| Decode | 34.25 tokens per second (31.2 before) | 32.2 (27.4 before) |
+| Prefill, 1.5K-token prompt | 11.4 s, about 132 tokens per second (14.23 s, about 105, before) | 17.5 s, 86 tokens per second (the same before) |
+| Prefill, 14K-token prompt, one run, 4 CPU threads | 95.0 s, 147 tokens per second (103.2 s, 136, before) | 162.0 s, 86 tokens per second (162.9 s, 86, before) |
+| Page cache | 18.3 GB | 22.9 GB |
+| Package peak temperature | 73 C | 67 C |
+| KL divergence from BF16 (published figures) | 0.033 | 0.012 |
+
+IQ4_XS decodes about 6 % faster, which is inside the spread of its runs (29.6 to 36.1), and processes a prompt 1.5 to 1.7 times
+faster (1.2 to 1.6 times before the faster kernels). Q4_K_XL, the default, has the smaller loss against BF16 (Unsloth's KLD chart gives IQ4_XS a KLD 2.8 times larger; accuracy
+on tasks is not measured for this model) and needs about 23 GB of free RAM for full speed. IQ4_XS needs about 18 GB, so it is the
+better file when a browser and chat programs hold part of the memory; without a cap it is also the faster one (14.7 against 12.9
+tokens per second).
 
 ## What it needs
 
