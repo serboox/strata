@@ -30,6 +30,7 @@ DEFAULT_RESUME_MARGIN = 10.0
 DEFAULT_COOL = 55.0
 DEFAULT_BUDGET_MINUTES = 120.0
 DEFAULT_LLAMA_ARGS = ["-ngl", "99", "--cpu-moe"]
+MODEL_INFO_VERBOSITY = ["-lv", "4"]   # llama.cpp prints n_expert_used only at this level; the check of the override reads that line
 DEFAULT_TEXT_FILES = ("README.md", "docs/TUNING.md", "docs/PI.md")
 OUT_DIR = ROOT / "run" / "kld_experts"
 CHARS_PER_TOKEN = 3.5
@@ -111,7 +112,7 @@ def perplexity_command(binary: Path, model: Path, text: Path, base_logits: Path,
                        save_base: bool, experts_used: int | None = None) -> list:
     """One llama-perplexity run: it saves the reference logits (`save_base`) or compares the model with them."""
     command = [str(binary), "-m", str(model), "-f", str(text), "-c", str(ctx), "--chunks", str(chunks), "-t", str(threads), *extra,
-               "--kl-divergence-base", str(base_logits)]
+               *MODEL_INFO_VERBOSITY, "--kl-divergence-base", str(base_logits)]
     if not save_base:
         command.append("--kl-divergence")
     if experts_used is not None:
