@@ -32,6 +32,8 @@ RAPL_PACKAGE_PREFIX = "package-"
 CURRENT = "current"
 DEFAULT_CAPS_GHZ = "2.2,2.4,2.6,2.8"
 DEFAULT_LIMIT_C = 80.0
+DEFAULT_MAX_LOAD = 1.5   # quant_bench's own default: it refuses to start a run while the load average is above it
+DEFAULT_ENV = {"STRATA_POOL_SPIN_US": "0", "STRATA_IQ_VBMI": "1"}   # what the launcher sets for an IQ model
 DEFAULT_START_TEMP_C = 55.0
 THRESHOLDS_C = (75.0, 80.0)
 SAMPLE_PERIOD_S = 2.0
@@ -221,7 +223,7 @@ def bench_command(args, step: dict, out: Path) -> list:
     command = [*(quant_bench.PARENT_DEATH_PREFIX if shutil.which("setpriv") else []), sys.executable, str(QUANT_BENCH), "--model", str(args.model),
                "--label", step["label"], "--budget", "none", "--prompts", "code", "--repeats", str(requests_for(args.duration)), "--warmup", "0",
                "--max-tokens", str(args.max_tokens), "--cpu-max-mhz", str(step["cap_mhz"]), "--workers", str(args.workers),
-               "--cool", str(NO_COOL_WAIT_C), "--cool-timeout", "1", "--max-temp", f"{args.limit:g}", "--out", str(out)]
+               "--cool", str(NO_COOL_WAIT_C), "--cool-timeout", "1", "--max-temp", f"{args.limit:g}", "--max-load", f"{args.max_load:g}", "--out", str(out)]
     for key, value in args.env.items():
         command += ["--env", f"{key}={value}"]
     if args.engine_args:
@@ -546,6 +548,7 @@ def parse_args(argv: list | None = None):
     parser.add_argument("--apply-profile", action="store_true", help="let the kit switch the platform profile with `sudo -A tee` (asks for the password in a "
                         "dialog) and put the first one back at the end")
     parser.add_argument("--duration", type=float, default=DEFAULT_DURATION_S, help=f"seconds per step; {STARTUP_ALLOWANCE_S:.0f} s for the model to load are added")
+    parser.add_argument("--max-load", type=float, default=DEFAULT_MAX_LOAD, help="load average below which a step may start: the load of the previous step fades over a few minutes")
     parser.add_argument("--limit", type=float, default=DEFAULT_LIMIT_C, help="stop a step when the package reaches this many degrees; also the server's own limit")
     parser.add_argument("--start-temp", type=float, default=DEFAULT_START_TEMP_C, help="cool down to this package temperature before each step")
     parser.add_argument("--cool-timeout", type=float, default=900.0)
@@ -561,7 +564,7 @@ def parse_args(argv: list | None = None):
     parser.add_argument("--dry-run", action="store_true", help="print the plan and the commands and run nothing")
     parser.add_argument("--sample-only", type=float, metavar="SECONDS", help="only sample the sensors for this long (no benchmark): checks the sensors")
     args = parser.parse_args(argv)
-    args.env = {"STRATA_POOL_SPIN_US": "0", **quant_bench.parse_env(args.env)}
+    args.env = {**DEFAULT_ENV, **quant_bench.parse_env(args.env)}
     return args
 
 

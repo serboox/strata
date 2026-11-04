@@ -67,7 +67,7 @@ def row(tok_s, warmup=False, lines=1, t=None, wall=20.0, cool=True):
 
 
 def args(**changes):
-    base = {"model": Path("/m.gguf"), "duration": 300.0, "max_tokens": 900, "workers": 6, "limit": 80.0, "start_temp": 55.0, "cool_timeout": 1.0, "period": 2.0,
+    base = {"model": Path("/m.gguf"), "duration": 300.0, "max_tokens": 900, "workers": 6, "limit": 80.0, "max_load": 1.5, "start_temp": 55.0, "cool_timeout": 1.0, "period": 2.0,
             "env": {"STRATA_POOL_SPIN_US": "0"}, "engine_args": [], "prewarm": False, "force": False, "setup": "on a stand", "sample_only": None, "png": False}
     base.update(changes)
     return Namespace(**base)
