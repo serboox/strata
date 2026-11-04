@@ -365,7 +365,8 @@ The experts of an Unsloth UD-IQ4_XS file are mostly IQ3_S (gate and up) with IQ4
 IQ3_S kernel look the 512-entry grid up with scalar loads (instruction-bound, 3.7 instructions per cycle); gathers do not help
 on a CPU with the Downfall microcode (`gather_data_sampling: Mitigation: Microcode`). `src/kernels/cpu/iq3s_vbmi.cpp` replaces
 the lookup by byte permutes (AVX-512 VBMI, two grid weights packed per byte) and takes the sign bits with a bit shuffle
-(BITALG); `src/kernels/cpu/iq4xs_vnni.cpp` looks the IQ4_XS nibbles up with `vpshufb` and sums with VNNI. Both work for any
+(BITALG; the version described in the last subsection takes them with `vpermb` and `vptestmb`); `src/kernels/cpu/iq4xs_vnni.cpp`
+looks the IQ4_XS nibbles up with `vpshufb` (the last subsection: `vpermb`) and sums with VNNI. Both work for any
 number of tokens, so a token's rows do not depend on the drafting. They are off by default: `STRATA_IQ_VBMI=1` turns them on,
 `STRATA_NO_IQ_VBMI=1` always turns them off, and a CPU without AVX-512 VBMI, BITALG, VNNI, BMI2, FMA and F16C ignores the flag.
 
@@ -382,7 +383,41 @@ On one thread the IQ3_S gate/up of an expert takes 340 us with ggml and 115 us w
 The new kernels match ggml's dot to a relative 1e-7 for 1 to 12 tokens (`./iq_vbmi_bench` fails above 1e-6); they are not bit-identical
 because the order of the float additions differs. The Q4_K_XL path does not use them. A grafted UD-IQ4_XS file (MTP block from
 the Q4_K_XL, `tools/gguf_graft.py`) loads and answers with and without the flag, with the same 378 characters of greedy text; its
-speed through the server is not yet measured on a free machine.
+decode speed through the engine's command line is in the next subsection.
+
+### Cycles per block of the IQ kernels
+
+The two kernels got the treatment of the Q4_K ones (see "Cycles per block, and what a token costs"): the hardware counters first,
+then removing what is not the dot product, with every output bit unchanged. Cycles per block of 256 weights, one thread, the data in
+the cache, before / after (the IQ3_S gate/up rows have 8 blocks per row, the IQ4_XS down rows only 2):
+
+| Kernel | 1 token | 2 tokens | 3 tokens | 8 tokens |
+| --- | --- | --- | --- | --- |
+| IQ3_S gate/up | 43.4 / 34.5 | 58.2 / 46.8 | 69.4 / 50.9 | 117.0 / 92.7 |
+| IQ4_XS down | 23.0 / 13.7 | 31.8 / 22.7 | 46.6 / 32.7 | 109.1 / 83.6 |
+
+The old IQ3_S kernel kept port 5 busy 97 percent of the time (the table permutes, the bit shuffles, the broadcasts and inserts) and
+it still limits the single-token case, so the gain is fewer port-5 operations: the sign masks and the scale vector come from
+`vpermb` and `vptestmb`, the dot product uses `vpdpbusd`, the block scales are converted once per row, the grid tables are loaded
+once per call and, from two tokens on, the signs are applied once to the weights and the next block is decoded before the current
+one is multiplied. The IQ4_XS down rows have only two blocks, so the work per row weighed as much as the work per block: the old
+horizontal sum took about half of the profile samples. Now the horizontal sums of 16 rows are reduced together with the add tree of
+`_mm512_reduce_add_ps`, the two blocks of a row decode their scales together, the nibble lookup is a `vpermb` on a table kept four
+times, and the sub-block scale is a float multiply instead of `vpmulld`, which is exact because every product and sum stays
+below 2^24. Both kernels still give the bits of the previous version: a frozen copy of the old kernel was compared on 1944 cases
+(IQ3_S) and on 816 deterministic and about 100 thousand random cases (IQ4_XS), the relative error against ggml stays below 1e-6, and
+the engine on the UD-IQ4_XS file with the MTP block gave the same 96 greedy tokens with the old and the new kernels at 1.5K and 14K
+prompts, MTP 0 and 2.
+
+Through the engine's command line at the launcher's defaults (2.2 GHz cap, 6 pool workers, no pool spin, `STRATA_IQ_VBMI=1`, MTP 2,
+a 1.5K prompt, 200 tokens, the CPU cooled to 55 C before each request, the old and the new engine alternating in the order
+ABBAABBA) the UD-IQ4_XS file decodes 31.2 tokens per second before and 34.25 after (medians of four runs, +9.8 %), the engine's
+gate/up counter 15836 and 12776 ms, the same 114 of 170 drafts accepted, the same tokens, the package at most 73 C. The four runs
+after range from 29.6 to 36.1, so this figure is less certain than the +17.5 % of the Q4_K_XL file measured the same way (27.4 and
+32.2 tokens per second, at most 67 C). At the same settings the IQ4_XS file is now about 6 % faster than the Q4_K_XL file (34.25
+against 32.2, inside the spread of the IQ4_XS runs), needs 18.3 GB of page cache against 22.9 GB and its peak package temperature
+is 6 C higher (73 against 67 C); its KL
+divergence is larger (the published figures are 0.033 against 0.012, no task-level quality was measured). One machine, one prompt.
 
 ## Dense part in Q6_K (a file variant, opt-in)
 
