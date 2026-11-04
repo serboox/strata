@@ -137,13 +137,46 @@ frequency, and the voltage with it, is lowered. Sustained speed of the IQ4_XS fi
 
 The default profile `auto` holds the cap by itself: `strata-serve` runs with `--cpu-max-mhz 2100`, 6 workers and no pool spin (the
 spin and workers of the table, `STRATA_POOL_SPIN_US=0`; the cap itself is explained below) and puts the old limits back when it stops (Ctrl+C and SIGTERM included; after a
-`kill -9` run `tools/cpucap reset`). `--cpu-max-mhz 0` turns the cap off, the profiles with a memory budget (`lean` to `max`) run
+`kill -9` the guard below does it). `--cpu-max-mhz 0` turns the cap off, the profiles with a memory budget (`lean` to `max`) run
 without it, and 2100 MHz is about two thirds of this laptop's 3.3 GHz, so another CPU needs its own value. The Q4_K_XL file at 2.2 GHz and the same workers and spin gave 29.4 tokens per second with a peak of 74 C, within 5 percent of IQ4_XS, so the file is to be chosen by memory (Q4_K_XL wants about 23 GB of free RAM, IQ4_XS about 18 GB) and quality, not by speed. `tools/cpucap status|set MHZ|reset` does the same by
 hand. The limits belong to root. A tmpfiles rule makes them group-writable for `wheel`, the way the turbo switch is:
 `z- /sys/devices/system/cpu/cpu*/cpufreq/scaling_max_freq 0664 root wheel -` (kept in the machine's restore repository);
 without it the server says which limits it could not write and runs without the cap. The cap is machine-wide like the turbo
 switch: every program is slower while the server runs. The speed of one setting differed by up to a quarter between the night
 and the morning; the repeats of the two best settings came within 5 percent of the first runs.
+While the server holds the cap it keeps a record of the limits it changed in `$XDG_RUNTIME_DIR/strata-cpucap.json` (its process id and
+start time, and the old and the new value of each limit); the record is saved before the first limit is written, and the server
+holds no cap when it cannot save it. A server that is killed (`kill -9`, the out-of-memory killer, a scope that
+is stopped too slowly) cannot put the limits back itself, so `tools/cpucap guard` does it from that record: it writes the old value
+only when the server is gone and nobody changed the limit since, and it does nothing while the server runs. The next server start
+runs the same check first (and applies no cap while an earlier server's limits cannot be put back), and `tools/quant_bench.py`
+runs it after every server it stops. A second server that starts while the first one runs leaves the cap alone, so the record has
+one owner. The guard, a starting server, a stopping server and `tools/cpucap reset` take a lock on the record, so they never interleave. To not wait
+for the next start, a user timer can
+run the guard every 10 seconds; the service starts only while the record exists, so the timer costs nothing the rest of the time
+(`%t` is the runtime directory, and the tool needs the group-writable limits of the tmpfiles rule above):
+
+```
+# ~/.config/systemd/user/strata-cpucap-guard.service
+[Unit]
+Description=Put back the CPU frequency limits of a killed Strata server
+ConditionPathExists=%t/strata-cpucap.json
+
+[Service]
+Type=oneshot
+Nice=19
+ExecStart=/path/to/strata/tools/cpucap guard
+
+# ~/.config/systemd/user/strata-cpucap-guard.timer
+[Timer]
+OnCalendar=*:*:0/10
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target
+```
+
+Enable it with `systemctl --user enable --now strata-cpucap-guard.timer`.
 A package power limit did not help: with RAPL PL1 at 22 and 18 W, 6 workers and no frequency cap, the speed was 10.2 and 10.4 tokens per
 second, as without any limit, because the hardware still runs the CPU at full frequency for short bursts and the governor has to pause
 the engine. The whole model on the integrated GPU (llama.cpp with Vulkan) gave 10.8 to 11.3 tokens per second with the package at

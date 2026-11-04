@@ -65,7 +65,8 @@ The default profile `auto` holds the cap by itself: `bin/strata-serve` runs with
 flat in the longest runs, see "Heat and turbo" in docs/TUNING.md), and puts the old limits back when it stops. `--cpu-max-mhz 0` turns the cap off, the profiles with a memory
 budget (`lean` to `max`) run without it, and another value suits another CPU: 2100 MHz is about two thirds of this laptop's 3.3 GHz. The
 limit files belong to root: without the tmpfiles rule below the server says which files it could not write and runs without the
-cap, and after a `kill -9` the limits stay low until `tools/cpucap reset`.
+cap. If the server is killed (`kill -9`) the limits stay low until `tools/cpucap guard` or the next server start puts them back; a timer
+that runs the guard every few seconds is described under "Heat and turbo" in docs/TUNING.md.
 `tools/cpucap status|set MHZ|reset` does the same by hand. The limits belong to root, so a tmpfiles rule makes them group-writable
 once (see "The frequency cap" in [docs/TUNING.md](docs/TUNING.md)); the cap is machine-wide, like the turbo switch. The speed of
 one setting differed by up to a quarter between the night and the morning; the repeats of the two best settings came within 5 percent of the first runs.

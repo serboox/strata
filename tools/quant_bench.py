@@ -317,6 +317,16 @@ def scope_state(unit: str) -> str:
     return result.stdout.strip() or "unknown"
 
 
+def put_cpu_cap_back() -> list:
+    """The server puts the frequency cap back when it stops; one that systemd had to kill cannot, and its record is used here."""
+    try:
+        done = subprocess.run([sys.executable, str(Path(__file__).resolve().parent / "cpucap"), "guard"],
+                              capture_output=True, text=True, timeout=30, check=False)
+    except (OSError, subprocess.SubprocessError) as error:
+        return [f"cpucap guard: {error}"]
+    return [f"cpucap guard: {done.stderr.strip()[:120]}"] if done.returncode else []
+
+
 def stop_server(unit: str, process: subprocess.Popen | None) -> list:
     """Stop the server scope for certain and return what could not be done (an empty list means it is gone)."""
     problems = []
@@ -493,7 +503,7 @@ def measure(args, work: Path, say=print) -> dict:
     finally:
         for number in STOP_SIGNALS:
             signal.signal(number, signal.SIG_IGN)   # a second signal must not cut the cleanup short
-        cleanup_problems = stop_server(unit, process)
+        cleanup_problems = stop_server(unit, process) + put_cpu_cap_back()
         restore_handlers(previous)
         for problem in cleanup_problems:
             say(f"quant-bench: CLEANUP PROBLEM {problem}")

@@ -8713,6 +8713,8 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         notify_lifecycle("stopping", {"reason": termination, "instance_id": svc.instance_id})
         print("\n[strata] stopping (Ctrl+C again to end the engine at once) ...", flush=True)
     finally:
+        if svc.cpu_cap is not None:
+            svc.cpu_cap.stop()                          # first: systemd kills a server that is still closing the engine after 45 s
         cancelled = 0
         if a.shutdown_timeout is not None:
             pending = svc.begin_drain()

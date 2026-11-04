@@ -1,11 +1,16 @@
 import atexit
+import fcntl
 import glob
+import json
 import os
-from typing import Callable, Optional
+import tempfile
+from contextlib import contextmanager
+from typing import Callable, Iterator, Optional
 
 CPU_ROOT = "/sys/devices/system/cpu"
 MIN_MHZ, MAX_MHZ = 800.0, 10000.0
 KHZ_PER_MHZ = 1000
+STATE_ENV = "STRATA_CPUCAP_STATE"
 
 
 def say(message: str) -> None:
@@ -60,8 +65,109 @@ def describe(root: str = CPU_ROOT) -> str:
     return f"highest CPU frequency {shown} on {len(files)} CPUs" + (f" (hardware maximum {ceiling // KHZ_PER_MHZ} MHz)" if ceiling else "")
 
 
-def reset(root: str = CPU_ROOT) -> list:
-    """Puts every limit back to the hardware maximum; returns what could not be written."""
+def state_path() -> str:
+    """Where a running server records the limits it holds, so that a guard can put them back if the server is killed."""
+    override = os.environ.get(STATE_ENV)
+    if override:
+        return override
+    runtime = os.environ.get("XDG_RUNTIME_DIR")
+    if runtime and os.path.isdir(runtime):
+        return os.path.join(runtime, "strata-cpucap.json")
+    return os.path.join(tempfile.gettempdir(), f"strata-cpucap-{os.getuid()}.json")
+
+
+@contextmanager
+def _locked(record_path: str) -> Iterator[None]:
+    """One process at a time works on the record: a guard, a starting server and a stopping one must not interleave."""
+    with open(f"{record_path}.lock", "a", encoding="ascii") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX)
+        yield
+
+
+def _process_start(pid: int) -> Optional[str]:
+    """The start time of a process in clock ticks; it tells a reused pid from the process that held the cap."""
+    try:
+        with open(f"/proc/{pid}/stat", encoding="ascii", errors="replace") as fh:
+            return fh.read().rsplit(")", 1)[1].split()[19]
+    except (OSError, IndexError):
+        return None
+
+
+def _is_limit_pair(values) -> bool:
+    return isinstance(values, list) and len(values) == 2 and all(isinstance(value, str) for value in values)
+
+
+def _load_state(path: str) -> Optional[dict]:
+    try:
+        with open(path, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return None
+    if not (isinstance(data, dict) and isinstance(data.get("pid"), int) and isinstance(data.get("start"), str)):
+        return None
+    held = data.get("held")
+    if isinstance(held, dict) and all(_is_limit_pair(values) for values in held.values()):
+        return data
+    return None
+
+
+def _remove(path: str) -> None:
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+
+
+def _recover_locked(path: str, log: Callable[[str], None]) -> list:
+    if not os.path.exists(path):
+        return []
+    data = _load_state(path)
+    if data is None:
+        _remove(path)
+        problem = "the record of the held limits was damaged and is removed; check the limits with tools/cpucap status"
+        log(f"[strata] cpu cap: {problem}")
+        return [problem]
+    if _process_start(data["pid"]) == data["start"]:
+        return []
+    failures, restored = [], 0
+    for limit_file, (original, written) in data["held"].items():
+        if not os.path.exists(limit_file):
+            continue
+        current = _read_text(limit_file)
+        if current is None:
+            failures.append(f"{limit_file} cannot be read")
+        elif current == written:
+            error = _write_text(limit_file, original)
+            if error is None:
+                restored += 1
+            else:
+                failures.append(error)
+    if failures:
+        log(f"[strata] cpu cap: {len(failures)} limits could not be put back after process {data['pid']} ended ({failures[0]})")
+        return failures
+    _remove(f"{path}.tmp")
+    _remove(path)
+    if restored:
+        log(f"[strata] cpu cap: {restored} limits put back, the process {data['pid']} that held them ended without doing it")
+    return []
+
+
+def recover_stale(state: Optional[str] = None, log: Callable[[str], None] = say) -> list:
+    """Puts back the limits that a server held when it ended without doing it (killed, crashed); returns the failures.
+
+    A limit that somebody else changed since is left alone, and so is a record whose server is still running."""
+    path = state or state_path()
+    if not os.path.exists(path):
+        return []
+    try:
+        with _locked(path):
+            return _recover_locked(path, log)
+    except OSError as error:
+        log(f"[strata] cpu cap: the record of the held limits could not be locked ({error})")
+        return [str(error)]
+
+
+def _reset_unlocked(root: str, state: str) -> list:
     failures = []
     for path in policy_files(root):
         ceiling = hardware_max_khz(path)
@@ -70,20 +176,36 @@ def reset(root: str = CPU_ROOT) -> list:
         error = _write_text(path, str(ceiling))
         if error is not None:
             failures.append(error)
+    if not failures:
+        _remove(state)
     return failures
+
+
+def reset(root: str = CPU_ROOT, state: Optional[str] = None) -> list:
+    """Puts every limit back to the hardware maximum; returns what could not be written."""
+    path = state or state_path()
+    try:
+        with _locked(path):
+            return _reset_unlocked(root, path)
+    except OSError:
+        return _reset_unlocked(root, path)
 
 
 class CpuCap:
     """Keeps the highest frequency every CPU may use at a lower value while the server runs, and puts the old values back at exit.
 
-    The package heats from the arithmetic of the expert kernels, not from reading memory, and the heat per token falls faster
-    than the speed when the frequency (and the voltage with it) goes down, so a lower cap lets the model run without pauses.
-    A limit that somebody else changed while the cap was held is left as that program set it."""
+    A lower frequency (and the voltage with it) lowers the heat per token faster than the speed, so the temperature limit pauses
+    the engine less often.
+    A limit that somebody else changed while the cap was held is left as that program set it. Before the first limit is written the
+    server saves what it is going to hold in a state file, and it holds nothing when that fails; a guard (`tools/cpucap guard`)
+    puts the limits back from the file if the server is killed and cannot do it. A second server that starts while the first one
+    runs leaves the cap alone, so there is always one owner of the record."""
 
-    def __init__(self, max_mhz: float, log: Callable[[str], None] = say, root: str = CPU_ROOT):
+    def __init__(self, max_mhz: float, log: Callable[[str], None] = say, root: str = CPU_ROOT, state: Optional[str] = None):
         self.max_mhz = max_mhz
         self.log = log
         self.root = root
+        self.state = state
         self._held: dict = {}
         self._registered = False
 
@@ -91,15 +213,48 @@ class CpuCap:
         if not self._registered:
             atexit.register(self.stop)
             self._registered = True
-        self.apply()
+        record = self.state or state_path()
+        try:
+            with _locked(record):
+                if _recover_locked(record, self.log):
+                    self.log("[strata] cpu cap: not applied, the limits of an earlier server are not put back yet")
+                    return
+                holder = _load_state(record)
+                if holder is not None and holder["pid"] != os.getpid():
+                    self.log(f"[strata] cpu cap: not applied, the server with process id {holder['pid']} holds the cap")
+                    return
+                self.apply(record=record)
+        except OSError as error:
+            self.log(f"[strata] cpu cap: the record for the guard could not be locked ({error}); the cap is not applied")
 
-    def apply(self) -> list:
-        """Writes the cap; returns the failures. The old value is kept before the write, so an interrupt cannot lose it."""
+    def _write_record(self, path: str) -> Optional[str]:
+        """None when the record is in place or not needed, else why not. The record must be locked by the caller."""
+        if not self._held:
+            data = _load_state(path)
+            if data is not None and data["pid"] == os.getpid():
+                _remove(path)
+            return None
+        start = _process_start(os.getpid())
+        if start is None:
+            return "the start time of this process cannot be read"
+        record = {"pid": os.getpid(), "start": start, "held": {limit_file: list(values) for limit_file, values in self._held.items()}}
+        temporary = f"{path}.tmp"
+        try:
+            with open(temporary, "w", encoding="utf-8") as fh:
+                json.dump(record, fh)
+            os.replace(temporary, path)
+        except OSError as error:
+            _remove(temporary)
+            return str(error)
+        return None
+
+    def apply(self, record: Optional[str] = None) -> list:
+        """Writes the cap; returns the failures. With a record path, the old values are saved there before the first write."""
         files = policy_files(self.root)
         if not files:
             self.log("[strata] cpu cap: this machine has no cpufreq limit to set, the cap is not applied")
             return []
-        failures = []
+        plan = {}
         for path in files:
             if path in self._held:
                 continue
@@ -110,21 +265,34 @@ class CpuCap:
             ceiling = hardware_max_khz(path)
             if ceiling is not None:
                 target = min(target, ceiling)
-            self._held[path] = (original, str(target))
-            error = _write_text(path, str(target))
+            plan[path] = (original, str(target))
+        self._held.update(plan)
+        if record is not None:
+            error = self._write_record(record)
+            if error is not None:
+                for path in plan:
+                    del self._held[path]
+                self.log(f"[strata] cpu cap: the record for the guard could not be saved ({error}); the cap is not applied")
+                return [error]
+        failures = []
+        for path, (_, target) in plan.items():
+            error = _write_text(path, target)
             if error is not None:
                 del self._held[path]
                 failures.append(error)
         if failures:
             self.log(f"[strata] cpu cap: {len(failures)} of {len(files)} limits could not be written ({failures[0]}); "
                      f"see the frequency cap in docs/TUNING.md for the tmpfiles rule that makes them writable")
+            if record is not None:
+                self._write_record(record)
         if self._held:
             self.log(f"[strata] cpu cap: the highest CPU frequency is held at {self.max_mhz:.0f} MHz on {len(self._held)} policies")
         return failures
 
-    def stop(self) -> None:
+    def _put_back(self) -> None:
         for path, (original, written) in list(self._held.items()):
-            if _read_text(path) != written:
+            current = _read_text(path)
+            if not os.path.exists(path) or (current is not None and current != written):
                 del self._held[path]
                 continue
             error = _write_text(path, original)
@@ -132,6 +300,22 @@ class CpuCap:
                 del self._held[path]
         if self._held:
             self.log(f"[strata] cpu cap: {len(self._held)} limits could not be put back; run tools/cpucap reset")
+
+    def stop(self) -> None:
+        if not self._registered:
+            self._put_back()
+            return
+        record = self.state or state_path()
+        try:
+            with _locked(record):
+                self._put_back()
+                error = self._write_record(record)
+        except OSError as error:
+            self.log(f"[strata] cpu cap: the record for the guard could not be updated ({error})")
+            self._put_back()
+            return
+        if error is not None:
+            self.log(f"[strata] cpu cap: the record for the guard could not be updated ({error})")
 
 
 def create(cfg: Optional[dict], log: Callable[[str], None] = say, root: str = CPU_ROOT) -> Optional[CpuCap]:

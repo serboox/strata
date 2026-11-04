@@ -10,13 +10,16 @@ RULE_HINT = "the limits belong to root: make them group-writable with the tmpfil
 
 
 def main(argv):
-    parser = argparse.ArgumentParser(description="Show, set or reset the highest frequency every CPU may use.")
-    parser.add_argument("action", choices=("status", "set", "reset"))
+    parser = argparse.ArgumentParser(description="Show, set or reset the highest frequency every CPU may use; guard puts back what a killed server held.")
+    parser.add_argument("action", choices=("status", "set", "reset", "guard"))
     parser.add_argument("mhz", nargs="?", type=float, help="the highest frequency in MHz (set only)")
     args = parser.parse_args(argv)
     if args.action == "status":
         print(cpucap.describe(cpucap.CPU_ROOT))
         return 0
+    if args.action == "guard":
+        failures = cpucap.recover_stale(log=lambda message: print(message, file=sys.stderr))
+        return 1 if failures else 0
     if args.action == "reset":
         failures = cpucap.reset(cpucap.CPU_ROOT)
         if failures:

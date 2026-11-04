@@ -286,6 +286,25 @@ class StopTests(unittest.TestCase):
         self.assertIn("no systemctl", problems[0])
 
 
+class CpuCapGuardTests(unittest.TestCase):
+    def test_the_guard_runs_with_the_python_of_the_bench(self):
+        with mock.patch.object(quant_bench.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, stdout="", stderr="")) as run:
+            self.assertEqual(quant_bench.put_cpu_cap_back(), [])
+        command = run.call_args.args[0]
+        self.assertEqual(command[0], sys.executable)
+        self.assertTrue(command[1].endswith("tools/cpucap"))
+        self.assertEqual(command[2], "guard")
+
+    def test_a_failing_guard_is_reported_as_a_cleanup_problem(self):
+        failed = subprocess.CompletedProcess([], 1, stdout="", stderr="2 limits could not be put back")
+        with mock.patch.object(quant_bench.subprocess, "run", return_value=failed):
+            self.assertEqual(quant_bench.put_cpu_cap_back(), ["cpucap guard: 2 limits could not be put back"])
+
+    def test_a_guard_that_cannot_start_is_reported_and_does_not_raise(self):
+        with mock.patch.object(quant_bench.subprocess, "run", side_effect=OSError("no such file")):
+            self.assertEqual(quant_bench.put_cpu_cap_back(), ["cpucap guard: no such file"])
+
+
 class SignalTests(unittest.TestCase):
     def test_sigterm_becomes_an_exit_that_lets_cleanup_run_and_the_old_handlers_come_back(self):
         before = signal.getsignal(signal.SIGTERM)
@@ -545,6 +564,7 @@ class MeasureTests(unittest.TestCase):
                    mock.patch.object(quant_bench, "start_server", self.start),
                    mock.patch.object(quant_bench, "wait_ready", ready if callable(ready) else mock.Mock(return_value=ready)),
                    mock.patch.object(quant_bench, "stop_server", self.stop),
+                   mock.patch.object(quant_bench, "put_cpu_cap_back", return_value=[]),
                    mock.patch.object(quant_bench, "ask_watched", fake_ask),
                    mock.patch.object(quant_bench, "wait_until_cool", return_value=(50.0, 0.0, True)), mock.patch.object(quant_bench.time, "sleep"),
                    mock.patch.object(quant_bench, "other_stall", return_value=stall),
