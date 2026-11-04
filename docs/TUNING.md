@@ -319,6 +319,46 @@ generated tokens are identical in the three modes (same checksum over 600 tokens
 Through the real server without a memory limit: 32.1 / 32.0 before, 36.2 / 36.9 / 39.1 after. The capped profiles were
 not measured again.
 
+### Cycles per block, and what a token costs
+
+With the whole model cached, the heat limit sets the sustained speed (see "Heat and turbo"), and at the 2.2 GHz cap the Q4_K
+gate/up kernel read only 28 of about 50 GB/s: it was bound by the instructions it executes, not by memory. The hardware
+counters (`perf stat`, user mode, one thread, Q4_K gate/up, one token) gave 98.6 instructions and 37 to 47 cycles per block of
+256 weights. Only 6 of those instructions unpack the weights and about 17 multiply and add them; the rest decode the 6-bit
+scales and minimums of the block, convert the two half-precision factors and keep the accumulators of the tokens in memory (the
+loop over tokens had a run-time bound, so the compiler spilled them to the stack). The Q4_K gate/up and Q5_K down kernels now take
+the token count as a template parameter (the accumulators stay in registers), unpack the scales and minimums with vector
+instructions, convert d and dmin with one instruction, compute the block sums of the activation once per call and issue the
+prefetch of the row three rows ahead inside the block loop. Every value is still bit-identical to ggml's dot (`kq512_parity`:
+200 cases, 0 mismatches; the old and the new engine give the same 96 greedy tokens on synthetic prompts of 1.5K and 14K tokens,
+MTP 0 and 2). With the data in the cache the Q4_K gate/up kernel went from 98.6 to about 55 instructions and from 37 to about 24
+cycles per block.
+
+`kq512_parity --bench`, 4 threads, memory cold, GB/s of weights, before / after:
+
+| Kernel | 1 token | 2 tokens | 3 tokens |
+| --- | --- | --- | --- |
+| Q4_K gate/up | 46.5 / 64-69 | 34 / 44 | 26 / 32 |
+| Q5_K down | 35 / 62-68 | 30 / 47-51 | 25 / 35 |
+
+At the 2.2 GHz cap with 4 threads the Q4_K gate/up kernel reads 29.5 GB/s before and 46.1 after with one token, and 13.5 and
+20.4 with three tokens; the package power from the CPU's energy counter is 16.1 and 18.2 W with one token and 16.7 and 17.1 W
+with three, so the energy per byte is 28 to 32 % lower. A full decode at the launcher's defaults (2.2 GHz cap, 6 workers, no pool
+spin, MTP 2, a 1.5K prompt, 200 tokens, the CPU cooled to 55 C before each request, the old and the new engine alternating in the
+order ABBAABBA): 27.4 tokens per second before and 32.2 after (medians of four runs, +17.5 %), the engine's gate/up counter 4550
+and 3472 ms, the same 114 of 174 drafts accepted, the same tokens, the package at most 67 C. One machine, one prompt; the first
+request after a model load is slower because of the page cache.
+
+With the data in the cache a block costs about 9 cycles for the weights themselves (unpacking, scales) plus about 15 cycles for
+every token that is multiplied with them: one token 24 cycles, two 40, three 55. An extra token in a verification window therefore
+costs about 62 % of the first one, and a window longer than 3 or 4 tokens saves little on the CPU experts. Per layer, in cycles
+per block, an expert that is read once and used by n tokens costs 9 + 15n. The 3-token window reads 1.42 times the weights of a
+single token, which is 11.4 distinct experts, and has 24 pairs of a token and an expert: 9 x 11.4 + 15 x 24 = 463 for the 2.27
+tokens it accepts per step, 204 per accepted token. For 10 tokens, assuming 25 distinct experts per layer (the real overlap was
+not measured), the same cost is 9 x 25 + 15 x 80 = 1425, so about 7 of the 10 tokens have to be accepted to match the 3-token
+window. The MTP head of this model has one layer, and with 3 drafts the acceptance rate was lower (52 %). What is left to win is
+the cost of a token with an expert, not the unpacking.
+
 ## IQ3_S and IQ4_XS kernels (opt-in)
 
 The experts of an Unsloth UD-IQ4_XS file are mostly IQ3_S (gate and up) with IQ4_XS down. ggml's IQ3_S dot and the older AVX-512
@@ -570,7 +610,7 @@ ggml's Q4_K dot product 18.6 GB/s per thread from cache, 40.7 GB/s with four thr
 prefetch; an expert's weights are 1.9 MB, the pool reads 1.42 tokens' worth per weight set in an MTP step.
 
 Untried, with the estimate in brackets (a calculation, not a measurement): one barrier per layer with whole experts per
-thread (+5-10%); AVX-512 VNNI kernels that decode a weight once for several tokens (+10-20%); starting the next draft on
+thread (+5-10%); starting the next draft on
 the GPU while the CPU verifies (up to +15%); 3-bit experts (+20-30%, changes the model's output); 6-bit dense GPU weights
 (+5%, changes the output).
 
@@ -711,7 +751,8 @@ Details, analogies and charts are in `docs/index.html`, section 6.
 | Spin threshold of idle workers under sustained heat (2000 tokens) | default 32.9 / 32.9, 100 us 28.0 / 30.4 tok/s |
 | CPU computes a share of the experts of a prompt chunk while the card streams the rest | 142 -> 202 tok/s on a 1546-token prompt (96 of 256 experts on the CPU), above the 167 tok/s PCIe ceiling |
 | Integrated GPU | shares the same memory and thermal budget; not benchmarked |
-| Assembly | kernels sit near the memory roofs; the gap is in barriers and idle gaps |
+| Assembly | not needed: the Q4_K kernel sat near the memory roof at 3.3 GHz but read only 28 of 50 GB/s at the 2.2 GHz cap, and cutting the instructions per block with intrinsics and a compile-time token count raised it to 46 GB/s (see "Cycles per block") |
+| VNNI (`vpdpbusd`) in the Q4_K dot instead of `vpmaddubsw` + `vpmaddwd` | +4-5 % at the 2.2 GHz cap, inside the 3-5 % spread between runs of the same kernel; the instruction count stays the same because the scales of the sub-blocks still need a `vpmaddwd`; not adopted |
 
 Not measured (needs root, the password prompt was not answered): raw NVMe against the LUKS volume, CPU energy per token.
 
