@@ -834,6 +834,12 @@ So the reliable gains are about +2 % for the overlap, +9 to +11 % for 7 experts,
 tokens-per-second figures of 7 experts and of the all-groups Q6_K file on the code prompt come from a higher draft acceptance on
 that text and do not repeat on the text prompt. The step of the baseline is 73 to 75 ms for 2.2 to 2.3 tokens.
 
+**Without the IQ kernels (series 1).** The same plan with `STRATA_IQ_VBMI` unset, which is how a build without the AVX-512 IQ
+kernels runs (baseline 17.3 tokens per second, 138 ms per step against 74 ms): the overlap gives nothing (+0.6 percent per step,
+the text identical), 7 experts +8.7 percent per step, 6 experts +21.5, 5 experts +36.7, and the iGPU split loses 32 to 37 percent
+(share 0.25: 11.0 against 17.3 tokens per second; shares 0.15 and 0.35: 11.7 and 10.9). The gain of fewer experts does not depend
+on the kernels; the overlap only shows when the CPU part of the step is fast.
+
 What to take from it: the overlap is a small, free gain; 7 of 8 experts is the one setting that gives a large gain at a moderate
 price in quality, 6 and 5 cost visibly more; the iGPU split and the Q6_K dense part do not pay. The quality numbers measure how far
 the output distribution moves; they do not say what happens on tasks (tool calls, agent runs), which is not measured. The iGPU
