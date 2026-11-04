@@ -250,7 +250,7 @@ class PlanTests(WorldCase):
         plan = self.plan("--all")
         self.assertEqual([run.label for run in plan.runs], ["baseline", "overlap+igpu_experts+experts_used+dense_q6k", "baseline_again"])
         combined = plan.runs[1]
-        self.assertEqual(combined.env, {"STRATA_POOL_SPIN_US": "0", "STRATA_OVERLAP": "1", "STRATA_IGPU": "1", "STRATA_Q36_K": "6"})
+        self.assertEqual(combined.env, {"STRATA_POOL_SPIN_US": "0", "STRATA_IQ_VBMI": "1", "STRATA_OVERLAP": "1", "STRATA_IGPU": "1", "STRATA_Q36_K": "6"})
         self.assertEqual(combined.engine_args, ("--no-igpu",))
 
     def test_pairs_runs_every_pair_of_available_levers(self):
@@ -480,7 +480,7 @@ class SessionTests(WorldCase):
                                                                        "04_dense_q6k.json", "05_baseline_again.json", "chart.svg", "raw", "summary.json",
                                                                        "summary.txt"])
         item = json.loads((out_dir / "01_overlap.json").read_text())
-        self.assertEqual(item["plan"]["env"], {"STRATA_POOL_SPIN_US": "0", "STRATA_OVERLAP": "1"})
+        self.assertEqual(item["plan"]["env"], {"STRATA_POOL_SPIN_US": "0", "STRATA_IQ_VBMI": "1", "STRATA_OVERLAP": "1"})
         self.assertEqual(item["plan"]["levers"][0]["lever"], "overlap")
         self.assertEqual(item["plan"]["command"], runner.commands[1])
         self.assertIn("rows", item)

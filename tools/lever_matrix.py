@@ -27,7 +27,7 @@ OUT_ROOT = Path("run/experiments/levers")
 RAW_DIR = "raw"
 CACHE_FILE = Path("build/CMakeCache.txt")
 SYSTEM_TOOL = "tools/cooling_kit.py"
-BASELINE_ENV = {"STRATA_POOL_SPIN_US": "0"}
+BASELINE_ENV = {"STRATA_POOL_SPIN_US": "0", "STRATA_IQ_VBMI": "1"}   # what the launcher sets for the IQ models; without the kernels the baseline is about half as fast
 BASELINE_LABEL, BASELINE_AGAIN_LABEL = "baseline", "baseline_again"
 ROLE_BASELINE, ROLE_LEVER = "baseline", "lever"
 KIND_ENGINE, KIND_SYSTEM, KIND_MODEL_FILE = "engine", "system", "model-file"
@@ -66,7 +66,7 @@ kinds:
 The first variant of a lever is used when the lever is asked "on": --levers overlap; another one: --levers overlap:other_variant.
 """
 MERGE_HELP = """\
-environment of a run = baseline env (default STRATA_POOL_SPIN_US=0, replaced by --baseline-env) + the env of each selected variant + --env.
+environment of a run = baseline env (default STRATA_POOL_SPIN_US=0 and STRATA_IQ_VBMI=1, replaced by --baseline-env) + the env of each selected variant + --env.
 The same key with different values from two sources is an error naming both sources; the same value twice is fine.
 Identical engine arguments from several sources are passed once, in order.
 """
