@@ -91,7 +91,7 @@ set_source_files_properties(src/kernels/cpu/iq_avx512.cpp src/kernels/cpu/nvfp4_
 set_source_files_properties(src/kernels/cpu/iq3s_vbmi.cpp PROPERTIES COMPILE_OPTIONS
   "-mavx512f;-mavx512bw;-mavx512vl;-mavx512vnni;-mavx512vbmi;-mavx512bitalg;-mbmi2;-mf16c;-mfma")
 set_source_files_properties(src/kernels/cpu/iq4xs_vnni.cpp PROPERTIES COMPILE_OPTIONS
-  "-mavx512f;-mavx512bw;-mavx512vl;-mavx512vnni;-mbmi2;-mf16c;-mfma")
+  "-mavx512f;-mavx512bw;-mavx512vl;-mavx512vnni;-mavx512vbmi;-mbmi2;-mf16c;-mfma")
 set_source_files_properties(src/kernels/cpu/iq_avx2.cpp src/kernels/cpu/kq_avx2.cpp src/kernels/cpu/nvfp4_avx2.cpp
   src/kernels/cpu/tq_avx2.cpp PROPERTIES COMPILE_OPTIONS "-mavx2;-mfma;-mf16c")
 set_source_files_properties(src/kernels/cpu/tq_avx512.cpp PROPERTIES COMPILE_OPTIONS
