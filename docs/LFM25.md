@@ -151,6 +151,12 @@ python3 tools/llama_cpp_kq512.py --llama ~/src/llama.cpp
 cmake --build ~/src/llama.cpp/build --target llama-server
 ```
 
+Checked end to end on a clean llama.cpp (commit 18ab62a) that was patched only with this tool and built from scratch, under the
+80 C rule (the thermal bench of `tools/llama_thermal_bench.py`, 2.7 GHz cap, `--n-cpu-moe 33`, 900 generated tokens, 8 requests after
+2 warm-ups, quiet machine): 33.1 tokens per second with the kernels (two runs, 33.07 and 33.2, 4 threads, package peak 77 and 78 C)
+against 29.6 with ggml's own dot product (`STRATA_KQ512=0`, 6 threads, the best count for it, peak 77 C), which is +12 %. A first run
+of the same build gave 27.97 while other programs were running on the machine; it was thrown away.
+
 A shorter wait of the OpenMP threads (`KMP_BLOCKTIME` of 1 ms instead of the 200 ms that ggml sets) was tried as a way to cut the heat
 of the threads that spin while the GPU works. It costs 1.6 % of speed at a fixed cap and the package warms up less in a short run (3 to
 4 degrees instead of 8 over 256 tokens), but under the 80 C rule it does not help: at the 3.0 GHz cap 24.4 tokens per second against
