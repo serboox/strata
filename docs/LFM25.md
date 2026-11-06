@@ -118,9 +118,9 @@ What follows from it, with the numbers of `tools/lfm_model_map.py`:
 
 ## Fewer cycles per row: the Strata kernels inside llama.cpp
 
-The AVX-512 Q4_K and Q5_K kernels of Strata (bit-identical to ggml's dot, checked on 392 cases of `tests/kq512_parity.cpp`, now also
+The AVX-512 Q4_K and Q5_K kernels of Strata (bit-identical to ggml's dot, checked on 489 cases of `tests/kq512_parity.cpp`, now also
 for plain rows of 1 to 16 blocks through `kq512_rows`) were called from `ggml_compute_forward_mul_mat_id_one_chunk` instead of the
-per-row dot (a patch of about 70 lines, recipe in the experiment folder; `STRATA_KQ512=0` switches it off). Same model, same
+per-row dot (`tools/llama_cpp_kq512.py`, see below; `STRATA_KQ512=0` switches it off at run time). Same model, same
 placement, 2.1 GHz cap, tokens per second of llama-bench (128 tokens, 3 repeats, order A B B A):
 
 | threads | ggml dot | Strata kernels | gain |
@@ -142,6 +142,19 @@ threads on cold data reach 38 GB/s for the rows of 2048 values. That is close to
 for the gate and up matrices the kernel is near the memory. The down rows of 1536 values read only 30 GB/s, so that matmul may still
 have some headroom (it needs profiling); on the whole a faster dot product is not expected to add much, and what remains is the
 part outside the experts.
+
+To use them, apply the tool to a llama.cpp checkout (tested with commit 18ab62a) and build it as usual. The tool copies the kernel
+sources next to ggml-cpu, adds them to its build file and puts the call in front of the scalar loop; running it again changes nothing:
+
+```
+python3 tools/llama_cpp_kq512.py --llama ~/src/llama.cpp
+cmake --build ~/src/llama.cpp/build --target llama-server
+```
+
+A shorter wait of the OpenMP threads (`KMP_BLOCKTIME` of 1 ms instead of the 200 ms that ggml sets) was tried as a way to cut the heat
+of the threads that spin while the GPU works. It costs 1.6 % of speed at a fixed cap and the package warms up less in a short run (3 to
+4 degrees instead of 8 over 256 tokens), but under the 80 C rule it does not help: at the 3.0 GHz cap 24.4 tokens per second against
+23.7 and 24.6 with the default wait (two runs), at 2.7 GHz 31.2 against 32.4. So the spin of the threads is not what limits the clock under that rule (the heat was not split by source). Zero wait is 14 % slower.
 
 ## Expert deferral, measured
 
