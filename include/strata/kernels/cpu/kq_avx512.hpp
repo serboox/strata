@@ -13,4 +13,9 @@ void kq512_gu_rows(const uint8_t* blob, size_t gu_row, size_t up_off, int n, con
 void kq512_down_rows(const uint8_t* w, size_t row_bytes, int n, const void* const* act, int nt, float* const* out,
                      int r0, int r1);
 
+/// Plain dot products of Q4_K (ggml type 12) or Q5_K (type 13) rows with nt activations, outputs out[token][row].
+bool kq512_rows_supported(int ggml_type, int n) noexcept;
+void kq512_rows(int ggml_type, const uint8_t* w, size_t row_bytes, int n, const void* const* act, int nt, float* const* out,
+                int r0, int r1);
+
 }  // namespace strata::kernels::cpu

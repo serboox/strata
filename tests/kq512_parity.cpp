@@ -76,6 +76,39 @@ int check_gu(int rows, int n, int nt) {
     return bad;
 }
 
+// Plain rows of either type, as a CPU path without a fused gate/up step calls them: every row length the kernel accepts, a row range
+// that does not start at 0, a row stride larger than the row, a weight address that is not 64-byte aligned, and more tokens than
+// one pass of the kernel takes
+int check_rows(int type, int rows, int n, int nt, size_t pad, size_t offset) {
+    const bool q5 = type == 13;
+    const size_t block = q5 ? sizeof(block_q5_K) : sizeof(block_q4_K);
+    const size_t row = (size_t) n / 256 * block;
+    const size_t stride = row + pad;
+    const int first = 3;
+    std::vector<uint8_t> blob(rows * stride + 128);
+    uint8_t* w = blob.data() + offset;
+    for (int r = 0; r < rows; ++r) fill_weights(w + (size_t) r * stride, row, block);
+    std::vector<std::vector<block_q8_K>> act(nt);
+    std::vector<const void*> ap(nt);
+    for (int t = 0; t < nt; ++t) { act[t] = make_activation(n); ap[t] = act[t].data(); }
+    std::vector<std::vector<float>> got(nt, std::vector<float>(rows, 12345.f));
+    std::vector<float*> gp(nt);
+    for (int t = 0; t < nt; ++t) gp[t] = got[t].data();
+    if (!kq512_rows_supported(type, n)) return 1;
+    kq512_rows(type, w, stride, n, ap.data(), nt, gp.data(), first, rows);
+    const auto dot = ggml_get_type_traits_cpu(q5 ? GGML_TYPE_Q5_K : GGML_TYPE_Q4_K)->vec_dot;
+    int bad = 0;
+    for (int t = 0; t < nt; ++t) {
+        for (int r = 0; r < first; ++r) bad += !same(got[t][r], 12345.f);   // rows before the range stay untouched
+        for (int r = first; r < rows; ++r) {
+            float s = 0.f;
+            dot(n, &s, 0, w + (size_t) r * stride, 0, ap[t], 0, 1);
+            bad += !same(got[t][r], s);
+        }
+    }
+    return bad;
+}
+
 int check_down(int rows, int n, int nt) {
     const size_t row = (size_t) n / 256 * sizeof(block_q5_K);
     std::vector<uint8_t> blob(rows * row);
@@ -164,6 +197,58 @@ double bench(bool down, bool use_ggml, int threads, int nt, bool hot) {
     return (double) threads * rows * row * jobs[0].reps / best / 1e9;
 }
 
+// Plain rows of one type (the call pattern of a runtime that does not fuse gate and up), ggml's per-row dot against the kernel
+struct RowsJob {
+    const uint8_t* w;
+    size_t rows, row;
+    int type, n, reps;
+    bool ggml;
+    const void* act;
+    float* sink;
+};
+
+void* run_rows(void* arg) {
+    RowsJob* j = (RowsJob*) arg;
+    float out[16];
+    const auto dot = ggml_get_type_traits_cpu(j->type == 13 ? GGML_TYPE_Q5_K : GGML_TYPE_Q4_K)->vec_dot;
+    for (int rep = 0; rep < j->reps; ++rep)
+        for (size_t r0 = 0; r0 < j->rows; r0 += 16) {
+            const int count = (int) std::min<size_t>(16, j->rows - r0);
+            if (j->ggml) {
+                for (int i = 0; i < count; ++i) dot(j->n, &out[i], 0, j->w + (r0 + i) * j->row, 0, j->act, 0, 1);
+            } else {
+                float* op[1] = {out};
+                const void* ap[1] = {j->act};
+                kq512_rows(j->type, j->w + r0 * j->row, j->row, j->n, ap, 1, op, 0, count);
+            }
+        }
+    *j->sink = out[0];
+    return nullptr;
+}
+
+double bench_rows(int type, int n, bool use_ggml, int threads, bool hot) {
+    const size_t block = type == 13 ? sizeof(block_q5_K) : sizeof(block_q4_K);
+    const size_t row = (size_t) n / 256 * block;
+    const size_t rows = hot ? 600 : (size_t) (192u << 20) / row;
+    std::vector<std::vector<uint8_t>> w(threads, std::vector<uint8_t>(rows * row + 4096));
+    std::vector<block_q8_K> act = make_activation(n);
+    std::vector<RowsJob> jobs(threads);
+    std::vector<float> sinks(threads);
+    for (int i = 0; i < threads; ++i) {
+        fill_weights(w[i].data(), rows * row, block);
+        jobs[i] = {w[i].data(), rows, row, type, n, hot ? 3000 : 1, use_ggml, act.data(), &sinks[i]};
+    }
+    double best = 1e9;
+    for (int rep = 0; rep < 3; ++rep) {
+        std::vector<pthread_t> th(threads);
+        const double a = now();
+        for (int i = 0; i < threads; ++i) pthread_create(&th[i], nullptr, run_rows, &jobs[i]);
+        for (int i = 0; i < threads; ++i) pthread_join(th[i], nullptr);
+        best = std::min(best, now() - a);
+    }
+    return (double) threads * rows * row * jobs[0].reps / best / 1e9;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -174,6 +259,17 @@ int main(int argc, char** argv) {
             bad += check_gu(48, 2048, nt) + check_down(96, 512, nt);
             ++cases;
         }
+    for (int type : {12, 13})
+        for (int blocks = 1; blocks <= 16; ++blocks)
+            for (int nt : {1, 3, 9})
+                for (int variant = 0; variant < 3; ++variant) {
+                    bad += check_rows(type, 29, blocks * 256, nt, variant == 1 ? 16 : 0, variant == 2 ? 7 : 0);
+                    ++cases;
+                }
+    bad += (int) kq512_rows_supported(12, 0) + (int) kq512_rows_supported(12, -256) + (int) kq512_rows_supported(12, 17 * 256) +
+           (int) kq512_rows_supported(12, 300) + (int) kq512_rows_supported(11, 256) + (int) kq512_gu_supported(12, -256) +
+           (int) kq512_down_supported(13, 0) + !kq512_rows_supported(13, 4096);
+    ++cases;
     std::printf("bit-exact comparison against ggml-cpu: %d cases, %d mismatching values\n", cases, bad);
     if (argc > 1 && std::strcmp(argv[1], "--bench") == 0) {
         for (int nt : {1, 2, 3})
@@ -182,6 +278,16 @@ int main(int argc, char** argv) {
                 std::printf("hot 1 thread ggml %.1f / avx512 %.1f GB/s;  cold 4 threads ggml %.1f / avx512 %.1f GB/s\n",
                             bench(down, true, 1, nt, true), bench(down, false, 1, nt, true), bench(down, true, 4, nt, false),
                             bench(down, false, 4, nt, false));
+                std::fflush(stdout);
+            }
+    }
+    if (argc > 1 && std::strcmp(argv[1], "--bench-rows") == 0) {
+        for (int type : {12, 13})
+            for (int n : {2048, 1536}) {
+                std::printf("%s rows of %d values: ", type == 13 ? "Q5_K" : "Q4_K", n);
+                std::printf("hot 1 thread ggml %.1f / avx512 %.1f GB/s;  cold 4 threads ggml %.1f / avx512 %.1f GB/s\n",
+                            bench_rows(type, n, true, 1, true), bench_rows(type, n, false, 1, true), bench_rows(type, n, true, 4, false),
+                            bench_rows(type, n, false, 4, false));
                 std::fflush(stdout);
             }
     }

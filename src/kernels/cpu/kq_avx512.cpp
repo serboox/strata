@@ -189,8 +189,8 @@ void gu_rows_n(const uint8_t* blob, size_t gu_row, size_t up_off, int n, const v
     }
 }
 
-template <int NT>
-void down_rows_n(const uint8_t* w, size_t row_bytes, int n, const void* const* act, float* const* out, int r0, int r1) {
+template <bool Q5, int NT>
+void plain_rows_n(const uint8_t* w, size_t row_bytes, int n, const void* const* act, float* const* out, int r0, int r1) {
     Activations& a = scratch();
     const int nb = n / kBlock;
     reorder(a, act, NT, nb);
@@ -199,7 +199,7 @@ void down_rows_n(const uint8_t* w, size_t row_bytes, int n, const void* const* a
     for (int r = r0; r < r1; ++r) {
         const uint8_t* row = w + (size_t) r * row_bytes;
         float s[NT];
-        row_dot<true, NT>(row, nb, mk, a, r + kPrefetchRows < r1 ? row + (size_t) kPrefetchRows * row_bytes : row, s);
+        row_dot<Q5, NT>(row, nb, mk, a, r + kPrefetchRows < r1 ? row + (size_t) kPrefetchRows * row_bytes : row, s);
 #pragma GCC unroll 8
         for (int t = 0; t < NT; ++t) out[t][r] = s[t];
     }
@@ -222,8 +222,11 @@ inline void with_tokens(int nt, Fn&& fn) {
 }  // namespace
 
 // ggml type ids: Q4_K is 12, Q5_K is 13
-bool kq512_gu_supported(int ggml_type, int n) noexcept { return ggml_type == 12 && n % kBlock == 0 && n / kBlock <= kMaxBlocks; }
-bool kq512_down_supported(int ggml_type, int n) noexcept { return ggml_type == 13 && n % kBlock == 0 && n / kBlock <= kMaxBlocks; }
+bool kq512_gu_supported(int ggml_type, int n) noexcept { return ggml_type == 12 && n > 0 && n % kBlock == 0 && n / kBlock <= kMaxBlocks; }
+bool kq512_down_supported(int ggml_type, int n) noexcept { return ggml_type == 13 && n > 0 && n % kBlock == 0 && n / kBlock <= kMaxBlocks; }
+bool kq512_rows_supported(int ggml_type, int n) noexcept {
+    return (ggml_type == 12 || ggml_type == 13) && n > 0 && n % kBlock == 0 && n / kBlock <= kMaxBlocks;
+}
 
 void kq512_gu_rows(const uint8_t* blob, size_t gu_row, size_t up_off, int n, const void* const* act, int nt,
                    float* const* ff, int r0, int r1) {
@@ -236,9 +239,17 @@ void kq512_gu_rows(const uint8_t* blob, size_t gu_row, size_t up_off, int n, con
 
 void kq512_down_rows(const uint8_t* w, size_t row_bytes, int n, const void* const* act, int nt, float* const* out,
                      int r0, int r1) {
+    kq512_rows(13, w, row_bytes, n, act, nt, out, r0, r1);
+}
+
+void kq512_rows(int ggml_type, const uint8_t* w, size_t row_bytes, int n, const void* const* act, int nt, float* const* out,
+                int r0, int r1) {
     for (int first = 0; first < nt; first += kMaxTokens) {
         with_tokens((std::min)(kMaxTokens, nt - first), [&](auto count) {
-            down_rows_n<decltype(count)::value>(w, row_bytes, n, act + first, out + first, r0, r1);
+            if (ggml_type == 13)
+                plain_rows_n<true, decltype(count)::value>(w, row_bytes, n, act + first, out + first, r0, r1);
+            else
+                plain_rows_n<false, decltype(count)::value>(w, row_bytes, n, act + first, out + first, r0, r1);
         });
     }
 }
