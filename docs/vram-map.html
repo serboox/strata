@@ -1,0 +1,361 @@
+<!doctype html>
+<html lang="ru" data-lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Чем забита видеопамять: LFM2.5 и Qwen3.6</title>
+<style>
+:root{--bg:#f4f6fb;--card:#ffffff;--ink:#1f2937;--muted:#64748b;--line:#e2e8f0;--accent:#2563eb;--shadow:0 1px 2px rgba(15,23,42,.06),0 8px 24px rgba(15,23,42,.06)}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans","DejaVu Sans",Arial,sans-serif}
+html[data-lang="ru"] .en,html[data-lang="en"] .ru{display:none!important}
+.wrap{max-width:860px;margin:0 auto;padding:24px 16px 56px}
+header.hero{background:linear-gradient(135deg,#eff6ff 0%,#f5f3ff 55%,#ecfeff 100%);border:1px solid var(--line);border-radius:20px;padding:20px 28px 24px;box-shadow:var(--shadow)}
+h1{margin:0 0 6px;font-size:30px;line-height:1.2;letter-spacing:-.01em}
+.lead{margin:8px 0 0;color:#334155;max-width:70ch}
+.toggle{display:flex;width:max-content;margin:0 0 12px auto;border:1px solid var(--line);border-radius:999px;overflow:hidden;background:#fff}
+.toggle button{border:0;background:#fff;padding:6px 14px;font:600 13px system-ui,sans-serif;color:var(--muted);cursor:pointer}
+html[data-lang="ru"] .toggle .b-ru,html[data-lang="en"] .toggle .b-en{background:var(--accent);color:#fff}
+.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin:18px 0 0}
+.stat{background:#fff;border:1px solid var(--line);border-radius:14px;padding:14px 16px}
+.stat b{display:block;font-size:26px;line-height:1.15;letter-spacing:-.01em}
+.stat span{color:var(--muted);font-size:13px}
+section{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:22px 24px;margin:18px 0 0;box-shadow:var(--shadow);break-inside:avoid}
+h2{margin:0 0 8px;font-size:21px;letter-spacing:-.005em}
+h3{margin:18px 0 6px;font-size:16px}
+p{margin:8px 0}
+.chart{width:100%;height:auto;display:block;margin:10px 0 4px}
+.chart text{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans","DejaVu Sans",Arial,sans-serif}
+.bartitle{font-size:14px;font-weight:700;fill:#0f172a}
+table.data{width:100%;border-collapse:collapse;font-size:14px;margin:8px 0}
+table.data th{text-align:left;color:var(--muted);font-weight:600;border-bottom:1px solid var(--line);padding:6px 8px}
+table.data td{padding:6px 8px;border-bottom:1px solid #f1f5f9;vertical-align:top}
+table.data .n{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+table.data .k{color:var(--muted);font-size:12.5px}
+.sw{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:8px;vertical-align:-1px}
+.note{font-size:13.5px;color:var(--muted)}
+.callout{border-left:4px solid var(--accent);background:#eff6ff;border-radius:0 12px 12px 0;padding:10px 14px;margin:12px 0}
+.callout.warm{border-color:#f59e0b;background:#fffbeb}
+.callout.good{border-color:#16a34a;background:#f0fdf4}
+ul{margin:6px 0 6px 20px;padding:0}
+li{margin:3px 0}
+footer{margin-top:22px;color:var(--muted);font-size:13px}
+@media (max-width:640px){.cards{grid-template-columns:1fr}h1{font-size:24px}header.hero{padding:22px 18px}.toggle{margin-bottom:10px}section{padding:18px 16px}}
+@media print{
+  @page{size:A4;margin:11mm}
+  body{background:#fff;font-size:12.5px}
+  .toggle{display:none}
+  .wrap{max-width:none;padding:0}
+  header.hero,section,.stat{box-shadow:none}
+  section{margin-top:12px;padding:16px 18px}
+  h1{font-size:25px}
+  .stat b{font-size:21px}
+  table.data{font-size:11.5px}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <div class="toggle" role="group" aria-label="language"><button class="b-ru" data-l="ru">RU</button><button class="b-en" data-l="en">EN</button></div>
+  <h1><span class="l ru">Чем забита видеопамять: LFM2.5 и Qwen3.6</span><span class="l en">What fills the video memory: LFM2.5 and Qwen3.6</span></h1>
+  <p class="lead"><span class="l ru">Ноутбучная RTX 3050 Ti, 4 ГиБ. Обе модели не помещаются в карту целиком, поэтому каждая по-своему делит её между весами, контекстом и рабочими буферами. Цифры измерены на этой машине; что рассчитано, помечено.</span><span class="l en">Laptop RTX 3050 Ti, 4 GiB. Neither model fits on the card, so each one divides it in its own way between weights, context and working buffers. The numbers were measured on this machine; what is derived is marked.</span></p>
+  <div class="cards">
+    <div class="stat"><b>3768 MiB</b><span><span class="l ru">доступно программам из 4096 (около 0,3 ГиБ программам не видны)</span><span class="l en">usable by programs out of 4096 (about 0.3 GiB is not visible to programs)</span></span></div>
+    <div class="stat"><b>78 MiB</b><span><span class="l ru">свободно у LFM2.5: 98 % занято</span><span class="l en">free with LFM2.5: 98 % is used</span></span></div>
+    <div class="stat"><b>≈123 MiB</b><span><span class="l ru">свободно у Qwen3.6 при окне 64K: 97 % занято</span><span class="l en">free with Qwen3.6 at a 64K window: 97 % is used</span></span></div>
+  </div>
+</header>
+
+<section>
+  <h2><span class="l ru">Две карты бок о бок</span><span class="l en">The two cards side by side</span></h2>
+  <svg viewBox="0 0 760 300" role="img" class="chart">
+<defs><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="#f1f5f9"/><line x1="0" y1="0" x2="0" y2="6" stroke="#cbd5e1" stroke-width="2"/></pattern></defs>
+<text class="ru bartitle" x="30" y="34" text-anchor="start">LFM2.5 · llama.cpp · окно 8K</text><text class="en bartitle" x="30" y="34" text-anchor="start">LFM2.5 · llama.cpp · 8K window</text>
+<rect x="30.0" y="48" width="452.5" height="58" fill="#1d4ed8" stroke="#ffffff" stroke-width="1.5" rx="3"/>
+<text x="256.3" y="82" text-anchor="middle" fill="#ffffff" font-size="12.5" font-weight="700">2 436</text>
+<rect x="482.5" y="48" width="49.3" height="58" fill="#7c3aed" stroke="#ffffff" stroke-width="1.5" rx="3"/>
+<text x="507.2" y="82" text-anchor="middle" fill="#ffffff" font-size="12.5" font-weight="700">266</text>
+<rect x="531.9" y="48" width="50.3" height="58" fill="#0d9488" stroke="#ffffff" stroke-width="1.5" rx="3"/>
+<text x="557.0" y="82" text-anchor="middle" fill="#ffffff" font-size="12.5" font-weight="700">271</text>
+<rect x="582.2" y="48" width="19.8" height="58" fill="#f59e0b" stroke="#ffffff" stroke-width="1.5" rx="3"/>
+<rect x="602.0" y="48" width="27.3" height="58" fill="#db2777" stroke="#ffffff" stroke-width="1.5" rx="3"/>
+<rect x="629.3" y="48" width="3.5" height="58" fill="#64748b" stroke="#ffffff" stroke-width="1.5" rx="3"/>
+<rect x="632.8" y="48" width="29.7" height="58" fill="#16a34a" stroke="#ffffff" stroke-width="1.5" rx="3"/>
+<rect x="662.5" y="48" width="34.1" height="58" fill="#ea580c" stroke="#ffffff" stroke-width="1.5" rx="3"/>
+<rect x="696.6" y="48" width="18.9" height="58" fill="#94a3b8" stroke="#ffffff" stroke-width="1.5" rx="3"/>
+<rect x="715.5" y="48" width="14.5" height="58" fill="url(#hatch)" stroke="#ffffff" stroke-width="1.5" rx="3"/>
+<line x1="30.0" y1="110" x2="30.0" y2="118" stroke="#94a3b8"/>
+<text x="30.0" y="132" text-anchor="middle" fill="#64748b" font-size="11">0 GiB</text>
+<line x1="220.2" y1="110" x2="220.2" y2="118" stroke="#94a3b8"/>
+<text x="220.2" y="132" text-anchor="middle" fill="#64748b" font-size="11">1 GiB</text>
+<line x1="410.5" y1="110" x2="410.5" y2="118" stroke="#94a3b8"/>
+<text x="410.5" y="132" text-anchor="middle" fill="#64748b" font-size="11">2 GiB</text>
+<line x1="600.7" y1="110" x2="600.7" y2="118" stroke="#94a3b8"/>
+<text x="600.7" y="132" text-anchor="middle" fill="#64748b" font-size="11">3 GiB</text>
+<text x="730.0" y="132" text-anchor="end" fill="#64748b" font-size="11">3768 MiB</text>
+<text class="ru bartitle" x="30" y="152" text-anchor="start">Qwen3.6 · Strata · окно 64K</text><text class="en bartitle" x="30" y="152" text-anchor="start">Qwen3.6 · Strata · 64K window</text>
+<rect x="30.0" y="166" width="367.5" height="58" fill="#2563eb" stroke="#ffffff" stroke-width="1.5" rx="3"/>
+<text x="213.8" y="200" text-anchor="middle" fill="#ffffff" font-size="12.5" font-weight="700">1 978</text>
+<rect x="397.5" y="166" width="19.0" height="58" fill="#64748b" stroke="#ffffff" stroke-width="1.5" rx="3"/>
+<rect x="416.5" y="166" width="139.0" height="58" fill="#16a34a" stroke="#ffffff" stroke-width="1.5" rx="3"/>
+<text x="486.0" y="200" text-anchor="middle" fill="#ffffff" font-size="12.5" font-weight="700">748</text>
+<rect x="555.5" y="166" width="68.7" height="58" fill="#ea580c" stroke="#ffffff" stroke-width="1.5" rx="3"/>
+<text x="589.8" y="200" text-anchor="middle" fill="#ffffff" font-size="12.5" font-weight="700">370</text>
+<rect x="624.1" y="166" width="83.0" height="58" fill="#94a3b8" stroke="#ffffff" stroke-width="1.5" rx="3"/>
+<text x="665.6" y="200" text-anchor="middle" fill="#1f2937" font-size="12.5" font-weight="700">447</text>
+<rect x="707.2" y="166" width="22.8" height="58" fill="url(#hatch)" stroke="#ffffff" stroke-width="1.5" rx="3"/>
+<line x1="30.0" y1="228" x2="30.0" y2="236" stroke="#94a3b8"/>
+<text x="30.0" y="250" text-anchor="middle" fill="#64748b" font-size="11">0 GiB</text>
+<line x1="220.2" y1="228" x2="220.2" y2="236" stroke="#94a3b8"/>
+<text x="220.2" y="250" text-anchor="middle" fill="#64748b" font-size="11">1 GiB</text>
+<line x1="410.5" y1="228" x2="410.5" y2="236" stroke="#94a3b8"/>
+<text x="410.5" y="250" text-anchor="middle" fill="#64748b" font-size="11">2 GiB</text>
+<line x1="600.7" y1="228" x2="600.7" y2="236" stroke="#94a3b8"/>
+<text x="600.7" y="250" text-anchor="middle" fill="#64748b" font-size="11">3 GiB</text>
+<text x="730.0" y="250" text-anchor="end" fill="#64748b" font-size="11">3768 MiB</text>
+<text class="ru note" x="30" y="292" text-anchor="start" fill="#64748b" font-size="11">Число в сегменте — МиБ. Узкие сегменты подписаны в таблицах ниже.</text><text class="en note" x="30" y="292" text-anchor="start" fill="#64748b" font-size="11">The number in a segment is MiB. Narrow segments are named in the tables below.</text>
+</svg>
+  <div class="callout"><span class="l ru"><b>Главное различие.</b> LFM2.5 тратит около двух третей видеопамяти на эксперты (эти слои считает сама карта, без CPU), а Qwen3.6 — на длинное окно (65 536 токенов) и крупные плотные веса; его эксперты в основном читает CPU.</span><span class="l en"><b>The main difference.</b> LFM2.5 spends about two thirds of the video memory on experts (the card computes those layers itself, without the CPU), while Qwen3.6 spends it on a long window (65,536 tokens) and large dense weights; its experts are mostly read by the CPU.</span></div>
+</section>
+
+<section>
+  <h2>LFM2.5 — <span class="l ru">эксперты семи слоёв</span><span class="l en">the experts of seven layers</span></h2>
+  <p><span class="l ru">Файл весит 13,85 ГиБ, из них 94 % — эксперты (64 на слой, на токен работают 4). Все они на карте не помещаются, поэтому <b>31 слой экспертов (10,68 ГиБ) лежит в оперативной памяти</b> и считается процессором, а <b>7 последних слоёв (2,38 ГиБ) — в видеопамяти</b>. Всё остальное в модели (внимание, свёртки, плотные слои, матрица токенов — 0,79 ГиБ) читается на каждом токене и тоже живёт на карте.</span><span class="l en">The file weighs 13.85 GiB, 94 % of it experts (64 per layer, 4 work per token). They cannot all fit, so <b>31 layers of experts (10.68 GiB) stay in system RAM</b> and are computed by the CPU, and <b>the last 7 layers (2.38 GiB) sit in video memory</b>. Everything else in the model (attention, convolutions, dense layers, the token matrix — 0.79 GiB) is read for every token and also lives on the card.</span></p>
+  <svg viewBox="0 0 760 250" role="img" class="chart">
+<text class="ru bartitle" x="46" y="24" text-anchor="start">Слои LFM2.5: что делает слой и где лежат его эксперты</text><text class="en bartitle" x="46" y="24" text-anchor="start">LFM2.5 layers: what a layer does and where its experts live</text>
+<text class="ru note" x="42" y="66" text-anchor="end" fill="#64748b" font-size="10">слой</text><text class="en note" x="42" y="66" text-anchor="end" fill="#64748b" font-size="10">layer</text>
+<text class="ru note" x="42" y="112" text-anchor="end" fill="#64748b" font-size="10">FFN</text><text class="en note" x="42" y="112" text-anchor="end" fill="#64748b" font-size="10">FFN</text>
+<rect x="46.0" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="53.8" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="46.0" y="98" width="15.5" height="22" fill="#db2777" rx="3"/>
+<text x="53.8" y="46" text-anchor="middle" fill="#64748b" font-size="10">0</text>
+<rect x="63.5" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="71.2" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="63.5" y="98" width="15.5" height="22" fill="#db2777" rx="3"/>
+<rect x="81.0" y="52" width="15.5" height="22" fill="#f59e0b" rx="3"/>
+<text x="88.8" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">A</text>
+<rect x="81.0" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<rect x="98.5" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="106.2" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="98.5" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<rect x="116.0" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="123.8" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="116.0" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<rect x="133.5" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="141.2" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="133.5" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<rect x="151.0" y="52" width="15.5" height="22" fill="#f59e0b" rx="3"/>
+<text x="158.8" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">A</text>
+<rect x="151.0" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<rect x="168.5" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="176.2" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="168.5" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<rect x="186.0" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="193.8" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="186.0" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<rect x="203.5" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="211.2" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="203.5" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<rect x="221.0" y="52" width="15.5" height="22" fill="#f59e0b" rx="3"/>
+<text x="228.8" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">A</text>
+<rect x="221.0" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<text x="228.8" y="46" text-anchor="middle" fill="#64748b" font-size="10">10</text>
+<rect x="238.5" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="246.2" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="238.5" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<rect x="256.0" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="263.8" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="256.0" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<rect x="273.5" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="281.2" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="273.5" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<rect x="291.0" y="52" width="15.5" height="22" fill="#f59e0b" rx="3"/>
+<text x="298.8" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">A</text>
+<rect x="291.0" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<rect x="308.5" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="316.2" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="308.5" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<rect x="326.0" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="333.8" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="326.0" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<rect x="343.5" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="351.2" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="343.5" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<rect x="361.0" y="52" width="15.5" height="22" fill="#f59e0b" rx="3"/>
+<text x="368.8" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">A</text>
+<rect x="361.0" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<rect x="378.5" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="386.2" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="378.5" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<rect x="396.0" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="403.8" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="396.0" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<text x="403.8" y="46" text-anchor="middle" fill="#64748b" font-size="10">20</text>
+<rect x="413.5" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="421.2" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="413.5" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<rect x="431.0" y="52" width="15.5" height="22" fill="#f59e0b" rx="3"/>
+<text x="438.8" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">A</text>
+<rect x="431.0" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<rect x="448.5" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="456.2" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="448.5" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<rect x="466.0" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="473.8" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="466.0" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<rect x="483.5" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="491.2" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="483.5" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<rect x="501.0" y="52" width="15.5" height="22" fill="#f59e0b" rx="3"/>
+<text x="508.8" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">A</text>
+<rect x="501.0" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<rect x="518.5" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="526.2" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="518.5" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<rect x="536.0" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="543.8" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="536.0" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<rect x="553.5" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="561.2" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="553.5" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<rect x="571.0" y="52" width="15.5" height="22" fill="#f59e0b" rx="3"/>
+<text x="578.8" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">A</text>
+<rect x="571.0" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<text x="578.8" y="46" text-anchor="middle" fill="#64748b" font-size="10">30</text>
+<rect x="588.5" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="596.2" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="588.5" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<rect x="606.0" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="613.8" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="606.0" y="98" width="15.5" height="22" fill="#bfdbfe" rx="3"/>
+<rect x="623.5" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="631.2" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="623.5" y="98" width="15.5" height="22" fill="#1d4ed8" rx="3"/>
+<rect x="641.0" y="52" width="15.5" height="22" fill="#f59e0b" rx="3"/>
+<text x="648.8" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">A</text>
+<rect x="641.0" y="98" width="15.5" height="22" fill="#1d4ed8" rx="3"/>
+<rect x="658.5" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="666.2" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="658.5" y="98" width="15.5" height="22" fill="#1d4ed8" rx="3"/>
+<rect x="676.0" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="683.8" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="676.0" y="98" width="15.5" height="22" fill="#1d4ed8" rx="3"/>
+<rect x="693.5" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="701.2" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="693.5" y="98" width="15.5" height="22" fill="#1d4ed8" rx="3"/>
+<rect x="711.0" y="52" width="15.5" height="22" fill="#f59e0b" rx="3"/>
+<text x="718.8" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">A</text>
+<rect x="711.0" y="98" width="15.5" height="22" fill="#1d4ed8" rx="3"/>
+<rect x="728.5" y="52" width="15.5" height="22" fill="#0d9488" rx="3"/>
+<text x="736.2" y="67" text-anchor="middle" fill="#ffffff" font-size="10" font-weight="700">c</text>
+<rect x="728.5" y="98" width="15.5" height="22" fill="#1d4ed8" rx="3"/>
+<text x="736.2" y="46" text-anchor="middle" fill="#64748b" font-size="10">39</text>
+<path d="M623.5 130 v8 H744.0 v-8" fill="none" stroke="#1d4ed8" stroke-width="2"/>
+<text class="ru " x="683.75" y="156" text-anchor="middle" fill="#1d4ed8" font-size="12" font-weight="700">в VRAM</text><text class="en " x="683.75" y="156" text-anchor="middle" fill="#1d4ed8" font-size="12" font-weight="700">in VRAM</text>
+<text class="ru " x="683.75" y="171" text-anchor="middle" fill="#1d4ed8" font-size="11">7 слоёв · 2,38 GiB</text><text class="en " x="683.75" y="171" text-anchor="middle" fill="#1d4ed8" font-size="11">7 layers · 2.38 GiB</text>
+<path d="M81.0 130 v8 H621.5 v-8" fill="none" stroke="#60a5fa" stroke-width="2"/>
+<text class="ru " x="352.25" y="156" text-anchor="middle" fill="#2563eb" font-size="12" font-weight="700">в оперативной памяти (закреплённой для GPU)</text><text class="en " x="352.25" y="156" text-anchor="middle" fill="#2563eb" font-size="12" font-weight="700">in system RAM (pinned for the GPU)</text>
+<text class="ru " x="352.25" y="171" text-anchor="middle" fill="#2563eb" font-size="11">31 слой · 10,68 GiB · их считает CPU</text><text class="en " x="352.25" y="171" text-anchor="middle" fill="#2563eb" font-size="11">31 layers · 10.68 GiB · computed by the CPU</text>
+<path d="M46.0 130 v8 H79.0 v-8" fill="none" stroke="#db2777" stroke-width="2"/>
+<text class="ru " x="46" y="156" text-anchor="start" fill="#db2777" font-size="11" font-weight="700">плотные</text><text class="en " x="46" y="156" text-anchor="start" fill="#db2777" font-size="11" font-weight="700">dense</text>
+<g transform="translate(46,196)"><rect width="14" height="14" rx="3" fill="#0d9488"/><text class="ru " x="20" y="12" text-anchor="start" fill="#334155" font-size="11">c — короткая свёртка</text><text class="en " x="20" y="12" text-anchor="start" fill="#334155" font-size="11">c — short convolution</text><rect x="190" width="14" height="14" rx="3" fill="#f59e0b"/><text class="ru " x="210" y="12" text-anchor="start" fill="#334155" font-size="11">A — внимание (K/V-кэш только здесь)</text><text class="en " x="210" y="12" text-anchor="start" fill="#334155" font-size="11">A — attention (the K/V cache lives only here)</text></g>
+<g transform="translate(46,220)"><rect width="14" height="14" rx="3" fill="#bfdbfe"/><text class="ru " x="20" y="12" text-anchor="start" fill="#334155" font-size="11">эксперты в RAM</text><text class="en " x="20" y="12" text-anchor="start" fill="#334155" font-size="11">experts in RAM</text><rect x="190" width="14" height="14" rx="3" fill="#1d4ed8"/><text class="ru " x="210" y="12" text-anchor="start" fill="#334155" font-size="11">эксперты в VRAM</text><text class="en " x="210" y="12" text-anchor="start" fill="#334155" font-size="11">experts in VRAM</text><rect x="360" width="14" height="14" rx="3" fill="#db2777"/><text class="ru " x="380" y="12" text-anchor="start" fill="#334155" font-size="11">плотная FFN без экспертов</text><text class="en " x="380" y="12" text-anchor="start" fill="#334155" font-size="11">dense FFN, no experts</text></g>
+</svg>
+  <table class='data'><tr><th><span class="l ru">Что</span><span class="l en">What</span></th><th class='n'>MiB</th><th class='n'><span class="l ru">доля</span><span class="l en">share</span></th><th><span class="l ru">откуда цифра</span><span class="l en">where it comes from</span></th></tr><tr><td><span class="sw" style="background:#1d4ed8"></span><span class="l ru">Эксперты 7 слоёв (33–39)</span><span class="l en">Experts of 7 layers (33–39)</span></td><td class='n'>2436.0</td><td class='n'>64.6 %</td><td class='k'><span class="l ru">точно: заголовок файла</span><span class="l en">exact: file header</span></td></tr><tr><td><span class="sw" style="background:#7c3aed"></span><span class="l ru">Матрица токенов и вывода</span><span class="l en">Token and output matrix</span></td><td class='n'>265.6</td><td class='n'>7.0 %</td><td class='k'><span class="l ru">точно: заголовок файла</span><span class="l en">exact: file header</span></td></tr><tr><td><span class="sw" style="background:#0d9488"></span><span class="l ru">Короткие свёртки (30 слоёв)</span><span class="l en">Short convolutions (30 layers)</span></td><td class='n'>270.7</td><td class='n'>7.2 %</td><td class='k'><span class="l ru">точно: заголовок файла</span><span class="l en">exact: file header</span></td></tr><tr><td><span class="sw" style="background:#f59e0b"></span><span class="l ru">Внимание (10 слоёв)</span><span class="l en">Attention (10 layers)</span></td><td class='n'>106.6</td><td class='n'>2.8 %</td><td class='k'><span class="l ru">точно: заголовок файла</span><span class="l en">exact: file header</span></td></tr><tr><td><span class="sw" style="background:#db2777"></span><span class="l ru">Плотная FFN (слои 0–1)</span><span class="l en">Dense FFN (layers 0–1)</span></td><td class='n'>146.9</td><td class='n'>3.9 %</td><td class='k'><span class="l ru">точно: заголовок файла</span><span class="l en">exact: file header</span></td></tr><tr><td><span class="sw" style="background:#64748b"></span><span class="l ru">Роутеры экспертов</span><span class="l en">Expert routers</span></td><td class='n'>19.0</td><td class='n'>0.5 %</td><td class='k'><span class="l ru">точно: заголовок файла</span><span class="l en">exact: file header</span></td></tr><tr><td><span class="sw" style="background:#16a34a"></span><span class="l ru">K/V-кэш, окно 8192, f16</span><span class="l en">K/V cache, 8192 window, f16</span></td><td class='n'>160.0</td><td class='n'>4.2 %</td><td class='k'><span class="l ru">журнал llama.cpp</span><span class="l en">llama.cpp log</span></td></tr><tr><td><span class="sw" style="background:#ea580c"></span><span class="l ru">Рабочие буферы вычислений</span><span class="l en">Compute buffers</span></td><td class='n'>183.5</td><td class='n'>4.9 %</td><td class='k'><span class="l ru">журнал llama.cpp</span><span class="l en">llama.cpp log</span></td></tr><tr><td><span class="sw" style="background:#94a3b8"></span><span class="l ru">Контекст CUDA, ядра, остаток</span><span class="l en">CUDA context, kernels, the rest</span></td><td class='n'>101.7</td><td class='n'>2.7 %</td><td class='k'><span class="l ru">расчёт</span><span class="l en">derived</span></td></tr><tr><td><span class="sw" style="background:repeating-linear-gradient(45deg,#f1f5f9,#f1f5f9 3px,#cbd5e1 3px,#cbd5e1 5px)"></span><span class="l ru">Свободно</span><span class="l en">Free</span></td><td class='n'>78.0</td><td class='n'>2.1 %</td><td class='k'><span class="l ru">nvidia-smi</span><span class="l en">nvidia-smi</span></td></tr></table>
+  <div class="callout warm"><span class="l ru"><b>Почему не восьмой слой.</b> Слой экспертов весит 348–421 MiB, а свободно 78 MiB. Столько же места стоил бы контекст: один слой экспертов равен окну примерно в 17–21 тысяч токенов (K/V в f16 — 20 КиБ на токен).</span><span class="l en"><b>Why not an eighth layer.</b> A layer of experts weighs 348–421 MiB and only 78 MiB is free. The same space would buy context: one layer of experts equals a window of roughly 17–21 thousand tokens (the K/V in f16 is 20 KiB per token).</span></div>
+</section>
+
+<section>
+  <h2>Qwen3.6 — <span class="l ru">длинное окно и плотные веса</span><span class="l en">a long window and dense weights</span></h2>
+  <p><span class="l ru">Здесь движок Strata кладёт на карту плотную часть модели (около 1,93 ГиБ в Q8_0: внимание, рекуррентные слои, общий эксперт, роутеры), K/V-кэш на 65 536 токенов в q8 и рабочие буферы. Эксперты считает процессор (он читает их из памяти и с диска); на карте для них есть только буферы перегрузки, они входят в сегмент «буферы».</span><span class="l en">Here the Strata engine puts the dense part of the model on the card (about 1.93 GiB in Q8_0: attention, recurrent layers, the shared expert, routers), a K/V cache for 65,536 tokens in q8 and working buffers. The CPU computes the experts (reading them from memory and disk); on the card there are only expert staging buffers, counted in the “buffers” segment.</span></p>
+  <table class='data'><tr><th><span class="l ru">Что</span><span class="l en">What</span></th><th class='n'>MiB</th><th class='n'><span class="l ru">доля</span><span class="l en">share</span></th><th><span class="l ru">откуда цифра</span><span class="l en">where it comes from</span></th></tr><tr><td><span class="sw" style="background:#2563eb"></span><span class="l ru">Плотные веса (Q8_0 и др.)</span><span class="l en">Dense weights (Q8_0 and others)</span></td><td class='n'>1978.4</td><td class='n'>52.5 %</td><td class='k'><span class="l ru">замер из TUNING.md</span><span class="l en">measured, TUNING.md</span></td></tr><tr><td><span class="sw" style="background:#64748b"></span><span class="l ru">F32-веса и роутер</span><span class="l en">F32 weights and the router</span></td><td class='n'>102.1</td><td class='n'>2.7 %</td><td class='k'><span class="l ru">замер из TUNING.md</span><span class="l en">measured, TUNING.md</span></td></tr><tr><td><span class="sw" style="background:#16a34a"></span><span class="l ru">K/V-кэш, окно 65536, q8</span><span class="l en">K/V cache, 65536 window, q8</span></td><td class='n'>748.0</td><td class='n'>19.9 %</td><td class='k'><span class="l ru">расчёт</span><span class="l en">derived</span></td></tr><tr><td><span class="sw" style="background:#ea580c"></span><span class="l ru">Буферы внимания и чанка, перегрузка экспертов, состояние</span><span class="l en">Attention and chunk buffers, expert staging, state</span></td><td class='n'>369.6</td><td class='n'>9.8 %</td><td class='k'><span class="l ru">расчёт</span><span class="l en">derived</span></td></tr><tr><td><span class="sw" style="background:#94a3b8"></span><span class="l ru">Остаток: контекст CUDA, библиотеки, код ядер</span><span class="l en">The remainder: CUDA context, libraries, kernel code</span></td><td class='n'>447.0</td><td class='n'>11.9 %</td><td class='k'><span class="l ru">расчёт</span><span class="l en">derived</span></td></tr><tr><td><span class="sw" style="background:repeating-linear-gradient(45deg,#f1f5f9,#f1f5f9 3px,#cbd5e1 3px,#cbd5e1 5px)"></span><span class="l ru">Свободно</span><span class="l en">Free</span></td><td class='n'>122.9</td><td class='n'>3.3 %</td><td class='k'><span class="l ru">замер из TUNING.md</span><span class="l en">measured, TUNING.md</span></td></tr></table>
+  <p class="note"><span class="l ru">Из таблицы «Куда уходит видеопамять» в docs/TUNING.md (обёртка над cudaMalloc, окно 32K): плотные веса 1978,4 MiB, F32 и роутер 102,1 MiB. Для окна 64K общий итог cudaMalloc — 3198,1 MiB, свободно 0,12 ГиБ. K/V считается по 11 968 байт на токен; буферы и остаток получены вычитанием, а свободные 0,12 ГиБ округлены в источнике.</span><span class="l en">From the table “Where the video memory goes” in docs/TUNING.md (a wrapper around cudaMalloc, 32K window): dense weights 1978.4 MiB, F32 and router 102.1 MiB. For a 64K window the cudaMalloc total is 3198.1 MiB and 0.12 GiB is free. The K/V is computed at 11,968 bytes per token; the buffers and the remainder are found by subtraction, and the free 0.12 GiB is rounded in the source.</span></p>
+</section>
+
+<section>
+  <h2><span class="l ru">Цена контекста</span><span class="l en">The price of context</span></h2>
+  <svg viewBox="0 0 760 330" role="img" class="chart">
+<text class="ru bartitle" x="64" y="20" text-anchor="start">Цена контекста: размер K/V-кэша в видеопамяти</text><text class="en bartitle" x="64" y="20" text-anchor="start">The price of context: size of the K/V cache in video memory</text>
+<line x1="64" y1="250.0" x2="714" y2="250.0" stroke="#e2e8f0"/>
+<text x="56" y="254.0" text-anchor="end" fill="#64748b" font-size="11">0</text>
+<line x1="64" y1="207.7" x2="714" y2="207.7" stroke="#e2e8f0"/>
+<text x="56" y="211.7" text-anchor="end" fill="#64748b" font-size="11">0.5</text>
+<line x1="64" y1="165.4" x2="714" y2="165.4" stroke="#e2e8f0"/>
+<text x="56" y="169.4" text-anchor="end" fill="#64748b" font-size="11">1</text>
+<line x1="64" y1="123.1" x2="714" y2="123.1" stroke="#e2e8f0"/>
+<text x="56" y="127.1" text-anchor="end" fill="#64748b" font-size="11">1.5</text>
+<line x1="64" y1="80.8" x2="714" y2="80.8" stroke="#e2e8f0"/>
+<text x="56" y="84.8" text-anchor="end" fill="#64748b" font-size="11">2</text>
+<line x1="64" y1="38.5" x2="714" y2="38.5" stroke="#e2e8f0"/>
+<text x="56" y="42.5" text-anchor="end" fill="#64748b" font-size="11">2.5</text>
+<text class="ru " x="56" y="24" text-anchor="end" fill="#64748b" font-size="11">GiB</text><text class="en " x="56" y="24" text-anchor="end" fill="#64748b" font-size="11">GiB</text>
+<line x1="104.6" y1="250" x2="104.6" y2="255" stroke="#94a3b8"/>
+<text x="104.6" y="269" text-anchor="middle" fill="#64748b" font-size="11">8K</text>
+<line x1="145.2" y1="250" x2="145.2" y2="255" stroke="#94a3b8"/>
+<text x="145.2" y="269" text-anchor="middle" fill="#64748b" font-size="11">16K</text>
+<line x1="226.5" y1="250" x2="226.5" y2="255" stroke="#94a3b8"/>
+<text x="226.5" y="269" text-anchor="middle" fill="#64748b" font-size="11">32K</text>
+<line x1="389.0" y1="250" x2="389.0" y2="255" stroke="#94a3b8"/>
+<text x="389.0" y="269" text-anchor="middle" fill="#64748b" font-size="11">64K</text>
+<line x1="714.0" y1="250" x2="714.0" y2="255" stroke="#94a3b8"/>
+<text x="714.0" y="269" text-anchor="middle" fill="#64748b" font-size="11">128K</text>
+<text class="ru " x="714" y="286" text-anchor="end" fill="#64748b" font-size="11">окно контекста, токенов</text><text class="en " x="714" y="286" text-anchor="end" fill="#64748b" font-size="11">context window, tokens</text>
+<polyline points="64.0,250.0 714.0,38.5" fill="none" stroke="#16a34a" stroke-width="3" stroke-dasharray="" stroke-linecap="round"/>
+<polyline points="64.0,250.0 714.0,137.6" fill="none" stroke="#0d9488" stroke-width="3" stroke-dasharray="6 4" stroke-linecap="round"/>
+<polyline points="64.0,250.0 714.0,126.4" fill="none" stroke="#ea580c" stroke-width="3" stroke-dasharray="" stroke-linecap="round"/>
+<line x1="104.6" y1="236.8" x2="116.6" y2="154.8" stroke="#16a34a" stroke-width="1.5" stroke-dasharray="3 3"/>
+<circle cx="104.6" cy="236.8" r="6" fill="#ffffff" stroke="#16a34a" stroke-width="3"/>
+<text class="ru" x="118.6" y="158.8" fill="#16a34a" font-size="12" font-weight="700" stroke="#ffffff" stroke-width="5" paint-order="stroke">LFM2.5 сейчас: окно 8K, 160 MiB</text>
+<text class="en" x="118.6" y="158.8" fill="#16a34a" font-size="12" font-weight="700" stroke="#ffffff" stroke-width="5" paint-order="stroke">LFM2.5 now: 8K window, 160 MiB</text>
+<line x1="389.0" y1="188.2" x2="399.0" y2="224.2" stroke="#ea580c" stroke-width="1.5" stroke-dasharray="3 3"/>
+<circle cx="389.0" cy="188.2" r="6" fill="#ffffff" stroke="#ea580c" stroke-width="3"/>
+<text class="ru" x="401.0" y="222.2" fill="#ea580c" font-size="12" font-weight="700" stroke="#ffffff" stroke-width="5" paint-order="stroke">Qwen3.6 сейчас: окно 64K, 748 MiB</text>
+<text class="en" x="401.0" y="222.2" fill="#ea580c" font-size="12" font-weight="700" stroke="#ffffff" stroke-width="5" paint-order="stroke">Qwen3.6 now: 64K window, 748 MiB</text>
+<line x1="64" y1="308" x2="90" y2="308" stroke="#16a34a" stroke-width="3" stroke-dasharray="" stroke-linecap="round"/>
+<text class="ru " x="96" y="312" text-anchor="start" fill="#334155" font-size="11">LFM2.5 f16 (20 480 B/token)</text><text class="en " x="96" y="312" text-anchor="start" fill="#334155" font-size="11">LFM2.5 f16 (20,480 B/token)</text>
+<line x1="279" y1="308" x2="305" y2="308" stroke="#0d9488" stroke-width="3" stroke-dasharray="6 4" stroke-linecap="round"/>
+<text class="ru " x="311" y="312" text-anchor="start" fill="#334155" font-size="11">LFM2.5 q8_0 (10 880 B/token)</text><text class="en " x="311" y="312" text-anchor="start" fill="#334155" font-size="11">LFM2.5 q8_0 (10,880 B/token)</text>
+<line x1="494" y1="308" x2="520" y2="308" stroke="#ea580c" stroke-width="3" stroke-dasharray="" stroke-linecap="round"/>
+<text class="ru " x="526" y="312" text-anchor="start" fill="#334155" font-size="11">Qwen3.6 q8 (11 968 B/token)</text><text class="en " x="526" y="312" text-anchor="start" fill="#334155" font-size="11">Qwen3.6 q8 (11,968 B/token)</text>
+</svg>
+  <ul>
+    <li><span class="l ru"><b>LFM2.5</b> держит K/V только в 10 слоях внимания, но в f16: 20 КиБ на токен. Окно 8K стоит 160 MiB, 64K — 1,25 ГиБ, 128K — 2,5 ГиБ.</span><span class="l en"><b>LFM2.5</b> keeps the K/V only in its 10 attention layers, but in f16: 20 KiB per token. An 8K window costs 160 MiB, 64K costs 1.25 GiB, 128K costs 2.5 GiB.</span></li>
+    <li><span class="l ru"><b>В q8_0</b> кэш LFM2.5 почти вдвое меньше (53 % от f16, 10 880 байт на токен), но это меняет вывод и требует проверки качества.</span><span class="l en"><b>In q8_0</b> the LFM2.5 cache is almost half the size (53 % of f16, 10,880 bytes per token), but it changes the output and needs a quality check.</span></li>
+    <li><span class="l ru"><b>Qwen3.6</b> хранит K/V в 11 слоях внимания в q8: 11 968 байт на токен, окно 64K — 0,73 ГиБ, 128K — 1,46 ГиБ.</span><span class="l en"><b>Qwen3.6</b> keeps the K/V in its 11 attention layers in q8: 11,968 bytes per token, a 64K window is 0.73 GiB, 128K is 1.46 GiB.</span></li>
+  </ul>
+  <div class="callout good"><span class="l ru"><b>Вывод.</b> Видеопамять — общий бюджет: у LFM2.5 каждый лишний слой экспертов отнимает окно контекста, у Qwen3.6 длинное окно съедает запас: при окне 64K остаётся 0,12 ГиБ. Поэтому обе картины выглядят «забитыми до отказа».</span><span class="l en"><b>Takeaway.</b> Video memory is one shared budget: with LFM2.5 every extra layer of experts takes away context window, with Qwen3.6 the long window eats the spare room: at a 64K window 0.12 GiB is left. That is why both pictures look full to the brim.</span></div>
+</section>
+
+<section>
+  <h2><span class="l ru">Откуда цифры</span><span class="l en">Where the numbers come from</span></h2>
+  <ul>
+    <li><span class="l ru"><b>Точно (заголовок файла):</b> размеры тензоров LFM2.5 из GGUF (tools/lfm_model_map.py): эксперты слоёв 33–39 — 2436,0 MiB, веса вне экспертов — 808,9 MiB (эксперты слоёв 2–32 — ещё 10 935 MiB, они в оперативной памяти).</span><span class="l en"><b>Exact (file header):</b> LFM2.5 tensor sizes from the GGUF (tools/lfm_model_map.py): experts of layers 33–39 are 2436.0 MiB, the weights outside the experts are 808.9 MiB (the experts of layers 2–32, another 10,935 MiB, are in system RAM).</span></li>
+    <li><span class="l ru"><b>Журнал llama.cpp:</b> K/V 160 MiB (8192 клетки, 10 слоёв, f16), буфер вычислений 183,5 MiB, состояние свёрток 0,47 MiB; запуск с --n-cpu-moe 33, ubatch 256, flash attention; эксперты слоёв 2–32 помечены «buffer type overridden to CUDA_Host» (закреплённая память).</span><span class="l en"><b>llama.cpp log:</b> K/V 160 MiB (8192 cells, 10 layers, f16), compute buffer 183.5 MiB, convolution state 0.47 MiB; run with --n-cpu-moe 33, ubatch 256, flash attention; the experts of layers 2–32 are marked “buffer type overridden to CUDA_Host” (pinned memory).</span></li>
+    <li><span class="l ru"><b>nvidia-smi:</b> процесс llama-server занимает 3690 MiB; карта: 4096 MiB физически, 3768 MiB видно программам.</span><span class="l en"><b>nvidia-smi:</b> the llama-server process takes 3690 MiB; the card has 4096 MiB physically, 3768 MiB visible to programs.</span></li>
+    <li><span class="l ru"><b>Расчёт:</b> «контекст CUDA и остаток» LFM2.5 — разность между процессом и суммой известных частей; для Qwen3.6 K/V — произведение окна на байты на токен, буферы и остаток — разности.</span><span class="l en"><b>Derived:</b> “CUDA context and the rest” for LFM2.5 is the difference between the process and the sum of the known parts; for Qwen3.6 the K/V is the window times bytes per token, and the buffers and the remainder are differences.</span></li>
+  </ul>
+</section>
+
+<footer><span class="l ru">Strata · docs/vram-map.html · собрано из docs/LFM25.md и docs/TUNING.md</span><span class="l en">Strata · docs/vram-map.html · built from docs/LFM25.md and docs/TUNING.md</span></footer>
+</div>
+<script>
+(function(){
+  var lang='ru';
+  try{lang=localStorage.getItem('vram-lang')||'ru'}catch(e){}
+  var hash=(location.hash||'').replace('#','');
+  if(hash==='ru'||hash==='en'){lang=hash}
+  function set(l){
+    document.documentElement.setAttribute('data-lang',l);
+    document.documentElement.lang=l;
+    document.title=l==='ru'?'Чем забита видеопамять: LFM2.5 и Qwen3.6':'What fills the video memory: LFM2.5 and Qwen3.6';
+    try{localStorage.setItem('vram-lang',l)}catch(e){}
+  }
+  set(lang);
+  document.querySelectorAll('.toggle button').forEach(function(b){b.addEventListener('click',function(){set(b.getAttribute('data-l'))})});
+})();
+</script>
+</body>
+</html>
