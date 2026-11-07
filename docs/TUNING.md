@@ -541,9 +541,17 @@ nothing; the setting is for a measured trade, not for a default.
 - Measured gain (4 November, IQ4_XS with MTP, 2.2 GHz cap): 7 of 8 +17.2 percent, 6 of 8 +20.9 percent, 5 of 8 +35.3 percent in
   tokens per second against the baseline of the same session (30.4 and 30.5), package at most 67 C. Per step, which does not depend
   on how often the drafts are accepted, the gains are +10.8, +19.0 and +32.1 percent (7 experts: +8.6 percent on a second prompt).
+- Measured again on 7 November with `tools/lever_matrix.py` (IQ4_XS with MTP, 2.2 GHz cap, `STRATA_IQ_VBMI=1` and no pool spin as
+  the runner sets them, the code prompt, one session per count with the baseline before and after it): the baseline does not
+  drift (35.1, 35.2 and 35.1 tok/s, drift at most 1.1 percent); 7 of 8 40.2 tok/s (+14.4 percent), 6 of 8 41.9 (+18.7),
+  5 of 8 45.9 (+30.6). The percentages are the runner's, from unrounded values; package at most 69 C.
 - Measured quality cost, against the same file at 8 experts (16 thousand tokens of documents and code, 512-token chunks):
   K=7 mean KLD 0.0254, best token the same in 93.1 percent, perplexity +1.7 percent; K=6 0.0602, 89.3 percent, +5.4 percent;
-  K=5 0.1222, 85.3 percent, +10.8 percent. Quality on tasks (tool calls, agent runs) was not measured.
+  K=5 0.1222, 85.3 percent, +10.8 percent.
+- Measured quality on a task (7 November, HumanEval, all 164 problems, pass@1, greedy, llama.cpp `llama-server` with the same
+  IQ4_XS file and the same K in every layer, which is what `expert_used_count` sets; thinking off): K=8 151 passed (92.1 percent), K=7 152 (92.7),
+  K=6 151 (92.1), K=5 150 (91.5), K=4 142 (86.6). Down to 5 experts the pass rate stays inside the noise of one run (1 to 2
+  problems); at 4 it drops by 5.5 points. K=3 was not run. Tool calls and agent runs were not measured.
 - Quality gate: `tools/kld_experts.py` runs llama.cpp's KL-divergence test. It saves the reference logits of a larger file once
   (`--ref-model`, e.g. the Q8_0 one), then measures the served file (`--model`) at each count on the same text and prints one
   line per count: mean KLD, the 99th percentile of KLD, how often the top token is the same, and the perplexity ratio. The line

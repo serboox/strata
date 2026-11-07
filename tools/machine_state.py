@@ -14,6 +14,9 @@ GIB = 1 << 30
 CPU_ROOT = Path("/sys/devices/system/cpu")
 USAGE_FILE = Path.home() / ".claude" / "usage.json"
 PROCESS_MARKERS = ("strata-q36", "llama-server", "llama-bench", "llama-perplexity", "serve/server.py")
+HELPER_SCRIPTS = ("machine_state", "cpu-hog-watchdog")
+HELPER_INTERPRETERS = ("bash", "sh", "python", "python3")
+HELPER_PROGRAMS = ("notify-send",)
 
 
 def read_usage(path: Path = USAGE_FILE) -> dict:
@@ -37,6 +40,15 @@ def meminfo_gib(text: str) -> dict:
             "swap_used_gib": round(swap_used / GIB, 2)}
 
 
+def is_helper(command: str) -> bool:
+    """True for this tool and for the CPU watchdog, whose script and open warning dialog carry the name of the stuck server in their arguments."""
+    words = command.split(" ")
+    program = Path(words[0]).name
+    if program in HELPER_PROGRAMS:
+        return True
+    return program in HELPER_INTERPRETERS and any(Path(word).stem in HELPER_SCRIPTS for word in words[1:3])
+
+
 def running_processes(proc: Path = Path("/proc"), markers: tuple = PROCESS_MARKERS) -> list:
     """Command lines (shortened) of the processes that would disturb a measurement; this process and its parents are left out."""
     me = os.getpid()
@@ -48,7 +60,7 @@ def running_processes(proc: Path = Path("/proc"), markers: tuple = PROCESS_MARKE
             command = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace").strip()
         except OSError:
             continue
-        if command and any(marker in command.split(" ")[0] or f" {marker}" in command for marker in markers) and "machine_state" not in command:
+        if command and any(marker in command.split(" ")[0] or f" {marker}" in command for marker in markers) and not is_helper(command):
             found.append(f"{entry.name}: {command[:100]}")
     return found
 

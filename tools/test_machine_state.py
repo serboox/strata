@@ -44,6 +44,25 @@ class ReadTests(unittest.TestCase):
         self.assertEqual(sorted(entry.split(":")[0] for entry in found), ["101", "103"])
 
 
+    def test_a_watchdog_warning_that_names_a_server_is_not_a_server(self):
+        proc = scratch(self)
+        for pid, command in (("201", b"bash\0/x/cpu-hog-watchdog\0--prompt\0614066\0llama-server\0"), ("202", b"notify-send\0-a\0cpu-hog-watchdog\0llama-server is stuck\0"),
+                             ("203", b"/x/llama-server\0-m\0m.gguf\0"), ("204", b"python3\0-I\0tools/machine_state.py\0llama-server\0")):
+            (proc / pid).mkdir()
+            (proc / pid / "cmdline").write_bytes(command)
+        found = machine_state.running_processes(proc)
+        self.assertEqual([entry.split(":")[0] for entry in found], ["203"])
+
+    def test_a_server_whose_path_or_arguments_contain_a_helper_name_is_still_a_server(self):
+        proc = scratch(self)
+        commands = (b"/opt/cpu-hog-watchdog/llama-server\0-m\0m.gguf\0", b"llama-server\0-m\0/models/cpu-hog-watchdog.gguf\0", b"llama-server\0-m\0/models/machine_state.gguf\0")
+        for index, command in enumerate(commands):
+            (proc / str(300 + index)).mkdir()
+            (proc / str(300 + index) / "cmdline").write_bytes(command)
+        found = machine_state.running_processes(proc)
+        self.assertEqual(sorted(entry.split(":")[0] for entry in found), ["300", "301", "302"])
+
+
 class CpuCapTests(unittest.TestCase):
     def fake_cpus(self, limits):
         root = scratch(self)
