@@ -100,6 +100,13 @@ build.
 Hypothesis only. The earlier test gave 1.69 tokens per step against 2.68 for MTP, on generated code. An agent copies
 existing code (file contents, edits, tool arguments), which that test did not cover.
 
+First evidence for copying (7 November, llama.cpp, Qwen3.6 IQ4_XS without MTP, a prompt that rewrites a pasted file with one
+rename): `ngram-mod` ran 34.6 tok/s against 13.1 without drafts on the first request, with 647 of 704 drafts accepted, and 20.2 on
+the second. In the engine the gain is probably capped by the cost of a row. If every extra row costs about 21 ms (the two step times below,
+33 ms for one row and 75 ms for three, give no more than that; the cost for more rows was not measured), perfect copying of N
+drafted tokens gives N + 1 tokens per 33 + 21 N ms: 40 tok/s at N = 2, 44.8 at N = 8 and 47.6 as the theoretical limit of this
+model, against 35 now. An estimate, not a measurement in the engine.
+
 - Step 1 is offline: use the match statistics from B1; no engine change.
 - Step 2, only if long matches are frequent: draft from the n-gram only when the match is at least N tokens long,
   otherwise use MTP. Each extra row adds expert reads (a 3-row step costs about 75 ms against about 33 ms for one row),

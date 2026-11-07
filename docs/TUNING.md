@@ -550,8 +550,8 @@ nothing; the setting is for a measured trade, not for a default.
   K=5 0.1222, 85.3 percent, +10.8 percent.
 - Measured quality on a task (7 November, HumanEval, all 164 problems, pass@1, greedy, llama.cpp `llama-server` with the same
   IQ4_XS file and the same K in every layer, which is what `expert_used_count` sets; thinking off): K=8 151 passed (92.1 percent), K=7 152 (92.7),
-  K=6 151 (92.1), K=5 150 (91.5), K=4 142 (86.6). Down to 5 experts the pass rate stays inside the noise of one run (1 to 2
-  problems); at 4 it drops by 5.5 points. K=3 was not run. Tool calls and agent runs were not measured.
+  K=6 151 (92.1), K=5 150 (91.5), K=4 142 (86.6), K=3 114 (69.5). Down to 5 experts the pass rate stays inside the noise of one run
+  (1 to 2 problems); at 4 it drops by 5.5 points and at 3 by 22.6. Tool calls and agent runs were not measured.
 - Quality gate: `tools/kld_experts.py` runs llama.cpp's KL-divergence test. It saves the reference logits of a larger file once
   (`--ref-model`, e.g. the Q8_0 one), then measures the served file (`--model`) at each count on the same text and prints one
   line per count: mean KLD, the 99th percentile of KLD, how often the top token is the same, and the perplexity ratio. The line
@@ -856,6 +856,12 @@ Details, analogies and charts are in `docs/index.html`, section 6.
 | Experts in the 143 MB of free VRAM | 75 experts cover 0.8% of the accesses |
 | Whole working set in VRAM | 8,458 of 10,240 experts used within 600 tokens of one text |
 | GPU reads the SSD directly | GeForce only gets cuFile compatibility mode (through host memory); the SSD link trained at PCIe Gen3 x4, which is the measured 3.4 GB/s |
+| Step timeline (`nsys`, 7 November, decode without MTP, 2.2 GHz cap) | GPU kernels are busy about 45 % of the time (about 16.7 of 37 ms per token); a layer runs GPU, then the CPU experts, then GPU. The overlap switch gave +2.6 %; whether a larger lossless gain exists was not tested |
+| Transparent huge pages for the expert reads (microbenchmark, 6 threads, random 1.9 MB blocks, 7 November) | 52.4 GB/s from mapped file pages, 52.4 from 4 KB anonymous pages, 53.2 from 2 MB pages: no gain |
+| MTP depth with fewer experts (7 November, baseline 35.2 tok/s at depth 2) | depth 3 at 8 experts 33.0 (-6.4 %, acceptance 0.523); at 6 experts depth 1 41.2, depth 2 41.9, depth 3 39.3: depth 2 stays the best |
+| Prefetch distance of the IQ kernels (`STRATA_IQ_PREFETCH`, 7 November) | 0 / 2048 (default) / 4096 / 8192 bytes: 35.28 / 35.24 / 35.15 / 35.23 tok/s: no difference |
+| Lower-bit files (llama.cpp KLD against the served IQ4_XS, 24 chunks of 512 tokens, 7 November) | UD-IQ3_XXS (13.2 GB): mean KLD 0.071, same best token in 89.0 %, perplexity +2.3 %; UD-Q3_K_S (15.4 GB): 0.051, 91.3 %, +0.9 %. The engine refuses both (their IQ2_S and IQ3_XXS experts are not taken by the native kernels), so no speed was measured; 6 experts costs a similar KLD (0.060) and gives +18.7 % |
+| n-gram drafting on Qwen3.6 in llama.cpp (7 November, no MTP, 13.1 tok/s without drafts, one rewrite-the-file prompt) | `ngram-mod` 34.6 tok/s on the first request (647 of 704 drafts accepted) and 20.2 on the second, which wrote a different text; `ngram-simple` 15.6, `ngram-map-k` 14.7. In the engine the cost of an extra row probably limits the gain (an estimate from a linear row-cost model, see B5 in BACKLOG.md) |
 | Spin threshold of idle workers under sustained heat (2000 tokens) | default 32.9 / 32.9, 100 us 28.0 / 30.4 tok/s |
 | CPU computes a share of the experts of a prompt chunk while the card streams the rest | 142 -> 202 tok/s on a 1546-token prompt (96 of 256 experts on the CPU), above the 167 tok/s PCIe ceiling |
 | Integrated GPU | shares the same memory and thermal budget; not benchmarked |
