@@ -105,7 +105,8 @@ rename): `ngram-mod` ran 34.6 tok/s against 13.1 without drafts on the first req
 the second. In the engine the gain is probably capped by the cost of a row. If every extra row costs about 21 ms (the two step times below,
 33 ms for one row and 75 ms for three, give no more than that; the cost for more rows was not measured), perfect copying of N
 drafted tokens gives N + 1 tokens per 33 + 21 N ms: 40 tok/s at N = 2, 44.8 at N = 8 and 47.6 as the theoretical limit of this
-model, against 35 now. An estimate, not a measurement in the engine.
+model, against 35 now. An estimate, not a measurement in the engine; 33 and 75 ms are older step times (the step is about 65 ms now),
+so the real cost of a row is probably lower and the cap somewhat higher.
 
 - Step 1 is offline: use the match statistics from B1; no engine change.
 - Step 2, only if long matches are frequent: draft from the n-gram only when the match is at least N tokens long,

@@ -847,6 +847,8 @@ needs either lower precision (q4 K/V, lighter weights) or the old part of the ca
 
 Details, analogies and charts are in `docs/index.html`, section 6.
 
+The ledger of the November 2026 speed experiments, with every number and a note on when a test is worth repeating, is `docs/TPS_EXPERIMENTS.md`.
+
 | Idea | Result |
 | --- | --- |
 | Another cache policy (LFU, pinning, oracle replayed on routing traces recorded with `STRATA_ROUTE_TRACE`) | LRU is within 2 points of the oracle at 12G and above; the oracle adds at most 9 points at 8G; pinning is worse |
