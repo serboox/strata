@@ -73,6 +73,14 @@ class ApplyTests(unittest.TestCase):
         self.assertEqual(patcher.apply(self.llama), ["ggml-cpu.c"])
         self.assertIn("strata_kq_rows((int) type", source.read_text(encoding="utf-8"))
 
+    def test_a_tree_patched_for_q4_and_q5_only_gets_q2_added_by_the_next_run(self):
+        patcher.apply(self.llama)
+        source = self.cpu / "ggml-cpu.c"
+        source.write_text(source.read_text(encoding="utf-8").replace(patcher.HOOK_TYPES_Q2_Q4_Q5, patcher.HOOK_TYPES_Q4_Q5), encoding="utf-8")
+        self.assertEqual(patcher.apply(self.llama), ["ggml-cpu.c"])
+        self.assertIn(patcher.HOOK_TYPES_Q2_Q4_Q5, source.read_text(encoding="utf-8"))
+        self.assertEqual(patcher.apply(self.llama), [])
+
     def test_a_tree_without_the_cpu_backend_is_an_error(self):
         with self.assertRaisesRegex(patcher.PatchError, "does not exist"):
             patcher.apply(Path(self.directory.name) / "empty")

@@ -54,6 +54,18 @@ void reorder(Activations& a, const void* const* act, int nt, int nb) {
     }
 }
 
+// Q2_K: a 256-value block is two groups of 128 values; each 32 bytes of the 64 quant bytes hold four 32-value rows at the shifts 0, 2, 4, 6.
+// One 512-bit load covers both groups, so the vector of shift s holds the 32-value rows s and 4 + s of the block.
+constexpr int kGroupOrderQ2[8] = {0, 4, 1, 5, 2, 6, 3, 7};
+
+void reorder_q2(Activations& a, const void* const* act, int nt, int nb) {
+    for (int t = 0; t < nt; ++t) {
+        a.blk[t] = (const block_q8_K*) act[t];
+        for (int i = 0; i < nb; ++i)
+            for (int g = 0; g < 8; ++g) std::memcpy(&a.qs[t][i][g * 32], a.blk[t][i].qs + kGroupOrderQ2[g] * 32, 32);
+    }
+}
+
 // Per 128-bit lane, the 16-bit scale `a` for the first two lanes and `b` for the last two
 inline __m512i scale_mask(int a, int b) {
     const __m128i lo = _mm_set1_epi16((short) (2 * a | ((2 * a + 1) << 8)));
@@ -157,6 +169,62 @@ inline void row_dot(const void* row, int nb, const Masks& mk, const Activations&
     }
 }
 
+struct Q2Masks {
+    __m512i m3 = _mm512_set1_epi8(3);
+    __m128i m4 = _mm_set1_epi8(0xF);
+    __m512i perm[4];
+    // int16 lane l of the scale vector of shift s: the sub-block 8 * (l / 16) + 2 * s + (l % 16) / 8
+    Q2Masks() {
+        for (int s = 0; s < 4; ++s) {
+            alignas(64) int16_t idx[32];
+            for (int l = 0; l < 32; ++l) idx[l] = (int16_t) (8 * (l / 16) + 2 * s + (l % 16) / 8);
+            perm[s] = _mm512_load_si512(idx);
+        }
+    }
+};
+
+// Same order of floating point operations as ggml_vec_dot_q2_K_q8_K: the minimum term first, then the scaled integer sum
+template <int NT>
+inline void row_dot_q2(const void* row, int nb, const Q2Masks& mk, const Activations& a, const uint8_t* ahead, float* out) {
+    constexpr size_t kBlockBytes = sizeof(block_q2_K);
+    __m256 acc[NT];
+#pragma GCC unroll 8
+    for (int t = 0; t < NT; ++t) acc[t] = _mm256_setzero_ps();
+    for (int i = 0; i < nb; ++i) {
+        const uint8_t* block = (const uint8_t*) row + (size_t) i * kBlockBytes;
+        const uint8_t* next = ahead + (size_t) i * kBlockBytes;
+        _mm_prefetch((const char*) next, _MM_HINT_T0);
+        _mm_prefetch((const char*) next + 64, _MM_HINT_T0);
+        uint32_t half_pair;
+        std::memcpy(&half_pair, block + 80, 4);
+        const __m128 factors = _mm_cvtph_ps(_mm_cvtsi32_si128((int) half_pair));
+        const float xd = _mm_cvtss_f32(factors), xdmin = _mm_cvtss_f32(_mm_movehdup_ps(factors));
+        const __m128i packed = _mm_loadu_si128((const __m128i*) block);
+        const __m256i mins = _mm256_cvtepi8_epi16(_mm_and_si128(_mm_srli_epi16(packed, 4), mk.m4));
+        const __m512i scales = _mm512_castsi256_si512(_mm256_cvtepi8_epi16(_mm_and_si128(packed, mk.m4)));
+        const __m512i sv0 = _mm512_permutexvar_epi16(mk.perm[0], scales), sv1 = _mm512_permutexvar_epi16(mk.perm[1], scales);
+        const __m512i sv2 = _mm512_permutexvar_epi16(mk.perm[2], scales), sv3 = _mm512_permutexvar_epi16(mk.perm[3], scales);
+        const __m512i bits = _mm512_loadu_si512(block + 16);
+        const __m512i w0 = _mm512_and_si512(bits, mk.m3), w1 = _mm512_and_si512(_mm512_srli_epi16(bits, 2), mk.m3);
+        const __m512i w2 = _mm512_and_si512(_mm512_srli_epi16(bits, 4), mk.m3), w3 = _mm512_and_si512(_mm512_srli_epi16(bits, 6), mk.m3);
+#pragma GCC unroll 8
+        for (int t = 0; t < NT; ++t) {
+            const block_q8_K& y = a.blk[t][i];
+            const __m256i prod = _mm256_madd_epi16(mins, _mm256_loadu_si256((const __m256i*) y.bsums));
+            acc[t] = _mm256_fmadd_ps(_mm256_set1_ps(-y.d * xdmin), _mm256_cvtepi32_ps(prod), acc[t]);
+            const int8_t* q8 = a.qs[t][i];
+            __m512i sumi = _mm512_madd_epi16(sv0, _mm512_maddubs_epi16(w0, _mm512_loadu_si512(q8)));
+            sumi = _mm512_add_epi32(sumi, _mm512_madd_epi16(sv1, _mm512_maddubs_epi16(w1, _mm512_loadu_si512(q8 + 64))));
+            sumi = _mm512_add_epi32(sumi, _mm512_madd_epi16(sv2, _mm512_maddubs_epi16(w2, _mm512_loadu_si512(q8 + 128))));
+            sumi = _mm512_add_epi32(sumi, _mm512_madd_epi16(sv3, _mm512_maddubs_epi16(w3, _mm512_loadu_si512(q8 + 192))));
+            const __m256i sum8 = _mm256_add_epi32(_mm512_castsi512_si256(sumi), _mm512_extracti64x4_epi64(sumi, 1));
+            acc[t] = _mm256_fmadd_ps(_mm256_set1_ps(y.d * xd), _mm256_cvtepi32_ps(sum8), acc[t]);
+        }
+    }
+#pragma GCC unroll 8
+    for (int t = 0; t < NT; ++t) out[t] = hsum_float_8(acc[t]);
+}
+
 constexpr int kPrefetchRows = 3;
 inline void prefetch_row(const uint8_t* row, size_t bytes) {
     for (size_t o = 0; o < bytes; o += 64) __builtin_prefetch(row + o, 0, 3);
@@ -205,6 +273,22 @@ void plain_rows_n(const uint8_t* w, size_t row_bytes, int n, const void* const* 
     }
 }
 
+template <int NT>
+void plain_rows_q2_n(const uint8_t* w, size_t row_bytes, int n, const void* const* act, float* const* out, int r0, int r1) {
+    Activations& a = scratch();
+    const int nb = n / kBlock;
+    reorder_q2(a, act, NT, nb);
+    const Q2Masks mk;
+    for (int r = r0; r < (r1 < r0 + kPrefetchRows ? r1 : r0 + kPrefetchRows); ++r) prefetch_row(w + (size_t) r * row_bytes, row_bytes);
+    for (int r = r0; r < r1; ++r) {
+        const uint8_t* row = w + (size_t) r * row_bytes;
+        float s[NT];
+        row_dot_q2<NT>(row, nb, mk, a, r + kPrefetchRows < r1 ? row + (size_t) kPrefetchRows * row_bytes : row, s);
+#pragma GCC unroll 8
+        for (int t = 0; t < NT; ++t) out[t][r] = s[t];
+    }
+}
+
 template <typename Fn>
 inline void with_tokens(int nt, Fn&& fn) {
     switch (nt) {
@@ -221,11 +305,11 @@ inline void with_tokens(int nt, Fn&& fn) {
 
 }  // namespace
 
-// ggml type ids: Q4_K is 12, Q5_K is 13
+// ggml type ids: Q2_K is 10, Q4_K is 12, Q5_K is 13
 bool kq512_gu_supported(int ggml_type, int n) noexcept { return ggml_type == 12 && n > 0 && n % kBlock == 0 && n / kBlock <= kMaxBlocks; }
 bool kq512_down_supported(int ggml_type, int n) noexcept { return ggml_type == 13 && n > 0 && n % kBlock == 0 && n / kBlock <= kMaxBlocks; }
 bool kq512_rows_supported(int ggml_type, int n) noexcept {
-    return (ggml_type == 12 || ggml_type == 13) && n > 0 && n % kBlock == 0 && n / kBlock <= kMaxBlocks;
+    return (ggml_type == 10 || ggml_type == 12 || ggml_type == 13) && n > 0 && n % kBlock == 0 && n / kBlock <= kMaxBlocks;
 }
 
 void kq512_gu_rows(const uint8_t* blob, size_t gu_row, size_t up_off, int n, const void* const* act, int nt,
@@ -246,7 +330,9 @@ void kq512_rows(int ggml_type, const uint8_t* w, size_t row_bytes, int n, const 
                 int r0, int r1) {
     for (int first = 0; first < nt; first += kMaxTokens) {
         with_tokens((std::min)(kMaxTokens, nt - first), [&](auto count) {
-            if (ggml_type == 13)
+            if (ggml_type == 10)
+                plain_rows_q2_n<decltype(count)::value>(w, row_bytes, n, act + first, out + first, r0, r1);
+            else if (ggml_type == 13)
                 plain_rows_n<true, decltype(count)::value>(w, row_bytes, n, act + first, out + first, r0, r1);
             else
                 plain_rows_n<false, decltype(count)::value>(w, row_bytes, n, act + first, out + first, r0, r1);

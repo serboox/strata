@@ -46,7 +46,7 @@ DOT_LOOP = """                for (int64_t ir0 = iir0; ir0 < iir0 + blck_0 && ir
                 }
 """
 DOT_LOOP_WITH_KERNEL = """                const int64_t rows_here = MIN(iir0 + blck_0, ir0_end) - iir0;
-                if ((type == GGML_TYPE_Q4_K || type == GGML_TYPE_Q5_K) && vec_dot_type == GGML_TYPE_Q8_K && strata_kq_enabled() &&
+                if ((type == GGML_TYPE_Q2_K || type == GGML_TYPE_Q4_K || type == GGML_TYPE_Q5_K) && vec_dot_type == GGML_TYPE_Q8_K && strata_kq_enabled() &&
                     strata_kq_rows((int) type, src0_cur + iir0*nb01, nb01, (int) ne00, src1_col, tmp, (int) rows_here)) {
                     // the rows of this block were done by the kernel
                 } else {
@@ -55,6 +55,10 @@ DOT_LOOP_WITH_KERNEL = """                const int64_t rows_here = MIN(iir0 + b
                     }
                 }
 """
+
+
+HOOK_TYPES_Q4_Q5 = "(type == GGML_TYPE_Q4_K || type == GGML_TYPE_Q5_K) && vec_dot_type"
+HOOK_TYPES_Q2_Q4_Q5 = "(type == GGML_TYPE_Q2_K || type == GGML_TYPE_Q4_K || type == GGML_TYPE_Q5_K) && vec_dot_type"
 
 
 class PatchError(Exception):
@@ -90,7 +94,7 @@ def plan_edits(path: Path, edits: list[tuple[str, str, str]]) -> str | None:
 
 
 def apply(llama: Path, repo: Path = REPO) -> list[str]:
-    """Adds the Strata Q4_K and Q5_K expert kernels to ggml's mul_mat_id of a llama.cpp checkout; returns what changed.
+    """Adds the Strata Q2_K, Q4_K and Q5_K expert kernels to ggml's mul_mat_id of a llama.cpp checkout; returns what changed.
     Every edit is planned before the first file is written, so a checkout that does not match is left as it was."""
     cpu = llama / CPU_DIR
     for required in (cpu / "ggml-cpu.c", cpu / "CMakeLists.txt", repo / KERNEL_HEADER, repo / KERNEL_SOURCE):
@@ -100,6 +104,7 @@ def apply(llama: Path, repo: Path = REPO) -> list[str]:
     c_edits = [
         ("strata_kq_enabled(void)", HOOK_FUNCTION_ANCHOR, HOOK_DECLARATION + HOOK_FUNCTION_ANCHOR),
         ("strata_kq_rows((int) type", DOT_LOOP, DOT_LOOP_WITH_KERNEL),
+        ("type == GGML_TYPE_Q2_K || type == GGML_TYPE_Q4_K", HOOK_TYPES_Q4_Q5, HOOK_TYPES_Q2_Q4_Q5),
     ]
     cmake_text = plan_edits(cpu / "CMakeLists.txt", cmake_edits)
     c_text = plan_edits(cpu / "ggml-cpu.c", c_edits)
@@ -121,7 +126,7 @@ def apply(llama: Path, repo: Path = REPO) -> list[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="put the Strata Q4_K and Q5_K expert kernels into a llama.cpp checkout (STRATA_KQ512=0 switches them off at run time)")
+    parser = argparse.ArgumentParser(description="put the Strata Q2_K, Q4_K and Q5_K expert kernels into a llama.cpp checkout (STRATA_KQ512=0 switches them off at run time)")
     parser.add_argument("--llama", type=Path, required=True, help="the llama.cpp checkout")
     args = parser.parse_args(argv)
     try:
