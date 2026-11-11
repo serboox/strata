@@ -687,8 +687,9 @@ __global__ void k_pf_logits(const float* x, const float* w, const float* router,
 }
 /// Expert prefetch: `pn` distinct experts out of the T rows' logits, taking the best of row 0, of row 1, ... and
 /// round again, never one that already has a slot.  ids[j] is the j-th pick (-1: none left); slot_of (the next layer's
-/// slot table, ne entries) gets slot_base + j for a pick and is otherwise left as it is.  One block of 256 threads, ne <= 256.
-__global__ void k_pf_select(const float* logits, int T, int ne, int pn, int slot_base, int32_t* ids, int32_t* slot_of) {
+/// slot table, ne entries) gets slot_base + j for a pick and is otherwise left as it is; only `pn` picks are made, the
+/// ids up to `pn_all` stay -1.  One block of 256 threads, ne <= 256.
+__global__ void k_pf_select(const float* logits, int T, int ne, int pn, int pn_all, int slot_base, int32_t* ids, int32_t* slot_of) {
     __shared__ int chosen[256];
     __shared__ float wv[8];
     __shared__ int wi[8];
@@ -731,6 +732,7 @@ __global__ void k_pf_select(const float* logits, int T, int ne, int pn, int slot
     }
     for (int e = threadIdx.x; e < ne; e += 256)
         if (chosen[e] >= 0) slot_of[e] = slot_base + chosen[e];
+    for (int j = pn + (int) threadIdx.x; j < pn_all; j += 256) ids[j] = -1;
 }
 /// Expert prefetch: the guessed experts' entries of a slot table back to -1 (the resident ones stay).  One block.
 __global__ void k_pf_clear(int32_t* slot_of, const int32_t* ids, int pn, int slot_base) {
@@ -1855,7 +1857,11 @@ struct Engine {
     uint8_t* pf_ring[2] = {};              // device: pf_n blobs each (the layers' blobs point here)
     cudaStream_t pf_st = nullptr;
     cudaEvent_t pf_pred_ev = nullptr;      // the guess has reached pf_ids_h
-    cudaEvent_t pf_done = nullptr;         // the guessed experts have reached the card
+    cudaEvent_t pf_done[2] = {};           // the guessed experts of a layer of that parity have reached the card
+    // the number of guesses adapts to the copy speed: a layer whose guesses were still crossing PCIe when its CPU part
+    // ended was late; many late layers lower the number used, a calm stretch raises it again (never above pf_n)
+    int pf_use = 0, pf_seen = 0, pf_late = 0, pf_calm = 0;
+    long long pf_late_total = 0;
     float* pf_logits = nullptr;            // device [kGemmT][n_expert]
     int32_t* pf_ids_d[2] = {};             // device [pf_n]: the guess for a layer of that parity
     std::vector<int> pf_issued[2];         // host: the same ids of the layer whose guess is in use, by parity
@@ -3250,7 +3256,8 @@ struct Engine {
         const int N = (int) m->g.n_embd, ne = (int) m->g.n_expert;
         int32_t* const ids_d = pf_ids_d[(li + 1) & 1];
         k_pf_logits<<<T, 256, (size_t) N * 4, st>>>(x, NL.post_norm, NL.router, N, ne, m->eps, pf_logits);
-        k_pf_select<<<1, 256, 0, st>>>(pf_logits, T, ne, pf_n, NL.pf_base, ids_d, hy[li + 1].slot_of_d);
+        k_pf_select<<<1, 256, 0, st>>>(pf_logits, T, ne, std::max(1, std::min(pf_use, pf_n)), pf_n, NL.pf_base, ids_d,
+                                       hy[li + 1].slot_of_d);
         CK(cudaMemcpyAsync(pf_ids_h, ids_d, (size_t) pf_n * 4, cudaMemcpyDeviceToHost, st));
         CK(cudaEventRecord(pf_pred_ev, st));
         pf_target = (int) li + 1;
@@ -3275,8 +3282,31 @@ struct Engine {
             upload_expert(NL, id, base + (size_t) (NL.pf_base + j) * NL.stride, pf_st);
             NH.slot_of[(size_t) id] = NL.pf_base + j;
         }
-        CK(cudaEventRecord(pf_done, pf_st));
+        CK(cudaEventRecord(pf_done[(li + 1) & 1], pf_st));
         pf_live = (int) li + 1;
+    }
+
+    /// Expert prefetch: the CPU part of layer li has ended; were its guesses still on their way?  Every 64 layers the number
+    /// of guesses follows: more than a fifth late lowers it, three calm stretches in a row raise it.
+    void pf_observe(size_t li) {
+        ++pf_seen;
+        if (cudaEventQuery(pf_done[li & 1]) == cudaErrorNotReady) {
+            ++pf_late;
+            ++pf_late_total;
+        }
+        if (pf_seen < 64) return;
+        if (pf_late * 5 > pf_seen && pf_use > 1) {
+            --pf_use;
+            pf_calm = 0;
+        } else if (pf_late == 0) {
+            if (++pf_calm >= 3 && pf_use < pf_n) {
+                ++pf_use;
+                pf_calm = 0;
+            }
+        } else {
+            pf_calm = 0;
+        }
+        pf_seen = pf_late = 0;
     }
 
     /// A streamed forward over the state indices `seq`: each layer's experts reach the staging buffers (two,
@@ -3399,7 +3429,7 @@ struct Engine {
         group_entries(L, hy[li].slot_of_d, T);
         if (!xq_post) quant(h, N, T, xq);   // the experts' and the shared expert's input
         const bool pf_here = pf_live == (int) li;   // this layer's guessed experts are in the ring (or on their way)
-        if (pf_here) CK(cudaStreamWaitEvent(st, pf_done, 0));
+        if (pf_here) CK(cudaStreamWaitEvent(st, pf_done[li & 1], 0));
         K::native_expert_grouped(L.L, grp_ptr, grp_start, n_groups, ent_dst, ent_tok,
                                  std::min<int64_t>(n_ent, g.n_expert), n_ent, xq, escr, eparts, st);
         if (pf_here) k_pf_clear<<<1, 32, 0, st>>>(hy[li].slot_of_d, pf_ids_d[li & 1], pf_n, L.pf_base);   // the guesses' slots -1 again
@@ -3655,7 +3685,10 @@ struct Engine {
         hy_cpu += n_miss - diverted;
         hy_igpu += diverted;
         hy_gpu += n_ent - n_miss;
-        if (n_miss == 0) return;
+        if (n_miss == 0) {   // every entry is the GPU's: the layer waits for the guessed experts to arrive
+            if (pf_mine) pf_observe(li);
+            return;
+        }
         if (igpu) igpu->submit(li, igpu_entries.data(), (int) igpu_entries.size());
         if (L.hblobs == nullptr)
             for (const C::ExpertJobMulti& j : jobs) {   // the experts' three ranges, read in parallel while the pool starts
@@ -3670,6 +3703,7 @@ struct Engine {
         }
         if (!jobs.empty()) pool->run_split_multi_native(H.fmt, jobs.data(), (int) jobs.size());
         hy_cpu_ms += ms_since(t0);
+        if (pf_mine) pf_observe(li);
         if (igpu) igpu->wait();
         const auto te = ov.stats ? Clock::now() : t0;
         if (ov.glue) {
@@ -4182,7 +4216,8 @@ struct Engine {
         warming = false;
         for (Hy& H : hy) std::fill(H.score.begin(), H.score.end(), 0.0);
         hy_cpu = hy_gpu = hy_igpu = hy_swaps = 0;
-        pf_hits = pf_entries = 0;
+        pf_hits = pf_entries = pf_late_total = 0;
+        pf_seen = pf_late = pf_calm = 0;
         hy_cpu_ms = hy_wait_ms = hy_prep_ms = 0;
         hy_jobs = 0;
         if (igpu) igpu->reset_stats();
@@ -4543,7 +4578,8 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
             }
             CK(cudaStreamCreateWithFlags(&E.pf_st, cudaStreamNonBlocking));
             CK(cudaEventCreateWithFlags(&E.pf_pred_ev, cudaEventDisableTiming));
-            CK(cudaEventCreateWithFlags(&E.pf_done, cudaEventDisableTiming));
+            for (int p = 0; p < 2; ++p) CK(cudaEventCreateWithFlags(&E.pf_done[p], cudaEventDisableTiming));
+            E.pf_use = E.pf_n;
             CK(cudaMalloc(&E.pf_logits, (size_t) Engine::kGemmT * (size_t) ne * 4));
             for (int p = 0; p < 2; ++p) CK(cudaMalloc(&E.pf_ids_d[p], (size_t) E.pf_n * 4));
             CK(cudaHostAlloc((void**) &E.pf_ids_h, (size_t) E.pf_n * 4, cudaHostAllocDefault));
@@ -5558,8 +5594,9 @@ int strata::qwen35::run(int argc, char** argv) {
                          E.hy_cpu, E.hy_cpu_ms, E.hy_swaps);
             if (E.pf_n > 0)
                 std::fprintf(stderr, "strata-q36: expert prefetch: %lld of %lld entries of the layers that had a guess were computed "
-                             "from the ring (%.1f%%)\n", E.pf_hits, E.pf_entries,
-                             E.pf_entries ? 100.0 * (double) E.pf_hits / (double) E.pf_entries : 0.0);
+                             "from the ring (%.1f%%); %lld layers were late, %d of %d guesses in use at the end\n", E.pf_hits,
+                             E.pf_entries, E.pf_entries ? 100.0 * (double) E.pf_hits / (double) E.pf_entries : 0.0,
+                             E.pf_late_total, E.pf_use, E.pf_n);
             std::fprintf(stderr, "strata-q36: CPU path ms: router wait %.0f, job building %.0f, gate/up %.0f, quantize %.0f, "
                          "down %.0f; %lld expert weight sets read\n", E.hy_wait_ms, E.hy_prep_ms, E.pool->ms_multi_gu, E.pool->ms_multi_q,
                          E.pool->ms_multi_down, E.hy_jobs);

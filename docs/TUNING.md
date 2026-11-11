@@ -596,8 +596,10 @@ context no expert sits in VRAM at all (0.27 GiB free, the reserve is 768 MiB). `
 - `--vram-reserve MiB` (default 768) sets the VRAM the expert placement leaves free; a smaller value gives resident slots (and
   so room for guess slots) at a long context, at the cost of the margin for the driver and other programs.
 - Not done: guesses made two layers ahead (the copy rate, not the lead time, limits P: about 2.8 experts per layer fit through
-  PCIe in a layer's time), a share for the MTP block, a guess from more than the current residual stream, a P that adapts to late
-  copies, and any measurement. Check first that the greedy text with P=0 and with P=3 is the same for the
+  PCIe in a layer's time), a share for the MTP block, a guess from more than the current residual stream, and any measurement.
+- P is a ceiling: when more than a fifth of 64 layers had their guessed experts still on their way at the end of the CPU part, the
+  engine uses one guess less per layer, and three calm stretches of 64 layers in a row raise it again. The exit line prints how many
+  layers were late and how many guesses were in use at the end. Check first that the greedy text with P=0 and with P=3 is the same for the
   first tokens and that the exit line `expert prefetch: N of M entries ... from the ring` shows a sensible rate.
 - Reading the VRAM: the engine prints where the card went (K/V caches, recurrent states); the K/V caches cost about 0.011 GiB
   per 1024 cells per session.
