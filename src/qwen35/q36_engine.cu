@@ -654,6 +654,84 @@ __global__ void k_merge_cpu(float* parts, const float* cpu, const int32_t* miss,
     if (!miss[e]) return;
     for (int i = threadIdx.x; i < n; i += blockDim.x) parts[(size_t) e * n + i] = cpu[(size_t) e * n + i];
 }
+__device__ __forceinline__ float pf_warp_sum(float v) {
+    for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+    return v;
+}
+/// Expert prefetch: the next layer's router logits guessed from this layer's residual stream.  Row t of x is
+/// rms-normalised with the next layer's MoE norm weights `w`, then multiplied with that layer's router rows.
+/// grid (T), block 256, n floats of dynamic shared memory.
+__global__ void k_pf_logits(const float* x, const float* w, const float* router, int n, int ne, float eps, float* logits) {
+    extern __shared__ float hn[];
+    __shared__ float red[8];
+    const int t = blockIdx.x;
+    const float* xr = x + (size_t) t * n;
+    float s = 0.f;
+    for (int i = threadIdx.x; i < n; i += 256) s += xr[i] * xr[i];
+    s = pf_warp_sum(s);
+    if ((threadIdx.x & 31) == 0) red[threadIdx.x >> 5] = s;
+    __syncthreads();
+    float ss = 0.f;
+    for (int i = 0; i < 8; ++i) ss += red[i];
+    const float r = rsqrtf(ss / (float) n + eps);
+    for (int i = threadIdx.x; i < n; i += 256) hn[i] = xr[i] * r * w[i];
+    __syncthreads();
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    for (int e = warp; e < ne; e += 8) {
+        const float* row = router + (size_t) e * n;
+        float acc = 0.f;
+        for (int i = lane; i < n; i += 32) acc += row[i] * hn[i];
+        acc = pf_warp_sum(acc);
+        if (lane == 0) logits[(size_t) t * ne + e] = acc;
+    }
+}
+/// Expert prefetch: `pn` distinct experts out of the T rows' logits, taking the best of row 0, of row 1, ... and
+/// round again.  ids[j] is the j-th pick; slot_of (the next layer's slot table, ne entries) gets j for a pick and
+/// -1 for every other expert.  One block of 256 threads, ne <= 256.
+__global__ void k_pf_select(const float* logits, int T, int ne, int pn, int32_t* ids, int32_t* slot_of) {
+    __shared__ int chosen[256];
+    __shared__ float wv[8];
+    __shared__ int wi[8];
+    for (int e = threadIdx.x; e < 256; e += 256) chosen[e] = -1;
+    __syncthreads();
+    for (int j = 0; j < pn; ++j) {
+        const float* row = logits + (size_t) (j % T) * ne;
+        float best = -INFINITY;
+        int bi = -1;
+        for (int e = threadIdx.x; e < ne; e += 256)
+            if (chosen[e] < 0 && (bi < 0 || row[e] > best)) {
+                best = row[e];
+                bi = e;
+            }
+        for (int o = 16; o > 0; o >>= 1) {
+            const float ov = __shfl_xor_sync(0xffffffffu, best, o);
+            const int oi = __shfl_xor_sync(0xffffffffu, bi, o);
+            if (oi >= 0 && (bi < 0 || ov > best || (ov == best && oi < bi))) {
+                best = ov;
+                bi = oi;
+            }
+        }
+        if ((threadIdx.x & 31) == 0) {
+            wv[threadIdx.x >> 5] = best;
+            wi[threadIdx.x >> 5] = bi;
+        }
+        __syncthreads();
+        if (threadIdx.x == 0) {
+            float b = wv[0];
+            int bidx = wi[0];
+            for (int k = 1; k < 8; ++k)
+                if (wi[k] >= 0 && (bidx < 0 || wv[k] > b || (wv[k] == b && wi[k] < bidx))) {
+                    b = wv[k];
+                    bidx = wi[k];
+                }
+            if (bidx < 0) bidx = j;   // every expert taken: cannot happen while pn < ne
+            chosen[bidx] = j;
+            ids[j] = bidx;
+        }
+        __syncthreads();
+    }
+    for (int e = threadIdx.x; e < ne; e += 256) slot_of[e] = chosen[e];
+}
 /// The prompt attention's FP16 operand: cells [0, P) of each KV head's K or V (cache rows ctx apart) into compact
 /// [kvh][P][HD] halves.  grid1(HKV * P * HD).
 __global__ void k_kv_f16(const uint8_t* cache, __half* out, int ctx, int P, int HD, int HKV, bool q8) {
@@ -1761,6 +1839,21 @@ struct Engine {
     uint8_t* stage[2] = {};
     cudaStream_t cst = nullptr;
     cudaEvent_t ev_copy[2] = {}, ev_used[2] = {};
+    // Expert prefetch (--expert-prefetch P): while layer li's experts run, the P experts that layer li+1's router is
+    // guessed to pick (from li's residual stream) cross PCIe from the pinned arena into a ring slot, so that the GPU
+    // computes them and the CPU pool has fewer left.  Layers of the same parity share one ring; a layer's device and
+    // host slot tables hold the guesses only between the guess and the end of that layer.
+    int pf_n = 0;                          // guessed experts per layer; 0 = off
+    uint8_t* pf_ring[2] = {};              // device: pf_n blobs each (the layers' blobs point here)
+    cudaStream_t pf_st = nullptr;
+    cudaEvent_t pf_pred_ev = nullptr;      // the guess has reached pf_ids_h
+    cudaEvent_t pf_done = nullptr;         // the guessed experts have reached the card
+    float* pf_logits = nullptr;            // device [kGemmT][n_expert]
+    int32_t* pf_ids_d = nullptr;           // device [pf_n]
+    int32_t* pf_ids_h = nullptr;           // pinned [pf_n]
+    int pf_target = -1;                    // the layer whose guess is on its way to the host
+    int pf_live = -1;                      // the layer whose guessed experts are being copied or used
+    long long pf_hits = 0, pf_entries = 0; // entries computed from the ring / entries of the layers that had a guess
     struct StreamUnit { int li, e0, n; };   // a layer's experts [e0, e0 + n)
     std::vector<StreamUnit> stream_units;   // what a streamed forward copies, in order
     int mmq_group = 32;                     // experts per streamed group: the staging buffers hold this many
@@ -2081,6 +2174,18 @@ struct Engine {
         CK(cudaMemGetInfo(&fr, &tot));
         std::fprintf(stderr, "strata-q36: context %d cells, prompt chunk %d%s, %.2f GiB of VRAM free\n", ctx, tmax,
                      m->has_mtp ? ", MTP block loaded" : "", (double) fr / (1 << 30));
+        {   // where the rest of the card went: what the routed experts' VRAM slots could use is what stays free
+            size_t n_attn = m->has_mtp ? 1 : 0, n_gdn = 0;
+            for (const Layer& L : m->layers) (L.attn ? n_attn : n_gdn) += 1;
+            const double kv = 2.0 * (double) kv_bytes() * (double) n_attn * (double) n_sess;
+            const double rec = (double) m->g.ssm_v_heads * (double) m->g.ssm_state_size * (double) m->g.ssm_state_size * 4.0 *
+                               (double) n_gdn * (double) n_sess;
+            const double gib = (double) (1 << 30);
+            std::fprintf(stderr, "strata-q36: VRAM %.2f GiB in use of %.2f: the K/V caches take %.2f GiB at a context of %d "
+                         "(every %d cells %.3f GiB), the recurrent states %.2f GiB; weights, buffers and the driver the rest\n",
+                         (double) (tot - fr) / gib, (double) tot / gib, kv / gib, ctx, 1024,
+                         kv / gib / (double) ctx * 1024.0, rec / gib);
+        }
     }
 
     /// The recurrent state and the cache to a fresh sequence.
@@ -2758,6 +2863,7 @@ struct Engine {
             mm(L.wo, att, y, T);
         }
         add_rms_post(L, T);
+        if (!graph_mode) pf_predict(li, T);
         // routed experts (one token: the router and the shared expert's gate in one product, the gate its last row)
         const bool one = T == 1;
         // a decode batch of up to 8 rows takes the router and the shared expert's gate in one product too (rows of 257) when the fused
@@ -3126,6 +3232,43 @@ struct Engine {
                              cudaMemcpyHostToDevice, s));
     }
 
+    /// Expert prefetch, GPU side: right after layer li's mixer, guess layer li+1's experts from the residual stream (the
+    /// guess also fills that layer's device slot table) and bring the guess to the host.
+    void pf_predict(size_t li, int T) {
+        if (pf_n <= 0 || T > kGemmT || T > hybrid_t || li + 1 >= m->layers.size() || !lhy(li)) return;
+        const Layer& NL = m->layers[li + 1];
+        if (!lhy(li + 1) || NL.n_slots != 0 || NL.blobs == nullptr) return;
+        const int N = (int) m->g.n_embd, ne = (int) m->g.n_expert;
+        k_pf_logits<<<T, 256, (size_t) N * 4, st>>>(x, NL.post_norm, NL.router, N, ne, m->eps, pf_logits);
+        k_pf_select<<<1, 256, 0, st>>>(pf_logits, T, ne, pf_n, pf_ids_d, hy[li + 1].slot_of_d);
+        CK(cudaMemcpyAsync(pf_ids_h, pf_ids_d, (size_t) pf_n * 4, cudaMemcpyDeviceToHost, st));
+        CK(cudaEventRecord(pf_pred_ev, st));
+        pf_target = (int) li + 1;
+    }
+    /// Expert prefetch, host side: layer li's router result is here, so the guess for layer li+1 is too.  Its experts
+    /// start crossing PCIe from the pinned arena (no host work: the copies are asynchronous) while layer li's CPU part
+    /// runs, and the host slot table learns them.
+    void pf_issue(size_t li) {
+        if (pf_n <= 0) return;
+        pf_live = -1;   // layer li's own guesses are used up (the caller noted them before)
+        if (pf_target != (int) li + 1) return;
+        pf_target = -1;
+        while (cudaEventQuery(pf_pred_ev) == cudaErrorNotReady) {
+        }
+        const Layer& NL = m->layers[li + 1];
+        Hy& NH = hy[li + 1];
+        std::fill(NH.slot_of.begin(), NH.slot_of.end(), -1);
+        uint8_t* const ring = pf_ring[(li + 1) & 1];
+        for (int j = 0; j < pf_n; ++j) {
+            const int id = pf_ids_h[j];
+            if (id < 0 || id >= (int) m->g.n_expert) continue;
+            upload_expert(NL, id, ring + (size_t) j * NL.stride, pf_st);
+            NH.slot_of[(size_t) id] = j;
+        }
+        CK(cudaEventRecord(pf_done, pf_st));
+        pf_live = (int) li + 1;
+    }
+
     /// A streamed forward over the state indices `seq`: each layer's experts reach the staging buffers (two,
     /// double-buffered) in groups of `mmq_group`, the first two groups start copying now.
     void stream_begin(const std::vector<int>& seq) {
@@ -3245,8 +3388,11 @@ struct Engine {
         CK(cudaEventRecord(ev_route, st));
         group_entries(L, hy[li].slot_of_d, T);
         if (!xq_post) quant(h, N, T, xq);   // the experts' and the shared expert's input
+        const bool pf_here = pf_live == (int) li;   // this layer's guessed experts are in the ring (or on their way)
+        if (pf_here) CK(cudaStreamWaitEvent(st, pf_done, 0));
         K::native_expert_grouped(L.L, grp_ptr, grp_start, n_groups, ent_dst, ent_tok,
                                  std::min<int64_t>(n_ent, g.n_expert), n_ent, xq, escr, eparts, st);
+        if (pf_here) CK(cudaMemsetAsync(hy[li].slot_of_d, 0xFF, (size_t) g.n_expert * 4, st));   // every slot -1 again
     }
 #if defined(STRATA_Q36_CPU_POOL)
     static void cpu_relax() {
@@ -3478,6 +3624,8 @@ struct Engine {
         }
         const auto t0 = Clock::now();
         hy_wait_ms += std::chrono::duration<double, std::milli>(t0 - tw).count();
+        const bool pf_mine = pf_live == (int) li;   // this layer's guessed experts are in the ring: their entries are not the CPU's
+        pf_issue(li);                               // the next layer's guess starts crossing PCIe here
         const bool gpu_act = dev_quant(li);
         // the merge flags of the glue path travel with the rows: one upload
         int32_t* const miss = ov.glue ? reinterpret_cast<int32_t*>(cpu_out + (size_t) n_ent * N) : h_miss;
@@ -3485,6 +3633,11 @@ struct Engine {
         int n_miss;
         if (ov.glue) n_miss = build_jobs_glue(li, T, gpu_act, miss);
         else n_miss = build_jobs_classic(li, T, gpu_act, jobs, job_fmt, miss, true, &igpu_entries);
+        if (pf_mine) {   // the guesses served their layer: count the hits, then the slot table is -1 everywhere again
+            pf_entries += n_ent;
+            pf_hits += n_ent - n_miss;
+            std::fill(H.slot_of.begin(), H.slot_of.end(), -1);
+        }
         if (ov.verify && (ov.glue || gpu_act)) verify_cpu_path(li, T, gpu_act, miss);
         const int diverted = (int) igpu_entries.size();
         hy_cpu += n_miss - diverted;
@@ -4017,6 +4170,7 @@ struct Engine {
         warming = false;
         for (Hy& H : hy) std::fill(H.score.begin(), H.score.end(), 0.0);
         hy_cpu = hy_gpu = hy_igpu = hy_swaps = 0;
+        pf_hits = pf_entries = 0;
         hy_cpu_ms = hy_wait_ms = hy_prep_ms = 0;
         hy_jobs = 0;
         if (igpu) igpu->reset_stats();
@@ -4322,6 +4476,42 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
             for (Layer* L : all) part_cap = std::max(part_cap, (size_t) E.mmq_group * std::max(L->src_gsz, L->src_dsz));
             E.reader = std::make_unique<ExpertReader>(part_cap, stream_io == 1);
             for (cudaEvent_t& ev : E.ev_h2d) CK(cudaEventCreateWithFlags(&ev, cudaEventDisableTiming));
+        }
+    }
+    if (E.pf_n > 0) {   // --expert-prefetch: the ring, its stream and the guess buffers (see Engine::pf_predict)
+        size_t ring_stride = 0;
+        for (const Layer& L : m.layers) ring_stride = std::max(ring_stride, L.stride);
+        const size_t ring_bytes = (size_t) E.pf_n * ring_stride + kMmqTail;
+        size_t fr_now = 0, tot_now = 0;
+        CK(cudaMemGetInfo(&fr_now, &tot_now));
+        const char* why = nullptr;
+        if (S != 0) why = "VRAM slots are in use (--expert-slots / --expert-vram)";
+        else if (mapped) why = "the experts are mapped from the GGUF, whose pages cannot be page-locked: a copy from them blocks the host "
+                               "(use --experts pinned)";
+        else if (!pinned) why = "the pinned arena could not be allocated";
+        else if (mtp_only) why = "only the MTP block is hybrid";
+        else if (E.ov.any() || E.ov.stats || E.ov.verify) why = "an overlap switch is on";
+        else if (std::getenv("STRATA_IGPU_EXPERTS") != nullptr) why = "the iGPU share is on";
+        else if (ne > 256 || E.pf_n >= (int) ne) why = "the expert count is not what the guess kernels take";
+        else if (fr_now < 2 * ring_bytes + ((size_t) 64 << 20)) why = "not enough VRAM left for the ring";
+        if (why != nullptr) {
+            std::fprintf(stderr, "strata-q36: --expert-prefetch off: %s\n", why);
+            E.pf_n = 0;
+        } else {
+            for (int p = 0; p < 2; ++p) {
+                CK(cudaMalloc(&E.pf_ring[p], ring_bytes));
+                CK(cudaMemset(E.pf_ring[p], 0, ring_bytes));
+            }
+            for (size_t li = 0; li < m.layers.size(); ++li)
+                if (m.layers[li].n_slots == 0) m.layers[li].blobs = E.pf_ring[li & 1];
+            CK(cudaStreamCreateWithFlags(&E.pf_st, cudaStreamNonBlocking));
+            CK(cudaEventCreateWithFlags(&E.pf_pred_ev, cudaEventDisableTiming));
+            CK(cudaEventCreateWithFlags(&E.pf_done, cudaEventDisableTiming));
+            CK(cudaMalloc(&E.pf_logits, (size_t) Engine::kGemmT * (size_t) ne * 4));
+            CK(cudaMalloc(&E.pf_ids_d, (size_t) E.pf_n * 4));
+            CK(cudaHostAlloc((void**) &E.pf_ids_h, (size_t) E.pf_n * 4, cudaHostAllocDefault));
+            std::fprintf(stderr, "strata-q36: expert prefetch: %d guessed experts per layer cross PCIe ahead of the router "
+                         "(ring 2 x %.1f MiB of VRAM)\n", E.pf_n, (double) ring_bytes / (1 << 20));
         }
     }
     E.pool = std::make_unique<C::ExpertPool>(threads);
@@ -5118,7 +5308,7 @@ int strata::qwen35::run(int argc, char** argv) {
     int ctx = 32768, chunk = 0, n_gen = 64, bench_pp = 0, bench_tg = 0, mtp_d = 0, cpu_threads = 0, hybrid_rows = 128;
     double expert_vram = -1.0;
     bool warm = true;
-    int expert_slots = 0, batch = 0, draft_vocab = -1, att_scores_m = 0, mmq_group_arg = 0, ckpt_arg = 0, ckpt_token_arg = -1, cpu_experts_arg = 0;
+    int expert_slots = 0, batch = 0, draft_vocab = -1, att_scores_m = 0, mmq_group_arg = 0, ckpt_arg = 0, ckpt_token_arg = -1, cpu_experts_arg = 0, expert_prefetch_arg = -1;
     std::string ckpt_dir_arg;
     bool serve_mode = false, graph = true, vision = false, batch_mtp = false;
     for (int i = 1; i < argc; ++i) {
@@ -5160,6 +5350,7 @@ int strata::qwen35::run(int argc, char** argv) {
         else if (a == "--expert-vram") expert_vram = std::atof(next().c_str());   // GiB for the routed experts
         else if (a == "--cpu-threads") cpu_threads = std::atoi(next().c_str());
         else if (a == "--expert-slots") expert_slots = std::atoi(next().c_str());
+        else if (a == "--expert-prefetch") expert_prefetch_arg = std::atoi(next().c_str());   // guessed experts per layer copied ahead (needs --experts pinned)
         else if (a == "--hybrid-rows") hybrid_rows = std::atoi(next().c_str());
         else if (a == "--embd") {   // where the token-embedding table lives
             const std::string v = next();
@@ -5279,6 +5470,9 @@ int strata::qwen35::run(int argc, char** argv) {
     if (att_scores_m > 0) E.kAttScoreFloats = (size_t) att_scores_m << 20;
     E.ckpt_max = std::max(0, std::min(ckpt_arg, 16));
     E.cpu_experts = std::max(0, cpu_experts_arg);
+    if (expert_prefetch_arg < 0)   // no flag: the environment decides; an explicit 0 stays off
+        if (const char* pf_env = std::getenv("STRATA_Q36_EXPERT_PREFETCH")) expert_prefetch_arg = std::atoi(pf_env);
+    E.pf_n = std::max(0, std::min(expert_prefetch_arg, 8));
     E.ckpt_token = ckpt_token_arg;
     if (mmq_group_arg > 0) E.mmq_group = mmq_group_arg;
     E.init(m, ctx, chunk, batch, vision);
@@ -5316,6 +5510,10 @@ int strata::qwen35::run(int argc, char** argv) {
             std::fprintf(stderr, "strata-q36: hybrid experts: %lld of %lld batch entries on the GPU (%.1f%%), %lld on the "
                          "CPU pool in %.0f ms, %lld slot replacements\n", E.hy_gpu, n, n ? 100.0 * E.hy_gpu / n : 0.0,
                          E.hy_cpu, E.hy_cpu_ms, E.hy_swaps);
+            if (E.pf_n > 0)
+                std::fprintf(stderr, "strata-q36: expert prefetch: %lld of %lld entries of the layers that had a guess were computed "
+                             "from the ring (%.1f%%)\n", E.pf_hits, E.pf_entries,
+                             E.pf_entries ? 100.0 * (double) E.pf_hits / (double) E.pf_entries : 0.0);
             std::fprintf(stderr, "strata-q36: CPU path ms: router wait %.0f, job building %.0f, gate/up %.0f, quantize %.0f, "
                          "down %.0f; %lld expert weight sets read\n", E.hy_wait_ms, E.hy_prep_ms, E.pool->ms_multi_gu, E.pool->ms_multi_q,
                          E.pool->ms_multi_down, E.hy_jobs);

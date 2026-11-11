@@ -569,6 +569,33 @@ tools/kld_experts.py --model models/qwen3.6-35b-a3b/<served>.gguf --ref-model <q
 - Watch: the tokens per second and the drafts' acceptance in the server log, the package temperature, and the KLD table above. A
   lower K also changes the prompt pass, so the quality of long contexts and of tool calls is worth a look before it is left on.
 
+## Expert prefetch over PCIe (opt-in, written but not yet measured)
+
+The routed experts are computed by the CPU pool after the router, so during that time the GPU waits; with the usual 65536-cell
+context no expert sits in VRAM at all (0.27 GiB free, the reserve is 768 MiB). `--expert-prefetch P` (or
+`STRATA_Q36_EXPERT_PREFETCH=P`, P from 1 to 8) lets the GPU take a few of them without extra VRAM.
+
+- What it does: right after layer i's attention or recurrent block, the residual stream is normalised with layer i+1's MoE norm
+  weights and multiplied with layer i+1's router (`k_pf_logits`); the best P experts (taking the best of row 0, of row 1, ... for
+  a verify window; `k_pf_select`) are the guess. Their blobs are copied from the pinned arena to a ring of P slots on a separate copy
+  stream while layer i's experts run. When layer i+1's real router result arrives, the entries whose expert is in the ring are
+  computed by the GPU like resident experts and the CPU pool gets only the other entries. Layers of the same parity share one ring
+  (2 x P x one expert, about 9 MiB for P=3); the slot tables of a layer hold the guess only from the guess to the end of that layer.
+  The GPU result of an expert differs from the CPU result in float rounding, like a resident expert.
+- Needs: `--experts pinned` (a copy from the mapped GGUF pages blocks the calling thread for about 266 us per 1.5 MB, and
+  `cudaHostRegister` on them is refused here), no VRAM slots (`--expert-slots` or a small context that leaves room for slots), no overlap
+  switch and no iGPU share. Pinned mode keeps all 14.66 GiB of the experts page-locked in RAM. If a condition fails the engine says
+  which and runs as before.
+- Why it may pay (estimates, not measurements): an expert crosses PCIe in about 258 us (6.1 GB/s) while the CPU computes it in about
+  52 us, but the copy runs during the whole layer (about 0.7 ms per token step), so 2 to 3 experts per layer can arrive in time. If
+  80 percent of the guesses are right, the CPU part of a layer shrinks by roughly 20 to 30 percent. The printed hit rate at exit shows
+  what really happened.
+- Not done: guesses made two layers ahead, a share for the MTP block, combining with VRAM slots, a guess from more than the
+  current residual stream, and any measurement. Check first that the greedy text with P=0 and with P=3 is the same for the
+  first tokens and that the exit line `expert prefetch: N of M entries ... from the ring` shows a sensible rate.
+- Reading the VRAM: the engine prints where the card went (K/V caches, recurrent states); the K/V caches cost about 0.011 GiB
+  per 1024 cells per session.
+
 ## Overlapping the GPU and the CPU inside a step (opt-in)
 
 In the hybrid mode a layer is a chain: the GPU runs the mixer (attention or recurrent layer) and the router, the CPU pool runs
