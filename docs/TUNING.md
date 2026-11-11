@@ -909,7 +909,7 @@ Not measured (needs root, the password prompt was not answered): raw NVMe agains
 
 ## Testing the levers
 
-Five changes are meant to make the IQ4_XS file faster on this laptop without turbo, overclocking or going above 80 C. Each is
+Six changes are meant to make the IQ4_XS file faster on this laptop without turbo, overclocking or going above 80 C. Each is
 off by default, and with its switch off the engine behaves as before. `tools/lever_matrix.py` is the runner for testing them:
 it reads one definition file per lever from `tools/levers.d/*.json`, plans runs and executes them one at a time through
 `tools/quant_bench.py` with the thermal rules used for these measurements (the 2200 MHz cap, 6 workers, `STRATA_POOL_SPIN_US=0`, the 80 C
@@ -922,8 +922,9 @@ limit, a wait for the package to cool to 55 C before every run). The measurement
 | 3 | Experts split between the CPU and the Iris Xe iGPU | env `STRATA_IGPU_EXPERTS` and flag `--igpu-experts` | build with `-DSTRATA_IGPU_VULKAN=ON` | identical greedy text (or a stated numeric tolerance), then speed |
 | 4 | Fewer active experts per token | env `STRATA_Q36_EXPERTS_USED` and flag `--experts-used` | nothing | not identical by design: a quality check, then speed |
 | 5 | Dense part Q8_0 to Q6_K | a model file made by `tools/requant_dense.py` | the file (about 16.7 GiB of disk per variant) | not identical by design: perplexity against the source file, then speed |
+| 6 | Guessed experts of the next layer copied to the GPU over PCIe | flag `--expert-prefetch P` (needs `--experts pinned`) | about 15 GiB of free RAM for the page-locked experts; run with `--budget none` | not identical by design (float rounding of the GPU's experts): the first tokens of the text, then the hit rate in the engine's exit line, then speed |
 
-The names of the switches of levers 2 to 4 are the ones in their own sections of this document and in `tools/levers.d/`; where
+The names of the switches of levers 2 to 4 and 6 are the ones in their own sections of this document and in `tools/levers.d/`; where
 they differ, the definition file is the truth, and `python3 tools/lever_matrix.py list` shows what is on this machine.
 
 **The order to follow.**
@@ -963,7 +964,7 @@ the benchmark's own files. A stop signal ends the running benchmark gracefully (
 runner checks that the frequency limit files read as they did before the session, and lists any engine process left behind.
 
 **The definition files.** One JSON file per lever, loaded by name:
-`{"name", "lever": 1..5, "title", "kind": "engine" | "system" | "model-file" (default engine), "variants": [{"name", "env",
+`{"name", "lever": 1..6, "title", "kind": "engine" | "system" | "model-file" (default engine), "variants": [{"name", "env",
 "engine_args", "launcher_args", "model_file"}], "needs": {"build_option", "model_file", "root"}, "quality_check", "parity_check",
 "notes"}`. The first variant is the lever "on" (`--levers overlap`; another one is `--levers overlap:other`). `engine` levers are
 measured with the variant's `env` and `engine_args` (`launcher_args` are only printed: the benchmark harness cannot pass launcher

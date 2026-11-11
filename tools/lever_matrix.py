@@ -32,7 +32,7 @@ BASELINE_LABEL, BASELINE_AGAIN_LABEL = "baseline", "baseline_again"
 ROLE_BASELINE, ROLE_LEVER = "baseline", "lever"
 KIND_ENGINE, KIND_SYSTEM, KIND_MODEL_FILE = "engine", "system", "model-file"
 KINDS = (KIND_ENGINE, KIND_SYSTEM, KIND_MODEL_FILE)
-LEVER_NUMBERS = range(1, 6)
+LEVER_NUMBERS = range(1, 7)
 LEVER_NAME = re.compile(r"[a-z][a-z0-9_]*")
 VARIANT_NAME = re.compile(r"[A-Za-z0-9_.-]+")
 FILE_UNSAFE = re.compile(r"[^A-Za-z0-9_.+-]")
@@ -51,7 +51,7 @@ TABLE_LEGEND = ("tok/s: median of the usable measured requests; delta: against t
 
 SCHEMA_HELP = """\
 lever definitions: one JSON file per lever in the levers directory (tools/levers.d/*.json):
-  {"name": "<unique lowercase_underscores>", "lever": <1..5>, "title": "<one line>",
+  {"name": "<unique lowercase_underscores>", "lever": <1..6>, "title": "<one line>",
    "kind": "engine" | "system" | "model-file"   (optional, default "engine"),
    "variants": [{"name": "<short>", "env": {"STRATA_...": "..."}, "engine_args": ["..."], "launcher_args": ["..."],
                  "model_file": "<optional path, relative to the engine root or absolute>"}],

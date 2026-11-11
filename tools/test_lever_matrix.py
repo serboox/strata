@@ -166,7 +166,7 @@ class LoadTests(WorldCase):
             lever_matrix.load_levers(self.levers_dir)
 
     def test_bad_definitions_get_a_message_with_the_file(self):
-        cases = [({"lever": 0}, "'lever' must be an integer"), ({"lever": 6}, "'lever' must be an integer"), ({"lever": "2"}, "'lever' must be an integer"),
+        cases = [({"lever": 0}, "'lever' must be an integer"), ({"lever": 7}, "'lever' must be an integer"), ({"lever": "2"}, "'lever' must be an integer"),
                  ({"lever": True}, "'lever' must be an integer"), ({"lever": 2.0}, "'lever' must be an integer"),
                  ({"name": "Bad-Name"}, "lowercase letters"), ({"kind": "weird"}, "unknown kind 'weird'"), ({"variants": []}, "non-empty list"),
                  ({"variants": [{"name": "a", "env": {"K": 1}}]}, "strings to strings"), ({"variants": [{"name": "a:b"}]}, "the name may hold only"),
