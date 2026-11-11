@@ -61,6 +61,25 @@ class Group(NamedTuple):
     description: str
 
 
+class Target(NamedTuple):
+    """A type the Q8_0 tensors can be re-quantised to; the 256-weight K-quants all take whole rows of 256."""
+    name: str
+    type_id: int
+    block_bytes: int
+    max_spot_error: float   # the largest relative RMS error of an output row against its source row that still passes
+    ggml_name: str          # the suffix of ggml's quantize_row_<ggml_name>_ref and dequantize_row_<ggml_name>
+
+
+Q5_K_TYPE_ID = 13
+Q4_K_TYPE_ID = 12
+TARGETS = {
+    "q6_K": Target("Q6_K", Q6_K_TYPE_ID, Q6_K_BLOCK_BYTES, SPOT_CHECK_MAX_ERROR, "q6_K"),
+    "q5_K": Target("Q5_K", Q5_K_TYPE_ID, 176, 0.08, "q5_K"),
+    "q4_K": Target("Q4_K", Q4_K_TYPE_ID, 144, 0.16, "q4_K"),
+}
+DEFAULT_TARGET = TARGETS["q6_K"]
+
+
 GROUPS = {
     "attn": Group(r"^blk\.\d+\.attn_(q|k|v|output)\.weight$", "full-attention projections"),
     "ssm": Group(r"^blk\.\d+\.(attn_qkv|attn_gate|ssm_out)\.weight$", "gated delta-net projections"),
@@ -336,6 +355,20 @@ class GgmlReference:
     def dequantize_q6_k(self, blocks: np.ndarray) -> np.ndarray:
         return self._apply(self.library.dequantize_row_q6_K, blocks, (blocks.shape[0], Q6_K_BLOCK_WEIGHTS), np.float32, Q6_K_BLOCK_WEIGHTS)
 
+    def quantize_kquant(self, target: Target, values: np.ndarray) -> np.ndarray:
+        """Rows of 256 weights to the blocks of a K-quant, by ggml's own reference quantiser."""
+        function = getattr(self.library, f"quantize_row_{target.ggml_name}_ref")
+        function.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64]
+        function.restype = None
+        values = np.ascontiguousarray(values, dtype=np.float32)
+        return self._apply(function, values, (values.shape[0], target.block_bytes), np.uint8, Q6_K_BLOCK_WEIGHTS)
+
+    def dequantize_kquant(self, target: Target, blocks: np.ndarray) -> np.ndarray:
+        function = getattr(self.library, f"dequantize_row_{target.ggml_name}")
+        function.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64]
+        function.restype = None
+        return self._apply(function, blocks, (blocks.shape[0], Q6_K_BLOCK_WEIGHTS), np.float32, Q6_K_BLOCK_WEIGHTS)
+
     def quantize_q8_0(self, values: np.ndarray) -> np.ndarray:
         values = np.ascontiguousarray(values, dtype=np.float32)
         return self._apply(self.library.quantize_row_q8_0_ref, values, (values.shape[0], Q8_0_BLOCK_BYTES), np.uint8, Q8_0_BLOCK_WEIGHTS)
@@ -359,6 +392,31 @@ def load_ggml_reference() -> tuple:
     return None, "; ".join(failures)
 
 
+_GGML_REFERENCE = []
+
+
+def ggml_reference_for(target: Target) -> GgmlReference:
+    """ggml's CPU library, which the K-quants other than Q6_K are made with; stops with the reason when it is missing."""
+    if not _GGML_REFERENCE:
+        reference, reason = load_ggml_reference()
+        if reference is None:
+            raise ValueError(f"re-quantising to {target.name} needs ggml's quantiser: {reason}")
+        _GGML_REFERENCE.append(reference)
+    return _GGML_REFERENCE[0]
+
+
+def quantize_to(target: Target, values: np.ndarray) -> np.ndarray:
+    if target.type_id == Q6_K_TYPE_ID:
+        return quantize_q6_k(values)
+    return ggml_reference_for(target).quantize_kquant(target, values)
+
+
+def dequantize_from(target: Target, blocks: np.ndarray) -> np.ndarray:
+    if target.type_id == Q6_K_TYPE_ID:
+        return dequantize_q6_k(blocks)
+    return ggml_reference_for(target).dequantize_kquant(target, blocks)
+
+
 def parse_groups(text: str) -> tuple:
     names = [name.strip() for name in text.split(",") if name.strip()]
     if not names:
@@ -380,10 +438,11 @@ class TensorPlan:
     old_size: int
     new_size: int
     new_offset: int
+    target_type_id: int = Q6_K_TYPE_ID
 
     @property
     def new_type_id(self) -> int:
-        return Q6_K_TYPE_ID if self.convert else self.tensor.type_id
+        return self.target_type_id if self.convert else self.tensor.type_id
 
 
 @dataclasses.dataclass
@@ -395,9 +454,10 @@ class Plan:
     header: bytes
     data_start: int
     total_size: int
+    target: Target = DEFAULT_TARGET
 
 
-def build_plan(source: Path, groups: tuple) -> Plan:
+def build_plan(source: Path, groups: tuple, target: Target = DEFAULT_TARGET) -> Plan:
     layout = Layout(source)
     parsed = gguf_reader.GGUFFile(source)
     patterns = {name: re.compile(GROUPS[name].pattern) for name in groups}
@@ -415,8 +475,8 @@ def build_plan(source: Path, groups: tuple) -> Plan:
             kept_reason = f"kept (row length {tensor.shape[0]} is not a multiple of {Q6_K_BLOCK_WEIGHTS})"
         elif group is not None:
             convert = True
-        new_size = tensor.elements // Q6_K_BLOCK_WEIGHTS * Q6_K_BLOCK_BYTES if convert else old_size
-        entries.append(TensorPlan(tensor, group, convert, kept_reason, old_size, new_size, cursor))
+        new_size = tensor.elements // Q6_K_BLOCK_WEIGHTS * target.block_bytes if convert else old_size
+        entries.append(TensorPlan(tensor, group, convert, kept_reason, old_size, new_size, cursor, target.type_id))
         cursor = align_up(cursor + new_size, layout.alignment)
     infos = b"".join(
         pack_string(entry.tensor.name) + struct.pack("<I", len(entry.tensor.shape))
@@ -424,7 +484,7 @@ def build_plan(source: Path, groups: tuple) -> Plan:
         for entry in entries)
     header = layout.head[:layout.kv_end] + infos
     data_start = align_up(len(header), layout.alignment)
-    return Plan(source, layout, groups, entries, header, data_start, data_start + cursor)
+    return Plan(source, layout, groups, entries, header, data_start, data_start + cursor, target)
 
 
 def group_statistics(plan: Plan) -> dict:
@@ -447,7 +507,7 @@ def nearest_existing_directory(path: Path) -> Path:
 def report_plan(plan: Plan, dest: Path, out) -> bool:
     """Prints the dry-run report; returns whether the output would fit on the disk."""
     print(f"requant_dense dry run: {plan.source} -> {dest}", file=out)
-    print(f"{'group':<8}{'tensors':>8}{'Q8_0 bytes':>16}{'Q6_K bytes':>16}{'saved bytes':>16}{'saved':>8}", file=out)
+    print(f"{'group':<8}{'tensors':>8}{'Q8_0 bytes':>16}{plan.target.name + ' bytes':>16}{'saved bytes':>16}{'saved':>8}", file=out)
     statistics = group_statistics(plan)
     total_before = total_after = 0
     for name, stats in statistics.items():
@@ -513,7 +573,7 @@ def read_range(source, start: int, size: int) -> bytes:
     return data
 
 
-def requantize_tensor(source, data_start: int, entry: TensorPlan, sink: Sink, chunk_bytes: int) -> None:
+def requantize_tensor(source, data_start: int, entry: TensorPlan, sink: Sink, chunk_bytes: int, target: Target = DEFAULT_TARGET) -> None:
     tensor = entry.tensor
     row_weights = tensor.shape[0]
     rows = tensor.elements // row_weights
@@ -526,7 +586,7 @@ def requantize_tensor(source, data_start: int, entry: TensorPlan, sink: Sink, ch
         if not np.isfinite(np.ascontiguousarray(blocks[:, :2]).view("<f2")).all():
             raise ValueError(f"{tensor.name}: a Q8_0 block has a non-finite scale")
         values = dequantize_q8_0(blocks).reshape(-1, Q6_K_BLOCK_WEIGHTS)
-        sink.write(quantize_q6_k(values))
+        sink.write(quantize_to(target, values))
 
 
 def relative_rms_error(reference: np.ndarray, approximation: np.ndarray) -> float:
@@ -575,23 +635,23 @@ def spot_check_rows(plan: Plan, entry: TensorPlan, original, converted, converte
     tensor = entry.tensor
     rows = tensor.elements // tensor.shape[0]
     source_row_bytes = tensor.shape[0] // Q8_0_BLOCK_WEIGHTS * Q8_0_BLOCK_BYTES
-    new_row_bytes = tensor.shape[0] // Q6_K_BLOCK_WEIGHTS * Q6_K_BLOCK_BYTES
+    new_row_bytes = tensor.shape[0] // Q6_K_BLOCK_WEIGHTS * plan.target.block_bytes
     problems = []
     for row in sorted({0, rows - 1}):
         before = dequantize_q8_0(np.frombuffer(
             read_range(original, plan.layout.data_start + tensor.offset + row * source_row_bytes, source_row_bytes), dtype=np.uint8).reshape(-1, Q8_0_BLOCK_BYTES))
-        after = dequantize_q6_k(np.frombuffer(
-            read_range(converted, converted_data_start + entry.new_offset + row * new_row_bytes, new_row_bytes), dtype=np.uint8).reshape(-1, Q6_K_BLOCK_BYTES))
-        if relative_rms_error(before, after.reshape(before.shape)) > SPOT_CHECK_MAX_ERROR:
+        after = dequantize_from(plan.target, np.frombuffer(
+            read_range(converted, converted_data_start + entry.new_offset + row * new_row_bytes, new_row_bytes), dtype=np.uint8).reshape(-1, plan.target.block_bytes))
+        if relative_rms_error(before, after.reshape(before.shape)) > plan.target.max_spot_error:
             problems.append(f"{tensor.name}: row {row} of the output does not match the source row")
     return problems
 
 
-def convert(source: Path, dest: Path, groups: tuple, chunk_bytes: int = DEFAULT_CHUNK_MIB << 20, progress=None) -> Plan:
-    """Writes `dest`: `source` with the selected Q8_0 tensors re-quantised to Q6_K; everything else byte for byte."""
+def convert(source: Path, dest: Path, groups: tuple, chunk_bytes: int = DEFAULT_CHUNK_MIB << 20, progress=None, target: Target = DEFAULT_TARGET) -> Plan:
+    """Writes `dest`: `source` with the selected Q8_0 tensors re-quantised to `target` (Q6_K by default); everything else byte for byte."""
     if dest.exists():
         raise FileExistsError(f"{dest} already exists; remove it first")
-    plan = build_plan(source, groups)
+    plan = build_plan(source, groups, target)
     if not any(entry.convert for entry in plan.entries):
         raise ValueError(f"no tensor of {source.name} would be converted by the groups {','.join(groups)}; a plain copy is not worth the disk space")
     free = shutil.disk_usage(nearest_existing_directory(dest)).free
@@ -604,7 +664,7 @@ def convert(source: Path, dest: Path, groups: tuple, chunk_bytes: int = DEFAULT_
         with open(source, "rb") as handle:
             for position, entry in enumerate(plan.entries, start=1):
                 if entry.convert:
-                    requantize_tensor(handle, plan.layout.data_start, entry, sink, chunk_bytes)
+                    requantize_tensor(handle, plan.layout.data_start, entry, sink, chunk_bytes, target)
                 else:
                     copy_range(handle, plan.layout.data_start + entry.tensor.offset, entry.old_size, sink.write, COPY_CHUNK)
                 sink.write(bytes(align_up(entry.new_offset + entry.new_size, plan.layout.alignment) - entry.new_offset - entry.new_size))
@@ -700,11 +760,12 @@ def build_parser() -> argparse.ArgumentParser:
         f"  {ALL_GROUPS_NAME:<6}every group above\ndefault groups: {','.join(DEFAULT_GROUPS)}\n"
         "routed experts (ffn_*_exps), norms, the router and the state-space parameters are never touched.")
     parser = argparse.ArgumentParser(
-        description="Copy a GGUF file with the selected dense Q8_0 tensors re-quantised to Q6_K (about 23 % fewer bytes for those tensors).",
+        description="Copy a GGUF file with the selected dense Q8_0 tensors re-quantised to Q6_K (about 23 % fewer bytes for those tensors), or with --to to Q5_K or Q4_K.",
         epilog=epilog, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("source", metavar="SRC", nargs="?", type=Path)
     parser.add_argument("dest", metavar="DST", nargs="?", type=Path, help="must not exist; written as DST.part and renamed when checked")
     parser.add_argument("--groups", default=",".join(DEFAULT_GROUPS), help="comma-separated group names or 'all' (default: %(default)s)")
+    parser.add_argument("--to", choices=tuple(TARGETS), default="q6_K", help="the type to re-quantise to; q5_K and q4_K are made by ggml's own quantiser (the llama.cpp CPU library, see STRATA_GGML_BASE_LIB) and cost more quality for fewer bytes (default: %(default)s)")
     parser.add_argument("--dry-run", action="store_true", help="print the plan, the new size and the disk check; write nothing")
     parser.add_argument("--chunk-mib", type=float, default=DEFAULT_CHUNK_MIB, help="float32 working-set size per chunk of rows (default: %(default)s)")
     parser.add_argument("--selftest", action="store_true", help="check the quantiser against the scalar port, ggml and a round trip, and time it")
@@ -733,9 +794,9 @@ def main(argv=None) -> int:
         if args.dry_run:
             if args.dest.exists():
                 raise FileExistsError(f"{args.dest} already exists; remove it first")
-            return 0 if report_plan(build_plan(args.source, groups), args.dest, sys.stdout) else 1
+            return 0 if report_plan(build_plan(args.source, groups, TARGETS[args.to]), args.dest, sys.stdout) else 1
         started = time.monotonic()
-        plan = convert(args.source, args.dest, groups, int(args.chunk_mib * (1 << 20)), progress)
+        plan = convert(args.source, args.dest, groups, int(args.chunk_mib * (1 << 20)), progress, TARGETS[args.to])
     except (OSError, ValueError) as error:
         print(f"requant_dense: error: {error}", file=sys.stderr)
         return 1
