@@ -1857,11 +1857,12 @@ struct Engine {
     uint8_t* pf_ring[2] = {};              // device: pf_n blobs each (the layers' blobs point here)
     cudaStream_t pf_st = nullptr;
     cudaEvent_t pf_pred_ev = nullptr;      // the guess has reached pf_ids_h
+    cudaEvent_t pf_rows_ev = nullptr;      // the layer's CPU rows have been uploaded and merged on `st`: the copies start after it
     cudaEvent_t pf_done[2] = {};           // the guessed experts of a layer of that parity have reached the card
     // the number of guesses adapts to the copy speed: a layer whose guesses were still crossing PCIe when its CPU part
     // ended was late; many late layers lower the number used, a calm stretch raises it again (never above pf_n)
     int pf_use = 0, pf_seen = 0, pf_late = 0, pf_calm = 0;
-    long long pf_late_total = 0;
+    long long pf_late_total = 0, pf_observed = 0;
     float* pf_logits = nullptr;            // device [kGemmT][n_expert]
     int32_t* pf_ids_d[2] = {};             // device [pf_n]: the guess for a layer of that parity
     std::vector<int> pf_issued[2];         // host: the same ids of the layer whose guess is in use, by parity
@@ -2878,7 +2879,6 @@ struct Engine {
             mm(L.wo, att, y, T);
         }
         add_rms_post(L, T);
-        if (!graph_mode) pf_predict(li, T);
         // routed experts (one token: the router and the shared expert's gate in one product, the gate its last row)
         const bool one = T == 1;
         // a decode batch of up to 8 rows takes the router and the shared expert's gate in one product too (rows of 257) when the fused
@@ -3247,8 +3247,8 @@ struct Engine {
                              cudaMemcpyHostToDevice, s));
     }
 
-    /// Expert prefetch, GPU side: right after layer li's mixer, guess layer li+1's experts from the residual stream (the
-    /// guess also fills that layer's device slot table) and bring the guess to the host.
+    /// Expert prefetch, GPU side: once layer li's router result is on its way to the host, guess layer li+1's experts from
+    /// the residual stream (the guess also fills that layer's device slot table) and bring the guess to the host.
     void pf_predict(size_t li, int T) {
         if (pf_n <= 0 || T > kGemmT || T > hybrid_t || li + 1 >= m->layers.size() || !lhy(li)) return;
         const Layer& NL = m->layers[li + 1];
@@ -3275,6 +3275,8 @@ struct Engine {
         const Layer& NL = m->layers[li + 1];
         Hy& NH = hy[li + 1];
         uint8_t* const base = NL.blobs;   // the shared ring (no resident slots) or the layer's own blobs past its resident slots
+        CK(cudaEventRecord(pf_rows_ev, st));   // the copies must not start before the CPU rows queued on `st` have gone to the card
+        CK(cudaStreamWaitEvent(pf_st, pf_rows_ev, 0));
         pf_issued[(li + 1) & 1].assign(pf_ids_h, pf_ids_h + pf_n);
         for (int j = 0; j < pf_n; ++j) {
             const int id = pf_ids_h[j];
@@ -3286,16 +3288,21 @@ struct Engine {
         pf_live = (int) li + 1;
     }
 
-    /// Expert prefetch: the CPU part of layer li has ended; were its guesses still on their way?  Every 64 layers the number
-    /// of guesses follows: more than a fifth late lowers it, three calm stretches in a row raise it.
+    /// Expert prefetch: the CPU part of layer li has ended and its rows are about to go to the card; is the copy engine still
+    /// busy with this layer's own guesses (issued after the previous layer's rows)?  Then the rows queue behind them and the
+    /// layer is late.  Every 64 layers the number of guesses follows: more than a sixteenth late lowers it, three calm
+    /// stretches in a row raise it.
     void pf_observe(size_t li) {
         ++pf_seen;
         if (cudaEventQuery(pf_done[li & 1]) == cudaErrorNotReady) {
             ++pf_late;
             ++pf_late_total;
         }
+        if (++pf_observed % 8192 == 0)
+            std::fprintf(stderr, "strata-q36: expert prefetch so far: %lld of %lld entries from the ring (%.1f%%), %lld late layers, %d of %d guesses in use\n",
+                         pf_hits, pf_entries, pf_entries ? 100.0 * (double) pf_hits / (double) pf_entries : 0.0, pf_late_total, pf_use, pf_n);
         if (pf_seen < 64) return;
-        if (pf_late * 5 > pf_seen && pf_use > 1) {
+        if (pf_late * 16 > pf_seen && pf_use > 1) {
             --pf_use;
             pf_calm = 0;
         } else if (pf_late == 0) {
@@ -3426,6 +3433,7 @@ struct Engine {
 #endif
         CK(cudaMemcpyAsync(h_h, h, (size_t) T * N * 4, cudaMemcpyDeviceToHost, st));
         CK(cudaEventRecord(ev_route, st));
+        pf_predict(li, T);   // after the router result is on its way: the guess runs while the CPU pool works, not before the router
         group_entries(L, hy[li].slot_of_d, T);
         if (!xq_post) quant(h, N, T, xq);   // the experts' and the shared expert's input
         const bool pf_here = pf_live == (int) li;   // this layer's guessed experts are in the ring (or on their way)
@@ -3665,7 +3673,6 @@ struct Engine {
         const auto t0 = Clock::now();
         hy_wait_ms += std::chrono::duration<double, std::milli>(t0 - tw).count();
         const bool pf_mine = pf_live == (int) li;   // this layer's guessed experts are in the ring: their entries are not the CPU's
-        pf_issue(li);                               // the next layer's guess starts crossing PCIe here
         const bool gpu_act = dev_quant(li);
         // the merge flags of the glue path travel with the rows: one upload
         int32_t* const miss = ov.glue ? reinterpret_cast<int32_t*>(cpu_out + (size_t) n_ent * N) : h_miss;
@@ -3685,8 +3692,8 @@ struct Engine {
         hy_cpu += n_miss - diverted;
         hy_igpu += diverted;
         hy_gpu += n_ent - n_miss;
-        if (n_miss == 0) {   // every entry is the GPU's: the layer waits for the guessed experts to arrive
-            if (pf_mine) pf_observe(li);
+        if (n_miss == 0) {   // every entry is the GPU's: nothing to upload, the next layer's guess can start at once
+            pf_issue(li);
             return;
         }
         if (igpu) igpu->submit(li, igpu_entries.data(), (int) igpu_entries.size());
@@ -3714,6 +3721,7 @@ struct Engine {
             CK(cudaMemcpyAsync(d_miss, h_miss, (size_t) n_ent * 4, cudaMemcpyHostToDevice, st));
             k_merge_cpu<<<n_ent, kThreads, 0, st>>>(eparts, ecpu, d_miss, N);
         }
+        pf_issue(li);   // only now: the copy engine must be free when the CPU rows above go to the card, they are on the critical path
         if (ov.stats) ov_enq_ms += ms_since(te);
 #else
         (void) li;
@@ -4578,6 +4586,7 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
             }
             CK(cudaStreamCreateWithFlags(&E.pf_st, cudaStreamNonBlocking));
             CK(cudaEventCreateWithFlags(&E.pf_pred_ev, cudaEventDisableTiming));
+            CK(cudaEventCreateWithFlags(&E.pf_rows_ev, cudaEventDisableTiming));
             for (int p = 0; p < 2; ++p) CK(cudaEventCreateWithFlags(&E.pf_done[p], cudaEventDisableTiming));
             E.pf_use = E.pf_n;
             CK(cudaMalloc(&E.pf_logits, (size_t) Engine::kGemmT * (size_t) ne * 4));

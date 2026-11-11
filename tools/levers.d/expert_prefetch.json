@@ -3,12 +3,12 @@
   "lever": 6,
   "title": "Guessed experts of the next layer copied to the GPU over PCIe while the CPU computes the current layer",
   "variants": [
-    {"name": "p3", "env": {}, "engine_args": ["--experts", "pinned", "--expert-prefetch", "3"], "launcher_args": ["--expert-prefetch", "3"]},
     {"name": "p2", "env": {}, "engine_args": ["--experts", "pinned", "--expert-prefetch", "2"], "launcher_args": ["--expert-prefetch", "2"]},
-    {"name": "p5", "env": {}, "engine_args": ["--experts", "pinned", "--expert-prefetch", "5"], "launcher_args": ["--expert-prefetch", "5"]}
+    {"name": "p1", "env": {}, "engine_args": ["--experts", "pinned", "--expert-prefetch", "1"], "launcher_args": ["--expert-prefetch", "1"]},
+    {"name": "p3", "env": {}, "engine_args": ["--experts", "pinned", "--expert-prefetch", "3"], "launcher_args": ["--expert-prefetch", "3"]}
   ],
   "needs": {"build_option": "", "model_file": "the served GGUF (IQ4_XS with MTP); about 15 GiB of free RAM for the page-locked experts, so run with --budget none", "root": false},
   "quality_check": "tools/kld_experts.py (the experts a guess brings are computed on the GPU, so the only change is float rounding; a KLD near the noise floor is expected)",
-  "parity_check": "Not bit-identical by design: an expert computed on the GPU differs from the CPU in float rounding, so the greedy text may part from the baseline's after some tokens. Compare the first tokens of the answers (the runner's parity column), then read the engine log's exit line 'expert prefetch: N of M entries ... from the ring (x%); L layers were late, U of P guesses in use at the end'.",
-  "notes": "The first thing to check is the hit rate in that exit line (the share of the entries of the layers that had a guess computed from the ring) and the late layers: many late layers mean the copies do not keep up, and the engine lowers the guesses by itself. The flag --experts pinned keeps all the experts page-locked in RAM. P is a ceiling for the guesses per layer. See 'Expert prefetch over PCIe' in docs/TUNING.md."
+  "parity_check": "Not bit-identical by design: an expert computed on the GPU differs from the CPU in float rounding, so the greedy text may part from the baseline's after some tokens. Compare the first tokens of the answers (the runner's parity column), then read the engine log's lines 'expert prefetch so far: N of M entries from the ring (x%), L late layers, U of P guesses in use' (every 8192 layers).",
+  "notes": "The first thing to check is the hit rate in that log line (the share of the entries of the layers that had a guess computed from the ring) and the late layers: many late layers mean the copies do not keep up, and the engine lowers the guesses by itself. The flag --experts pinned keeps all the experts page-locked in RAM. P is a ceiling for the guesses per layer. See 'Expert prefetch over PCIe' in docs/TUNING.md."
 }

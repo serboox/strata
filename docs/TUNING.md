@@ -571,36 +571,46 @@ tools/kld_experts.py --model models/qwen3.6-35b-a3b/<served>.gguf --ref-model <q
 - Watch: the tokens per second and the drafts' acceptance in the server log, the package temperature, and the KLD table above. A
   lower K also changes the prompt pass, so the quality of long contexts and of tool calls is worth a look before it is left on.
 
-## Expert prefetch over PCIe (opt-in, written but not yet measured)
+## Expert prefetch over PCIe (opt-in)
 
 The routed experts are computed by the CPU pool after the router, so during that time the GPU waits; with the usual 65536-cell
 context no expert sits in VRAM at all (0.27 GiB free, the reserve is 768 MiB). `--expert-prefetch P` (or
 `STRATA_Q36_EXPERT_PREFETCH=P`, P from 1 to 8) lets the GPU take a few of them without extra VRAM.
 
-- What it does: right after layer i's attention or recurrent block, the residual stream is normalised with layer i+1's MoE norm
-  weights and multiplied with layer i+1's router (`k_pf_logits`); the best P experts (taking the best of row 0, of row 1, ... for
-  a verify window; `k_pf_select`) are the guess. Their blobs are copied from the pinned arena to a ring of P slots on a separate copy
-  stream while layer i's experts run. When layer i+1's real router result arrives, the entries whose expert is in the ring are
-  computed by the GPU like resident experts and the CPU pool gets only the other entries. With no resident slots (the default
-  context) layers of the same parity share one ring (2 x P x one expert, about 9 MiB for P=3); with resident slots every main
-  layer gets P guess slots after its resident ones, paid for out of the resident slots, and the guess never names an expert that
-  is resident. The slot tables of a layer hold the guess only from the guess to the end of that layer.
-  The GPU result of an expert differs from the CPU result in float rounding, like a resident expert.
+- What it does: once layer i's router result is on its way to the host, the residual stream is normalised with layer i+1's MoE
+  norm weights and multiplied with layer i+1's router (`k_pf_logits`); the best P experts (the best of row 0, of row 1, ... for a
+  verify window; `k_pf_select`) are the guess. When layer i's CPU rows have been queued for the card, the guessed experts'
+  blobs are copied from the pinned arena into a ring of P slots on a separate copy stream. When layer i+1's real router result
+  arrives, the entries whose expert is in the ring are computed by the GPU like resident experts and the CPU pool gets only the
+  other entries. With no resident slots (the default context) layers of the same parity share one ring (2 x P x one expert, 5 MiB
+  each at P=2); with resident slots every main layer gets P guess slots after its resident ones, paid for out of the resident
+  slots, and the guess never names an expert that is resident. The slot tables of a layer hold the guess only from the guess to
+  the end of that layer. The GPU result of an expert differs from the CPU result in float rounding, like a resident expert.
 - Needs: `--experts pinned` (a copy from the mapped GGUF pages blocks the calling thread for about 266 us per 1.5 MB, and
-  `cudaHostRegister` on them is refused here), no overlap switch and no iGPU share. Pinned mode keeps all 14.66 GiB of the experts page-locked in RAM. If a condition fails the engine says
-  which and runs as before.
-- Why it may pay (estimates, not measurements): an expert crosses PCIe in about 258 us (6.1 GB/s) while the CPU computes it in about
-  52 us, but the copy runs during the whole layer (about 0.7 ms per token step), so 2 to 3 experts per layer can arrive in time. If
-  80 percent of the guesses are right, the CPU part of a layer shrinks by roughly 20 to 30 percent. The printed hit rate at exit shows
-  what really happened.
+  `cudaHostRegister` on them is refused here), no overlap switch and no iGPU share. Pinned mode keeps all 14.66 GiB of the
+  experts page-locked in RAM and takes about a minute to start. If a condition fails the engine says which and runs as before.
+  The launcher takes `--expert-prefetch P`, which implies `--experts pinned`; the lever matrix has it as lever 6.
+- Measured (11 November, IQ4_XS with MTP, 2.2 GHz cap, `tools/lever_matrix.py` with `--budget none`, code and text prompts, baseline
+  before and after, 65.0 ms a step, 34.7 tok/s): P=3 gave 39.1 tok/s (+12.8 percent) and 58.6 / 59.4 ms a step on the code / text
+  prompt (-9.8 and -8.3 percent); an earlier build of the same code gave 38.4 tok/s with P=3 and 37.3 tok/s, 60.0 ms a step with P=2
+  (+7.4 percent). The drafts were accepted a little differently (0.74 against 0.635 on the code prompt with P=3), so the step time is
+  the fair measure. 16.1 percent (P=2) and 22 percent (P=3) of all expert entries came from the ring. The text parts from the
+  baseline's after 360 to 1050 characters (a float rounding flipping a close token) and stays coherent. In the benchmark mode
+  (`--bench-tg`, one row, synthetic tokens, 29.3 tok/s baseline) P=2 gave +7.5 and P=3 +4 percent (the engine settles on 2 there);
+  nearly every guess was right in that mode (97 percent), which real text does not do.
+- What went wrong first, and why the order matters: the first version queued the guess kernels before the router and the copies
+  at the start of the CPU part. The router result came late (the guess kernels ran in front of it) and the copies kept the copy
+  engine busy when the CPU rows had to go to the card, so the rows queued behind them: -32 percent at P=3. Now the guess runs
+  after the router result is queued, and the copies are queued after the CPU rows (and wait for an event behind them on the engine's
+  stream, so they cannot start first). A layer is counted late when the copy engine is still busy with its own guesses at that moment.
+- P is a ceiling: when more than a sixteenth of 64 layers were late, the engine uses one guess less per layer, and three calm
+  stretches of 64 layers in a row raise it again. The log prints `expert prefetch so far: N of M entries from the ring (x%), L
+  late layers, U of P guesses in use` every 8192 layers (and at a normal exit of the benchmark mode). P=3 had 0.4 percent late layers.
 - `--vram-reserve MiB` (default 768) sets the VRAM the expert placement leaves free; a smaller value gives resident slots (and
   so room for guess slots) at a long context, at the cost of the margin for the driver and other programs.
-- Not done: guesses made two layers ahead (the copy rate, not the lead time, limits P: about 2.8 experts per layer fit through
-  PCIe in a layer's time), a share for the MTP block, a guess from more than the current residual stream, and any measurement.
-- P is a ceiling: when more than a fifth of 64 layers had their guessed experts still on their way at the end of the CPU part, the
-  engine uses one guess less per layer, and three calm stretches of 64 layers in a row raise it again. The exit line prints how many
-  layers were late and how many guesses were in use at the end. Check first that the greedy text with P=0 and with P=3 is the same for the
-  first tokens and that the exit line `expert prefetch: N of M entries ... from the ring` shows a sensible rate.
+- Not done or not measured: P above 3, a guess made two layers ahead (the copy rate, about 2.8 experts per layer through PCIe,
+  limits P more than the lead time does), a share for the MTP block, a guess from more than the current residual stream, the
+  combination with resident slots, the quality (KLD) of the changed rounding, and the effect on long contexts.
 - Reading the VRAM: the engine prints where the card went (K/V caches, recurrent states); the K/V caches cost about 0.011 GiB
   per 1024 cells per session.
 
