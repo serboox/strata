@@ -86,6 +86,8 @@ flags switched off prints the same command as before. Not measured: how the mode
 | `--prewarm` | on | read the model file into the page cache before the server starts; skipped when the memory is not free for it; `--no-prewarm` turns it off |
 | `--prefetch` | on | read-ahead of an expert's ranges, issued only when the range is not cached |
 | `--stream-io` | direct | O_DIRECT reads for prompt chunks, so they do not push the hot experts out of the cache |
+| `--expert-prefetch` | off | P guessed experts of the next layer cross PCIe to the GPU while the CPU computes this layer (opt-in, needs the experts pinned in RAM, about 15 GiB; see "Expert prefetch over PCIe") |
+| `--vram-reserve` | 768 | MiB of VRAM the expert placement leaves free; smaller gives room for resident experts or guess slots at a long context |
 
 `STRATA_POOL_SPIN_US` (how long idle workers spin before sleeping, 20 ms by default) was tried at 100 and 300 us: no
 gain from a cool start.
@@ -579,19 +581,23 @@ context no expert sits in VRAM at all (0.27 GiB free, the reserve is 768 MiB). `
   weights and multiplied with layer i+1's router (`k_pf_logits`); the best P experts (taking the best of row 0, of row 1, ... for
   a verify window; `k_pf_select`) are the guess. Their blobs are copied from the pinned arena to a ring of P slots on a separate copy
   stream while layer i's experts run. When layer i+1's real router result arrives, the entries whose expert is in the ring are
-  computed by the GPU like resident experts and the CPU pool gets only the other entries. Layers of the same parity share one ring
-  (2 x P x one expert, about 9 MiB for P=3); the slot tables of a layer hold the guess only from the guess to the end of that layer.
+  computed by the GPU like resident experts and the CPU pool gets only the other entries. With no resident slots (the default
+  context) layers of the same parity share one ring (2 x P x one expert, about 9 MiB for P=3); with resident slots every main
+  layer gets P guess slots after its resident ones, paid for out of the resident slots, and the guess never names an expert that
+  is resident. The slot tables of a layer hold the guess only from the guess to the end of that layer.
   The GPU result of an expert differs from the CPU result in float rounding, like a resident expert.
 - Needs: `--experts pinned` (a copy from the mapped GGUF pages blocks the calling thread for about 266 us per 1.5 MB, and
-  `cudaHostRegister` on them is refused here), no VRAM slots (`--expert-slots` or a small context that leaves room for slots), no overlap
-  switch and no iGPU share. Pinned mode keeps all 14.66 GiB of the experts page-locked in RAM. If a condition fails the engine says
+  `cudaHostRegister` on them is refused here), no overlap switch and no iGPU share. Pinned mode keeps all 14.66 GiB of the experts page-locked in RAM. If a condition fails the engine says
   which and runs as before.
 - Why it may pay (estimates, not measurements): an expert crosses PCIe in about 258 us (6.1 GB/s) while the CPU computes it in about
   52 us, but the copy runs during the whole layer (about 0.7 ms per token step), so 2 to 3 experts per layer can arrive in time. If
   80 percent of the guesses are right, the CPU part of a layer shrinks by roughly 20 to 30 percent. The printed hit rate at exit shows
   what really happened.
-- Not done: guesses made two layers ahead, a share for the MTP block, combining with VRAM slots, a guess from more than the
-  current residual stream, and any measurement. Check first that the greedy text with P=0 and with P=3 is the same for the
+- `--vram-reserve MiB` (default 768) sets the VRAM the expert placement leaves free; a smaller value gives resident slots (and
+  so room for guess slots) at a long context, at the cost of the margin for the driver and other programs.
+- Not done: guesses made two layers ahead (the copy rate, not the lead time, limits P: about 2.8 experts per layer fit through
+  PCIe in a layer's time), a share for the MTP block, a guess from more than the current residual stream, a P that adapts to late
+  copies, and any measurement. Check first that the greedy text with P=0 and with P=3 is the same for the
   first tokens and that the exit line `expert prefetch: N of M entries ... from the ring` shows a sensible rate.
 - Reading the VRAM: the engine prints where the card went (K/V caches, recurrent states); the K/V caches cost about 0.011 GiB
   per 1024 cells per session.

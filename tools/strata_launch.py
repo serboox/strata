@@ -42,11 +42,18 @@ def turn_start_token() -> int:
         return -1
 
 
+MAX_EXPERT_PREFETCH = 8   # the engine takes at most this many guessed experts per layer
+
+
 def engine_args(profile: dict) -> list:
     args = ["--native", str(MODEL_FILE), "--max-context", str(profile["context"]), "--chunk", str(profile["chunk"]),
             "--mmq-group", str(profile["group"]), "--att-scores", str(profile["att_scores"]), "--kv", profile["kv"],
-            "--experts", "mapped", "--stream-io", profile["io"], "--mtp", str(profile["mtp"]), "--pool-workers",
-            str(profile["workers"])]
+            "--experts", "pinned" if profile.get("expert_prefetch") else "mapped", "--stream-io", profile["io"], "--mtp",
+            str(profile["mtp"]), "--pool-workers", str(profile["workers"])]
+    if profile.get("expert_prefetch"):
+        args += ["--expert-prefetch", str(profile["expert_prefetch"])]
+    if profile.get("vram_reserve") is not None:
+        args += ["--vram-reserve", str(profile["vram_reserve"])]
     if profile["cpu_experts"]:
         args += ["--cpu-experts", str(profile["cpu_experts"])]
     token = turn_start_token()
@@ -418,6 +425,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help=f"route every token to K experts instead of the model's {MODEL_EXPERTS_USED} (1 to {MODEL_EXPERTS_USED}): fewer expert products per "
                              "token, so a faster and cooler decode at some cost in quality, which tools/kld_experts.py measures; "
                              "default: the model's own count")
+    parser.add_argument("--expert-prefetch", type=int, default=None, metavar="P",
+                        help=f"copy P (1 to {MAX_EXPERT_PREFETCH}) guessed experts of the next layer to the GPU while the CPU computes the current layer, so the GPU "
+                             "takes part of the expert work; keeps all the experts page-locked in RAM (--experts pinned, about 15 GiB), "
+                             "see the expert prefetch section of docs/TUNING.md; default: off")
+    parser.add_argument("--vram-reserve", type=int, default=None, metavar="MIB",
+                        help="the VRAM the expert placement leaves free, in MiB (the engine's default is 768); a smaller value leaves room for "
+                             "resident experts or guess slots at a long context, with less margin for other programs")
     parser.add_argument("--turbo", choices=("off", "on", "keep"), default="off",
                         help="CPU turbo boost at start: off (default), on, or keep what it is (tools/turbo does the same on its own)")
     parser.add_argument("--priority", choices=("background", "normal"), default="background",
@@ -446,6 +460,10 @@ def main() -> int:
     if not (cpu_max_mhz == 0 or (math.isfinite(cpu_max_mhz) and MIN_MHZ <= cpu_max_mhz <= MAX_MHZ)):
         parser.error(f"--cpu-max-mhz must be 0 (off) or from {MIN_MHZ:g} to {MAX_MHZ:g} MHz, not {cpu_max_mhz:g}")
 
+    if args.expert_prefetch is not None and not 1 <= args.expert_prefetch <= MAX_EXPERT_PREFETCH:
+        parser.error(f"--expert-prefetch must be from 1 to {MAX_EXPERT_PREFETCH}, not {args.expert_prefetch}")
+    if args.vram_reserve is not None and args.vram_reserve < 0:
+        parser.error(f"--vram-reserve must not be negative, not {args.vram_reserve}")
     if args.experts_used is not None and not 1 <= args.experts_used <= MODEL_EXPERTS_USED:
         parser.error(f"--experts-used must be from 1 to {MODEL_EXPERTS_USED}, not {args.experts_used}")
 
@@ -468,6 +486,10 @@ def main() -> int:
         profile["workers"] = CAPPED_WORKERS
     if args.workers:
         profile["workers"] = args.workers
+    if args.expert_prefetch:
+        profile["expert_prefetch"] = args.expert_prefetch
+    if args.vram_reserve is not None:
+        profile["vram_reserve"] = args.vram_reserve
     for path in (ROOT / "build" / "strata-q36", MODEL_FILE):
         if not path.exists():
             sys.exit(f"strata-launch: {path} is missing (see README.md)")
@@ -507,6 +529,7 @@ def main() -> int:
           + (f", overlap {args.overlap}" if args.overlap else "")
           + (f", iGPU experts {args.igpu_experts:g}" if args.igpu_experts else "")
           + (f", experts per token {args.experts_used}" if args.experts_used is not None else "")
+          + (f", expert prefetch {args.expert_prefetch}" if args.expert_prefetch else "")
           + (f", cpu cap {cpu_max_mhz:g} MHz" if cpu_max_mhz else "") + (f", memory protection {memory_low / GIB:.1f} GiB" if memory_low else "")
           + (f", prewarm {prewarm_bytes / GIB:.1f} GiB" if prewarm_bytes else ""), file=sys.stderr)
     apply_turbo(args.turbo, args.dry_run)
