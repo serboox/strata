@@ -2166,6 +2166,7 @@ struct Engine {
         lent_alloc(field, bytes);
     }
     void lend_map(bool on) {
+        arena_map(on);
         for (auto& l : lent) {
             if (!on) {
                 CK(cudaDeviceSynchronize());
@@ -2178,6 +2179,36 @@ struct Engine {
                     std::exit(1);
                 }
             }
+        }
+    }
+    std::unique_ptr<VmmBuf> arena_vmm;                // the shared scratch region on virtual memory (STRATA_Q36_LEND)
+    size_t arena_bytes_total = 0;
+    std::vector<std::pair<size_t, size_t>> arena_decode;   // the byte ranges a decode window of kGemmT rows touches
+    /// full: every page (a prompt chunk); else only the pages the decode ranges cover, the others go back to the driver.
+    void arena_map(bool full) {
+        if (!arena_vmm) return;
+        VmmBuf& b = *arena_vmm;
+        std::vector<char> keep(b.reserved / b.gran, 0);
+        for (const auto& r : arena_decode)
+            for (size_t gi = r.first / b.gran; gi * b.gran < r.second && gi < keep.size(); ++gi) keep[gi] = 1;
+        if (!full) {
+            CK(cudaDeviceSynchronize());
+            for (size_t gi = 0; gi < keep.size(); ++gi) {
+                if (keep[gi] || !b.mapped[gi]) continue;
+                cuMemUnmap(b.base + gi * b.gran, b.gran);
+                cuMemRelease(b.handles[gi]);
+                b.mapped[gi] = 0;
+            }
+        }
+        for (size_t gi = 0; gi < keep.size(); ++gi) {
+            if ((!full && !keep[gi]) || b.mapped[gi]) continue;
+            while (!b.map(gi * b.gran, (gi + 1) * b.gran)) {
+                if (!evict_one_layer_of_slots()) {
+                    std::fprintf(stderr, "strata-q36: STRATA_Q36_LEND: no video memory for the scratch region and no expert slots left to give up\n");
+                    std::exit(1);
+                }
+            }
+            CK(cudaMemset(reinterpret_cast<void*>(b.base + gi * b.gran), 0, b.gran));
         }
     }
     bool kv_lazy = false;
@@ -2379,11 +2410,12 @@ struct Engine {
             // A GDN layer's mixer, an attention layer's mixer and the MoE block run one after another on the stream, so
             // their scratch buffers share one region, as large as the largest of the three.
             enum { kGdn, kAttn, kMoe, kFamilies };
-            struct Carve { void* dst; size_t at; };
+            struct Carve { void* dst; size_t at; size_t bytes; bool per_row; };
             std::vector<Carve> carves;
             size_t used[kFamilies] = {0, 0, 0};
-            auto carve = [&](int family, void* dst, size_t bytes) {
-                carves.push_back({dst, used[family]});
+            // per_row: the buffer's size grows with the number of rows T (a decode window of kGemmT rows needs the first kGemmT / T of it)
+            auto carve = [&](int family, void* dst, size_t bytes, bool per_row = true) {
+                carves.push_back({dst, used[family], bytes, per_row});
                 used[family] += (bytes + 255) / 256 * 256;
             };
             const size_t kF = sizeof(float), kH = sizeof(__half), HDm = (size_t) g.head_dim;
@@ -2398,8 +2430,8 @@ struct Engine {
             carve(kAttn, &gate, T * g.n_head * HDm * kF);
             carve(kAttn, &att, T * g.n_head * HDm * kF);
             carve(kAttn, &q16, T * g.n_head * HDm * kH);
-            carve(kAttn, &kv16, std::max<size_t>(4096, std::min<size_t>((size_t) ctx, (size_t) flash_min)) * HDm * kH);
-            carve(kAttn, &pacc, (size_t) att_rows * n_chunk * HDm * kF);
+            carve(kAttn, &kv16, std::max<size_t>(4096, std::min<size_t>((size_t) ctx, (size_t) flash_min)) * HDm * kH, false);
+            carve(kAttn, &pacc, (size_t) att_rows * n_chunk * HDm * kF, false);
             carve(kMoe, &eparts, T * Kp * N * kF);
             carve(kMoe, &moe_out, T * N * kF);
             for (float** p : {&sg, &su, &shh}) carve(kMoe, p, T * g.n_ff_shexp * kF);
@@ -2413,8 +2445,24 @@ struct Engine {
             }
             const size_t arena_bytes = std::max({used[kGdn], used[kAttn], used[kMoe]});
             char* arena = nullptr;
-            CK(cudaMalloc(&arena, arena_bytes));
-            CK(cudaMemset(arena, 0, arena_bytes));
+            if (lend) {   // STRATA_Q36_LEND: the tails of the row-proportional buffers get pages only while a prompt is read
+                auto buf = std::make_unique<VmmBuf>();
+                if (!buf->reserve(arena_bytes)) {
+                    std::fprintf(stderr, "strata-q36: STRATA_Q36_LEND: the address range of the scratch region could not be reserved\n");
+                    std::exit(1);
+                }
+                arena = reinterpret_cast<char*>(buf->base);
+                arena_vmm = std::move(buf);
+                arena_bytes_total = arena_bytes;
+                for (const Carve& c : carves) {
+                    const size_t need = c.per_row ? std::min(c.bytes, (c.bytes * (size_t) kGemmT + (size_t) T - 1) / (size_t) T + 4096) : c.bytes;
+                    arena_decode.push_back({c.at, c.at + need});
+                }
+                arena_map(false);
+            } else {
+                CK(cudaMalloc(&arena, arena_bytes));
+                CK(cudaMemset(arena, 0, arena_bytes));
+            }
             for (const Carve& c : carves) *(char**) c.dst = arena + c.at;
             std::fprintf(stderr, "strata-q36: scratch buffers %.0f MiB, shared by the GDN mixer, the attention mixer and the MoE block (%.0f MiB apart)\n",
                          (double) arena_bytes / (1 << 20), (double) (used[kGdn] + used[kAttn] + used[kMoe]) / (1 << 20));

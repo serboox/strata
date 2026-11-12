@@ -90,7 +90,7 @@ Every switch is off by default. The code of the items below has not been compile
 | L7 prefetch two layers ahead | guess for layer li+2 after layer li's router, three rings and three guess buffers, per-layer ready flags | `--prefetch-lead2` |
 | L1 hot experts, elastic | `--resident-experts` (16K window, 300 MiB reserve) and `--kv-lazy TIER`: K/V on CUDA virtual memory, pages mapped as the position grows (`VmmBuf`, `kv_ensure`), the experts' slots sized for the tier, whole layers of slots (with their guess slots, so also with prefetch) given up when the context outgrows it; one session | `--resident-experts`, `--kv-lazy` |
 | L9 dense GPU | the software side only: GPU clock lock (`--gpu-clocks MIN,MAX`, release with `reset`); no kernel was rewritten (they need stall data from Nsight Compute first) | `--gpu-clocks` |
-| L11 shared arena | the expert staging pair and the prompt attention score buffers (about 80 MiB) mapped only while a prompt is read (`lent_alloc`, `lend_map`); the mixer scratch region is not lent | `--lend-buffers` |
+| L11 shared arena | the expert staging pair, the prompt attention score buffers and the tails of the row-proportional mixer scratch buffers (the shared region sits on virtual memory, decode keeps only the pages of its 8 rows) are mapped only while a prompt is read (`lent_alloc`, `arena_map`) | `--lend-buffers` |
 | L13 warm guessed experts | prefetcht2 of the guessed experts' first bytes | `--warm-experts KIB` |
 | C1 strict mode | every expert on the CPU: no prefetch, no resident experts | `--strict` |
 | C2 speculative sampling | `target_distribution`, `judge_sampled`, a judge hook in `spec_step` | `--spec-sampling` |
