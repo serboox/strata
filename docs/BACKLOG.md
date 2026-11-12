@@ -2,7 +2,8 @@
 
 All gains below are estimates, not measurements, unless a line says otherwise. Several of these items were measured in November 2026;
 the results, and the follow-up checks T1 to T9, are in [TPS_REPORT.md](TPS_REPORT.md), [TPS_EXPERIMENTS.md](TPS_EXPERIMENTS.md) and
-[TPS_BACKLOG.md](TPS_BACKLOG.md). Baselines come from
+[TPS_BACKLOG.md](TPS_BACKLOG.md); the proposals that keep all 8 experts and the weights are in
+[qwen36-lossless-backlog.html](qwen36-lossless-backlog.html). Baselines come from
 [TUNING.md](TUNING.md): about 37 tok/s with greedy + MTP 2 (75 ms per step, 2.7 tokens per step), about 30 tok/s without
 drafting.
 

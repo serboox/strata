@@ -1,0 +1,819 @@
+<!doctype html>
+<html lang="en" data-lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Qwen3.6-35B-A3B at 50 to 60 tok/s: a lossless backlog</title>
+<style>
+:root{color-scheme:light;--bg:#f4f6fb;--card:#fcfcfb;--ink:#16181d;--muted:#52514e;--line:#e2e4ea;--grid:#e9eaee;--accent:#2a78d6;--soft:#eff6ff;--hero:linear-gradient(135deg,#eff6ff 0%,#f5f3ff 55%,#ecfeff 100%);--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--neu:#8a8f98;--t1:#e3eefb;--t2:#fdebe3;--t3:#e0f5ec;--warmbg:#fffbeb;--goodbg:#f0fdf4;--shadow:0 1px 2px rgba(15,23,42,.06),0 8px 24px rgba(15,23,42,.06)}
+@media (prefers-color-scheme:dark){:root{color-scheme:dark;--bg:#111110;--card:#1a1a19;--ink:#f0efec;--muted:#c3c2b7;--line:#34342f;--grid:#2b2b28;--accent:#3987e5;--soft:#1d2a3d;--hero:linear-gradient(135deg,#172338 0%,#221f38 55%,#12302f 100%);--s1:#3987e5;--s2:#d95926;--s3:#199e70;--neu:#8a8f98;--t1:#1d2a3d;--t2:#3a2318;--t3:#16332a;--warmbg:#33290f;--goodbg:#14301c;--shadow:none}}
+@media print{:root{color-scheme:light;--bg:#fff;--card:#fff;--ink:#16181d;--muted:#52514e;--line:#e2e4ea;--grid:#e9eaee;--accent:#2a78d6;--soft:#eff6ff;--hero:none;--s1:#2a78d6;--s2:#eb6834;--s3:#1baf7a;--t1:#e3eefb;--t2:#fdebe3;--t3:#e0f5ec;--warmbg:#fffbeb;--goodbg:#f0fdf4;--shadow:none}}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans","DejaVu Sans",Arial,sans-serif}
+html[data-lang="ru"] .en,html[data-lang="en"] .ru{display:none!important}
+.wrap{max-width:900px;margin:0 auto;padding:24px 16px 56px}
+header.hero{background:var(--hero);border:1px solid var(--line);border-radius:20px;padding:20px 28px 24px;box-shadow:var(--shadow)}
+h1{margin:0 0 6px;font-size:30px;line-height:1.2;letter-spacing:-.01em}
+.lead{margin:8px 0 0;color:var(--muted);max-width:74ch}
+.toggle{display:flex;width:max-content;margin:0 0 12px auto;border:1px solid var(--line);border-radius:999px;overflow:hidden;background:var(--card)}
+.toggle button{border:0;background:transparent;padding:6px 14px;font:600 13px system-ui,sans-serif;color:var(--muted);cursor:pointer}
+html[data-lang="ru"] .toggle .b-ru,html[data-lang="en"] .toggle .b-en{background:var(--accent);color:#fff}
+.cards{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:18px 0 0}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:14px 16px}
+.stat b{display:block;font-size:26px;line-height:1.15;letter-spacing:-.01em}
+.stat span{color:var(--muted);font-size:13px}
+section{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:22px 24px;margin:18px 0 0;box-shadow:var(--shadow)}
+h2{margin:0 0 8px;font-size:21px;letter-spacing:-.005em}
+h3{margin:18px 0 6px;font-size:16px}
+p{margin:8px 0}
+code{font:13.5px ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;background:var(--soft);border-radius:5px;padding:1px 5px}
+pre{background:var(--soft);border-radius:10px;padding:10px 12px;overflow-x:auto;font:13px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;margin:8px 0}
+a{color:var(--accent)}
+.chart{width:100%;height:auto;display:block;margin:10px 0 4px}
+.chart text{font-family:system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans","DejaVu Sans",Arial,sans-serif}
+.tl{font-size:12.5px;fill:var(--ink)}
+.th{font-size:13px;font-weight:700;fill:var(--ink)}
+.tk{font-size:11.5px;fill:var(--muted);font-variant-numeric:tabular-nums}
+.tv{font-size:12.5px;font-weight:600;fill:var(--ink);font-variant-numeric:tabular-nums;paint-order:stroke;stroke:var(--card);stroke-width:3px;stroke-linejoin:round}
+.ti{font-size:11.5px;font-weight:600;fill:#fff}
+.tif{font-size:11.5px;font-weight:600;fill:var(--ink)}
+.s1{fill:var(--s1)}.s2{fill:var(--s2)}.s3{fill:var(--s3)}.neu{fill:var(--neu)}
+.fr{fill:var(--card);stroke:var(--neu);stroke-width:1}
+.grid{stroke:var(--grid);stroke-width:1}
+.axis{stroke:var(--neu);stroke-width:1}
+.mark{stroke:var(--ink);stroke-width:1;opacity:.6}
+.whisk{stroke:var(--ink);stroke-width:1}
+.hitbox{fill:transparent}
+.hit{outline:none;cursor:default}
+.hit:focus-visible .hitbox{stroke:var(--accent);stroke-width:1.5}
+.dot{fill:var(--s1);stroke:var(--card);stroke-width:2}
+.bx{fill:var(--card);stroke:var(--line);stroke-width:1}
+.bx.c1{fill:var(--t1);stroke:var(--s1)}.bx.c2{fill:var(--t2);stroke:var(--s2)}.bx.c3{fill:var(--t3);stroke:var(--s3)}
+.arr{stroke:var(--muted);stroke-width:1.5;fill:none}
+.arrh{fill:var(--muted)}
+.legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:13px;color:var(--muted);margin:2px 0 8px}
+.sw{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:6px;vertical-align:-1px}
+.sw.a{background:var(--s1)}.sw.b{background:var(--s2)}.sw.c{background:var(--s3)}.sw.n{background:var(--neu)}.sw.f{background:var(--card);border:1px solid var(--neu)}
+table.data{width:100%;border-collapse:collapse;font-size:14px;margin:8px 0}
+table.data th{text-align:left;color:var(--muted);font-weight:600;border-bottom:1px solid var(--line);padding:6px 8px;vertical-align:bottom}
+table.data td{padding:6px 8px;border-bottom:1px solid var(--grid);vertical-align:top}
+table.data .n{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+.scroll{overflow-x:auto}
+.note{font-size:13.5px;color:var(--muted)}
+.callout{border-left:4px solid var(--accent);background:var(--soft);border-radius:0 12px 12px 0;padding:10px 14px;margin:12px 0}
+.callout.warm{border-color:#f59e0b;background:var(--warmbg)}
+.callout.good{border-color:#16a34a;background:var(--goodbg)}
+ul,ol{margin:6px 0 6px 20px;padding:0}
+li{margin:3px 0}
+.tag{display:inline-block;font:600 11.5px system-ui,sans-serif;padding:1px 8px;border-radius:999px;border:1px solid var(--line);color:var(--muted);white-space:nowrap;vertical-align:1px}
+.tag.m{border-color:var(--s3)}.tag.e{border-color:var(--s2)}
+.item{border:1px solid var(--line);border-radius:14px;padding:14px 16px;margin:14px 0}
+.item h3{margin:0 0 4px;font-size:17px}
+.item .meta{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 8px}
+.item dl{margin:0}
+.item dt{font-weight:700;font-size:13.5px;margin-top:8px;color:var(--muted)}
+.item dd{margin:2px 0 0}
+details{margin:8px 0}
+summary{cursor:pointer;color:var(--accent);font-size:14px}
+#tip{position:fixed;pointer-events:none;background:var(--ink);color:var(--card);padding:6px 9px;border-radius:8px;font-size:12.5px;line-height:1.35;max-width:330px;display:none;z-index:9}
+footer{margin-top:22px;color:var(--muted);font-size:13px}
+@media (max-width:700px){.cards{grid-template-columns:1fr 1fr}h1{font-size:24px}header.hero{padding:20px 18px}section{padding:18px 16px}}
+@media print{
+  @page{size:A4;margin:11mm}
+  body{font-size:12.5px}
+  .toggle,#tip{display:none}
+  .wrap{max-width:none;padding:0}
+  .chart,.callout,.stat,tr,pre{break-inside:avoid}
+  h2,h3,dt{break-after:avoid}
+  section{margin-top:12px;padding:16px 18px}
+  h1{font-size:25px}
+  table.data{font-size:11.5px}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <div class="toggle" role="group" aria-label="language"><button class="b-en" data-l="en">EN</button><button class="b-ru" data-l="ru">RU</button></div>
+  <h1><span class="en">Qwen3.6-35B-A3B at 50 to 60 tokens per second: a lossless backlog</span><span class="ru">Qwen3.6-35B-A3B на 50–60 токенов в секунду: бэклог без потерь</span></h1>
+  <p class="lead en">What the measurements of November 2026 say about this laptop, where the time of a decode step goes, and which software changes can raise the speed with all 8 experts, the weights as they are in the file and the same model, while the system stays below 80 °C. The proposals are ordered by how likely they are to pay.</p>
+  <p class="lead ru">Что говорят замеры ноября 2026 года об этом ноутбуке, куда уходит время шага декодирования и какие программные изменения могут поднять скорость при всех 8 экспертах, с весами как в файле и с той же моделью, пока система остаётся ниже 80 °C. Предложения упорядочены по вероятности выигрыша.</p>
+  <div class="cards">
+    <div class="stat"><b>35</b><span class="en">tok/s today: 8 experts, original weights, 65 ms a step (measured)</span><span class="ru">ток/с сегодня: 8 экспертов, исходные веса, 65 мс на шаг (замер)</span></div>
+    <div class="stat"><b>44.8</b><span class="en">tok/s: the best measured figure inside the limits (16K window, hot experts in VRAM, prefetch)</span><span class="ru">ток/с: лучший замер в рамках ограничений (окно 16K, горячие эксперты в VRAM, prefetch)</span></div>
+    <div class="stat"><b>≈ 50</b><span class="en">tok/s projected with the top items at a short context; odds about 3 in 5 (estimate)</span><span class="ru">ток/с по расчёту с верхними пунктами на коротком контексте; шансы около 3 из 5 (оценка)</span></div>
+    <div class="stat"><b>≈ 60</b><span class="en">tok/s only if the drafting items land as well; odds about 1 in 5 (estimate)</span><span class="ru">ток/с только если сработают и пункты про черновики; шансы около 1 из 5 (оценка)</span></div>
+  </div>
+</header>
+
+<section id="rules">
+  <h2><span class="en">1. The question and the limits</span><span class="ru">1. Вопрос и ограничения</span></h2>
+  <p class="en">The question: how fast can Qwen3.6-35B-A3B decode on this laptop when only software changes? The limits were set by the owner:</p>
+  <p class="ru">Вопрос: насколько быстро Qwen3.6-35B-A3B может декодировать на этом ноутбуке, если менять только программную часть? Ограничения задал владелец:</p>
+  <ul class="en">
+    <li>the same model, no replacement;</li>
+    <li>all 8 experts per token, as the model was trained;</li>
+    <li>the weights as they are in the file: no coarser quantisation of the experts or of the dense part;</li>
+    <li>software only: no hardware change, no overclocking, the turbo boost stays off;</li>
+    <li>the CPU package and the GPU stay below 80 °C;</li>
+    <li>targets: 50 tok/s, better 60.</li>
+  </ul>
+  <ul class="ru">
+    <li>та же модель, без замены;</li>
+    <li>все 8 экспертов на токен, как модель обучалась;</li>
+    <li>веса как в файле: без более грубой квантизации экспертов или плотной части;</li>
+    <li>только программно: без изменений железа, без разгона, турбо-буст выключен;</li>
+    <li>пакет CPU и GPU остаются ниже 80 °C;</li>
+    <li>цели: 50 ток/с, лучше 60.</li>
+  </ul>
+  <p class="en">Every number in this document carries one of two marks: <span class="tag m">measured</span> comes from the project's own records (<code>docs/TPS_REPORT.md</code>, <code>docs/TPS_EXPERIMENTS.md</code>, <code>docs/TUNING.md</code>) or from this machine on 12 November 2026; <span class="tag e">estimate</span> is arithmetic on measured parts and names its assumptions. Nothing was benchmarked for this document.</p>
+  <p class="ru">Каждое число в документе имеет одну из двух пометок: <span class="tag m">замер</span> взят из записей самого проекта (<code>docs/TPS_REPORT.md</code>, <code>docs/TPS_EXPERIMENTS.md</code>, <code>docs/TUNING.md</code>) или снят с этой машины 12 ноября 2026 года; <span class="tag e">оценка</span> — это арифметика на измеренных частях с названными допущениями. Для этого документа ничего не бенчмаркалось.</p>
+  <h3><span class="en">Three classes of "the output does not change"</span><span class="ru">Три класса «выход не меняется»</span></h3>
+  <div class="scroll"><table class="data">
+    <tr><th><span class="en">Class</span><span class="ru">Класс</span></th><th><span class="en">What it means</span><span class="ru">Что это значит</span></th><th><span class="en">Items</span><span class="ru">Пункты</span></th></tr>
+    <tr><td><b><span class="en">Bit-exact</span><span class="ru">Бит-в-бит</span></b></td><td><span class="en">The same numbers as today; the same text for a greedy request.</span><span class="ru">Те же числа, что сегодня; тот же текст для жадного запроса.</span></td><td>L2, L3, L6, L9, L10, L12, L13, L14</td></tr>
+    <tr><td><b><span class="en">Drafts only</span><span class="ru">Только черновики</span></b></td><td><span class="en">Only the proposed tokens change. The main model still decides every token, so the text is the same.</span><span class="ru">Меняются только предлагаемые токены. Каждый токен по-прежнему решает основная модель, текст тот же.</span></td><td>L4, L5, L8</td></tr>
+    <tr><td><b><span class="en">Rounding level</span><span class="ru">Уровень округления</span></b></td><td><span class="en">The weights and the routing are the same, but an expert computed on the GPU rounds its activations in blocks of 32 where the CPU uses blocks of 256. Mean KLD about 0.005 (7 experts cost 0.025). The prefetch of today's default stack is already of this class; item C1 makes it bit-exact.</span><span class="ru">Веса и маршрутизация те же, но эксперт, посчитанный на GPU, округляет активации блоками по 32, а CPU — блоками по 256. Средняя KLD около 0,005 (7 экспертов стоят 0,025). Prefetch сегодняшнего стека по умолчанию уже относится к этому классу; пункт C1 делает его бит-в-бит.</span></td><td>L1, L7, L11</td></tr>
+  </table></div>
+</section>
+
+<section id="verdict">
+  <h2><span class="en">2. The short answer</span><span class="ru">2. Короткий ответ</span></h2>
+  <ol class="en">
+    <li><b>Today:</b> 35 tok/s with the unchanged model (65 ms a step, 2.27 tokens a step). The best figure measured inside the limits is 44.8 tok/s: a 16K window, hot experts in the free VRAM, prefetch 3.</li>
+    <li><b>The CPU phase is not limited by memory.</b> It reads 17 GB/s of the 52 to 54 GB/s that the RAM gives. It is limited by the instructions that decode the IQ3_S matrices, and by heat. Cheaper cycles are worth more here than fewer bytes.</li>
+    <li><b>The machine sits at its thermal balance,</b> so tokens per second are close to (watts the cooler removes) divided by (joules per token). Work that only moves in time does not help; work that disappears does.</li>
+    <li><b>Three items carry most of the expected gain:</b> L1 (hot experts in the VRAM that an unfilled context does not use), L3 (an exact 4-bit repack of the IQ3_S gate and up matrices), L4 (a cheap head for the drafts). With the prefetch that already exists they project to about 50 tok/s at a short or medium context.</li>
+    <li><b>60 tok/s</b> needs the drafting items (L4, L5) to land as well, and a context fill below about 16K tokens. When the 64K window is nearly full, L1 gives nothing and the attention costs more: the same items then project to about 37 tok/s, about 43 with L10.</li>
+  </ol>
+  <ol class="ru">
+    <li><b>Сегодня:</b> 35 ток/с с неизменённой моделью (65 мс на шаг, 2,27 токена за шаг). Лучший замер в рамках ограничений — 44,8 ток/с: окно 16K, горячие эксперты в свободной VRAM, prefetch 3.</li>
+    <li><b>Фаза CPU не упирается в память.</b> Она читает 17 ГБ/с из 52–54 ГБ/с, которые даёт RAM. Её ограничивают инструкции декодирования матриц IQ3_S и тепло. Здесь дешёвые такты ценнее, чем меньшее число байт.</li>
+    <li><b>Машина стоит на тепловом равновесии,</b> поэтому токены в секунду близки к (ватты, которые отводит охлаждение), делённым на (джоули на токен). Работа, которая только сдвигается во времени, не помогает; помогает работа, которая исчезает.</li>
+    <li><b>Основной ожидаемый выигрыш дают три пункта:</b> L1 (горячие эксперты в VRAM, которую не занимает незаполненный контекст), L3 (точная 4-битная перепаковка матриц gate и up из IQ3_S), L4 (дешёвая голова для черновиков). Вместе с уже существующим prefetch расчёт даёт около 50 ток/с на коротком или среднем контексте.</li>
+    <li><b>60 ток/с</b> требуют, чтобы сработали и пункты про черновики (L4, L5), и заполнения контекста ниже примерно 16K токенов. Когда окно 64K почти заполнено, L1 не даёт ничего, а внимание стоит дороже: те же пункты дают по расчёту около 37 ток/с, около 43 с L10.</li>
+  </ol>
+</section>
+
+<section id="machine">
+  <h2><span class="en">3. The machine</span><span class="ru">3. Машина</span></h2>
+  <p class="en">Read from the machine on 12 November 2026 (<code>lscpu</code>, DMI, sysfs, <code>nvidia-smi</code>); the speeds are the project's own measurements.</p>
+  <p class="ru">Снято с машины 12 ноября 2026 года (<code>lscpu</code>, DMI, sysfs, <code>nvidia-smi</code>); скорости — замеры самого проекта.</p>
+  <div id="d-hw"></div>
+  <div class="scroll"><table class="data">
+    <tr><th><span class="en">Part</span><span class="ru">Узел</span></th><th><span class="en">What it is</span><span class="ru">Что это</span></th><th><span class="en">What it means for the engine</span><span class="ru">Что это значит для движка</span></th></tr>
+    <tr><td>CPU</td><td><span class="en">Intel Core i7-11370H, 4 cores and 8 threads; AVX-512 with VNNI, VBMI, VBMI2, BITALG, GFNI; L2 1.25 MiB per core, L3 12 MiB</span><span class="ru">Intel Core i7-11370H, 4 ядра и 8 потоков; AVX-512 с VNNI, VBMI, VBMI2, BITALG, GFNI; L2 1,25 МиБ на ядро, L3 12 МиБ</span></td><td><span class="en">The 512-bit kernels use two execution ports of a core, and the two threads of a core share them: 6 workers gave about 9% more than 4 at the same cap. An expert (1.5 MB) does not fit in L2.</span><span class="ru">512-битные ядра используют два порта исполнения ядра процессора, и два потока одного ядра их делят: 6 рабочих потоков дали примерно на 9% больше, чем 4, при том же потолке. Эксперт (1,5 МБ) не помещается в L2.</span></td></tr>
+    <tr><td><span class="en">Frequency</span><span class="ru">Частота</span></td><td><span class="en">3.3 GHz without turbo (4.8 with it); turbo off at boot; the server holds a cap of 2.1 GHz (2.2 in the benchmarks)</span><span class="ru">3,3 ГГц без турбо (4,8 с ним); турбо выключен при загрузке; сервер держит потолок 2,1 ГГц (2,2 в бенчмарках)</span></td><td><span class="en">The cap is the thermal balance point: above it the 80 °C governor starts to pause the engine.</span><span class="ru">Потолок — точка теплового равновесия: выше него регулятор 80 °C начинает приостанавливать движок.</span></td></tr>
+    <tr><td><span class="en">Power</span><span class="ru">Питание</span></td><td><span class="en">RAPL PL1 40 W (64 s window), PL2 64 W; platform profile <code>balanced</code> (the firmware also lists <code>low-power</code>, <code>balanced-performance</code>, <code>performance</code>)</span><span class="ru">RAPL PL1 40 Вт (окно 64 с), PL2 64 Вт; профиль платформы <code>balanced</code> (прошивка также перечисляет <code>low-power</code>, <code>balanced-performance</code>, <code>performance</code>)</span></td><td><span class="en">The power limit is not what stops the machine: the cooler gives up first. The expert kernel draws 16 to 18 W on 4 threads at 2.2 GHz, and the package is then already near 78 °C.</span><span class="ru">Машину останавливает не лимит мощности: раньше сдаётся охлаждение. Ядро экспертов потребляет 16–18 Вт на 4 потоках при 2,2 ГГц, и пакет при этом уже около 78 °C.</span></td></tr>
+    <tr><td>RAM</td><td><span class="en">32 GiB: 8 × 4 GiB of soldered LPDDR4 at 4267 MT/s. Read speed 18 / 34 / 47 / 54 GB/s with 1 / 2 / 3 / 4 threads</span><span class="ru">32 ГиБ: 8 × 4 ГиБ распаянной LPDDR4 на 4267 МТ/с. Скорость чтения 18 / 34 / 47 / 54 ГБ/с при 1 / 2 / 3 / 4 потоках</span></td><td><span class="en">Holds the routed experts (14.66 GiB). The experiment ledger called it DDR5; that line is corrected together with this document.</span><span class="ru">Хранит маршрутизируемых экспертов (14,66 ГиБ). Журнал экспериментов называл её DDR5; эта строка исправлена вместе с этим документом.</span></td></tr>
+    <tr><td>GPU</td><td><span class="en">NVIDIA GeForce RTX 3050 Ti Laptop, 4096 MiB, 20 SMs; VRAM read 172 GB/s; driver 580.178, CUDA 13.2</span><span class="ru">NVIDIA GeForce RTX 3050 Ti Laptop, 4096 МиБ, 20 SM; чтение VRAM 172 ГБ/с; драйвер 580.178, CUDA 13.2</span></td><td><span class="en">Holds the dense weights and the K/V cache; runs the mixers, the router, the shared expert and the output matrix.</span><span class="ru">Хранит плотные веса и кэш K/V; считает миксеры, роутер, общего эксперта и выходную матрицу.</span></td></tr>
+    <tr><td>PCIe</td><td><span class="en">Gen 4, 4 lanes; a pinned host-to-device copy runs at 6.1 GB/s (258 µs per 1.5 MB expert)</span><span class="ru">Gen 4, 4 линии; копия из закреплённой памяти идёт на 6,1 ГБ/с (258 мкс на эксперта в 1,5 МБ)</span></td><td><span class="en">About 2.8 experts per layer can cross to the GPU during a decode token; the CPU computes one in 52 µs.</span><span class="ru">За токен декодирования на GPU успевает перейти около 2,8 эксперта на слой; CPU считает одного за 52 мкс.</span></td></tr>
+    <tr><td><span class="en">Cooling</span><span class="ru">Охлаждение</span></td><td><span class="en">One cooler for the CPU and the GPU; the fan sensors read 0 and the OS has no fan control; at 2.2 GHz and 6 workers the package holds 77 to 79 °C</span><span class="ru">Одно охлаждение на CPU и GPU; датчики вентиляторов показывают 0, управления вентиляторами из ОС нет; при 2,2 ГГц и 6 рабочих потоках пакет держит 77–79 °C</span></td><td><span class="en">Heat is one shared budget: work moved to the GPU also warms the CPU side (the stack ran 3 °C hotter at the same cap).</span><span class="ru">Тепло — один общий бюджет: работа, перенесённая на GPU, греет и сторону CPU (стек шёл на 3 °C горячее при том же потолке).</span></td></tr>
+    <tr><td><span class="en">Other</span><span class="ru">Прочее</span></td><td><span class="en">Iris Xe integrated GPU; NVMe SSD at 3.4 GB/s; Fedora 43, kernel 7.2, GCC 15.3</span><span class="ru">Встроенный GPU Iris Xe; NVMe SSD на 3,4 ГБ/с; Fedora 43, ядро 7.2, GCC 15.3</span></td><td><span class="en">The integrated GPU shares the RAM and the heat budget: every test with it lost 48 to 66%.</span><span class="ru">Встроенный GPU делит RAM и тепловой бюджет: каждый тест с ним терял 48–66%.</span></td></tr>
+  </table></div>
+</section>
+
+<section id="model">
+  <h2><span class="en">4. The model and its file</span><span class="ru">4. Модель и её файл</span></h2>
+  <p class="en">Qwen3.6-35B-A3B (released in April 2026, Apache-2.0) is a mixture-of-experts model: about 35 billion parameters, about 3 billion active for one token. The architecture numbers below are from the model's <code>config.json</code>.</p>
+  <p class="ru">Qwen3.6-35B-A3B (вышла в апреле 2026 года, Apache-2.0) — модель типа «смесь экспертов»: около 35 миллиардов параметров, около 3 миллиардов активны на один токен. Числа архитектуры ниже взяты из <code>config.json</code> модели.</p>
+  <div id="d-model"></div>
+  <div class="scroll"><table class="data">
+    <tr><th><span class="en">Property</span><span class="ru">Свойство</span></th><th><span class="en">Value</span><span class="ru">Значение</span></th></tr>
+    <tr><td><span class="en">Layers</span><span class="ru">Слои</span></td><td><span class="en">40: ten groups of 3 Gated DeltaNet layers (linear attention with a recurrent state) and 1 full-attention layer; hidden size 2048</span><span class="ru">40: десять групп из 3 слоёв Gated DeltaNet (линейное внимание с рекуррентным состоянием) и 1 слоя полного внимания; размер скрытого слоя 2048</span></td></tr>
+    <tr><td><span class="en">Full attention</span><span class="ru">Полное внимание</span></td><td><span class="en">16 query heads, 2 key/value heads of 256; the K/V cache costs 11,968 bytes per token in q8</span><span class="ru">16 голов запроса, 2 головы ключ/значение по 256; кэш K/V стоит 11 968 байт на токен в q8</span></td></tr>
+    <tr><td><span class="en">Experts</span><span class="ru">Эксперты</span></td><td><span class="en">256 routed experts in every layer, 8 per token, plus 1 shared expert. An expert is three matrices: gate and up (512 × 2048) and down (2048 × 512). 10,240 routed experts hold 32.2 of the 35 billion parameters</span><span class="ru">256 маршрутизируемых экспертов в каждом слое, 8 на токен, плюс 1 общий эксперт. Эксперт — три матрицы: gate и up (512 × 2048) и down (2048 × 512). 10 240 маршрутизируемых экспертов содержат 32,2 из 35 миллиардов параметров</span></td></tr>
+    <tr><td><span class="en">Output</span><span class="ru">Выход</span></td><td><span class="en">Vocabulary 248,320; the output matrix is separate from the embedding table</span><span class="ru">Словарь 248 320; выходная матрица отдельна от таблицы эмбеддингов</span></td></tr>
+    <tr><td>MTP</td><td><span class="en">One extra block that predicts the token after the next one; the engine chains it for a second draft</span><span class="ru">Один дополнительный блок, предсказывающий токен через один; движок вызывает его по цепочке для второго черновика</span></td></tr>
+    <tr><td><span class="en">Context</span><span class="ru">Контекст</span></td><td><span class="en">262,144 tokens natively; 65,536 is the engine's default on this card</span><span class="ru">262 144 токена изначально; 65 536 — значение движка по умолчанию на этой карте</span></td></tr>
+    <tr><td><span class="en">Sampling</span><span class="ru">Сэмплирование</span></td><td><span class="en">The model card recommends temperature 0.6 to 1.0, top-p 0.8 to 0.95, top-k 20. The launcher decodes greedily by default, and the drafts work only for greedy requests (item C2)</span><span class="ru">Карточка модели рекомендует температуру 0,6–1,0, top-p 0,8–0,95, top-k 20. Лаунчер по умолчанию декодирует жадно, и черновики работают только для жадных запросов (пункт C2)</span></td></tr>
+    <tr><td><span class="en">The file</span><span class="ru">Файл</span></td><td><span class="en"><code>UD-IQ4_XS</code> with the MTP block grafted in. Routed experts: 14.66 GiB in RAM, gate and up in IQ3_S (3.44 bits per weight, 8.59 GiB), down mostly in IQ4_XS (4.25 bits). Dense part: Q8_0, about 2.1 GiB read by the GPU in every step. Output matrix: Q6_K, 417 MB. The embedding table stays in host memory</span><span class="ru"><code>UD-IQ4_XS</code> с привитым блоком MTP. Маршрутизируемые эксперты: 14,66 ГиБ в RAM, gate и up в IQ3_S (3,44 бита на вес, 8,59 ГиБ), down в основном в IQ4_XS (4,25 бита). Плотная часть: Q8_0, около 2,1 ГиБ читается GPU на каждом шаге. Выходная матрица: Q6_K, 417 МБ. Таблица эмбеддингов остаётся в памяти хоста</span></td></tr>
+  </table></div>
+</section>
+
+<section id="step">
+  <h2><span class="en">5. One decode step, 65 milliseconds</span><span class="ru">5. Один шаг декодирования, 65 миллисекунд</span></h2>
+  <p class="en">With MTP a step checks 3 rows (the next token and 2 drafts) and keeps 2.27 tokens on average. Read from <code>spec_step</code> in <code>src/qwen35/q36_engine.cu</code>:</p>
+  <p class="ru">С MTP шаг проверяет 3 строки (следующий токен и 2 черновика) и в среднем оставляет 2,27 токена. Прочитано в <code>spec_step</code> в <code>src/qwen35/q36_engine.cu</code>:</p>
+  <ol class="en">
+    <li><b>Draft 1.</b> The MTP block runs over the rows it must redo and the new token; then a full pass over the output matrix picks the draft.</li>
+    <li><b>Draft 2.</b> The block runs again on its own output; another full pass over the output matrix. The pick travels to the host and back between the two drafts.</li>
+    <li><b>The verify window.</b> 3 rows go through the 40 layers. In each layer the GPU runs the mixer and the router, then waits while the CPU pool computes the routed experts, then merges the result.</li>
+    <li><b>The decision.</b> One more pass over the output matrix for the 3 rows; the drafts that match are kept; the recurrent state is committed.</li>
+  </ol>
+  <ol class="ru">
+    <li><b>Черновик 1.</b> Блок MTP проходит по строкам, которые нужно пересчитать, и по новому токену; затем полный проход по выходной матрице выбирает черновик.</li>
+    <li><b>Черновик 2.</b> Блок запускается снова на собственном выходе; ещё один полный проход по выходной матрице. Между двумя черновиками выбранный токен идёт на хост и обратно.</li>
+    <li><b>Окно проверки.</b> 3 строки проходят через 40 слоёв. В каждом слое GPU считает миксер и роутер, затем ждёт, пока пул CPU посчитает маршрутизируемых экспертов, затем сливает результат.</li>
+    <li><b>Решение.</b> Ещё один проход по выходной матрице для 3 строк; совпавшие черновики остаются; рекуррентное состояние фиксируется.</li>
+  </ol>
+  <div id="c-timeline"></div>
+  <div class="legend"><span><i class="sw a"></i><span class="en">GPU: mixer and router, 0.35 ms a layer</span><span class="ru">GPU: миксер и роутер, 0,35 мс на слой</span></span><span><i class="sw b"></i><span class="en">CPU pool: routed experts, about 1.0 ms a layer</span><span class="ru">пул CPU: маршрутизируемые эксперты, около 1,0 мс на слой</span></span><span><i class="sw c"></i><span class="en">drafts, output matrix, commit</span><span class="ru">черновики, выходная матрица, фиксация</span></span></div>
+  <p class="note en">The split is the engine's own step line of 4 November (GPU wait 14, host glue 2, CPU pool 40, the rest 12 of 70 ms), scaled to today's 65 ms <span class="tag m">measured</span>. The width of the drafts inside "the rest" is an estimate.</p>
+  <p class="note ru">Разбивка — собственная строка шага движка от 4 ноября (ожидание GPU 14, склейка на хосте 2, пул CPU 40, остальное 12 из 70 мс), приведённая к сегодняшним 65 мс <span class="tag m">замер</span>. Ширина черновиков внутри «остального» — оценка.</p>
+  <h3><span class="en">Five facts that decide the backlog</span><span class="ru">Пять фактов, которые определяют бэклог</span></h3>
+  <ul class="en">
+    <li><b>The rows of a window share experts.</b> A layer has 24 expert entries (3 rows × 8) that hit 11.4 distinct experts. An expert's weights are decoded once and multiplied by 2.1 rows on average. <span class="tag m">measured</span></li>
+    <li><b>The pool is bound by instructions.</b> It reads 0.68 GB in about 39 ms: 17 GB/s of the 52 to 54 GB/s available. A 256-weight block of the IQ3_S gate/up kernel costs 34.5 cycles, of the IQ4_XS down kernel 13.7. <span class="tag m">measured</span></li>
+    <li><b>The output matrix is read three times a step:</b> twice for the drafts and once for the verify rows, 417 MB each time (code reading; about 2.9 ms a pass at the card's read speed <span class="tag e">estimate</span>).</li>
+    <li><b>An extra verify row costs the CPU 16 to 21 ms</b> <span class="tag m">measured</span>. This is why 3 drafts were slower than 2 and why n-gram drafts did not pay.</li>
+    <li><b>No routed expert lives in VRAM at the default window:</b> 0.27 GiB is free and 768 MiB is kept as a fixed reserve. <span class="tag m">measured</span></li>
+  </ul>
+  <ul class="ru">
+    <li><b>Строки окна делят экспертов.</b> В слое 24 обращения к экспертам (3 строки × 8), которые попадают в 11,4 разных эксперта. Веса эксперта декодируются один раз и умножаются в среднем на 2,1 строки. <span class="tag m">замер</span></li>
+    <li><b>Пул упирается в инструкции.</b> Он читает 0,68 ГБ примерно за 39 мс: 17 ГБ/с из доступных 52–54 ГБ/с. Блок из 256 весов в ядре IQ3_S gate/up стоит 34,5 такта, в ядре IQ4_XS down — 13,7. <span class="tag m">замер</span></li>
+    <li><b>Выходная матрица читается трижды за шаг:</b> дважды для черновиков и один раз для строк проверки, по 417 МБ каждый раз (чтение кода; около 2,9 мс на проход при скорости чтения карты <span class="tag e">оценка</span>).</li>
+    <li><b>Лишняя строка проверки стоит CPU 16–21 мс</b> <span class="tag m">замер</span>. Поэтому 3 черновика были медленнее 2, а n-граммные черновики не окупались.</li>
+    <li><b>При окне по умолчанию ни один маршрутизируемый эксперт не живёт в VRAM:</b> свободно 0,27 ГиБ, а 768 МиБ держатся как фиксированный резерв. <span class="tag m">замер</span></li>
+  </ul>
+</section>
+
+<section id="tried">
+  <h2><span class="en">6. What was tried, and what came out</span><span class="ru">6. Что пробовали и что получилось</span></h2>
+  <p class="en">The full record is <code>docs/TPS_REPORT.md</code> (experiments E1 to E18). The chart shows the measured speeds on the code prompt with MTP 2 at the 2.2 GHz cap. Blue bars keep all 8 experts and the weights; orange bars change the output and are outside the limits of this document.</p>
+  <p class="ru">Полная запись — <code>docs/TPS_REPORT.md</code> (эксперименты E1–E18). На графике — измеренные скорости на кодовом промпте с MTP 2 при потолке 2,2 ГГц. Синие столбцы сохраняют все 8 экспертов и веса; оранжевые меняют выход и находятся за пределами ограничений этого документа.</p>
+  <div class="legend"><span><i class="sw a"></i><span class="en">8 experts, weights unchanged</span><span class="ru">8 экспертов, веса не изменены</span></span><span><i class="sw b"></i><span class="en">changes the output (fewer experts or a coarser dense part)</span><span class="ru">меняет выход (меньше экспертов или грубее плотная часть)</span></span></div>
+  <div id="c-measured"></div>
+  <p class="note en">Tokens per second, measured. A bar's tooltip gives the step time and the source experiment. The step time is the fair figure: tok/s also depends on how many drafts were accepted in that run.</p>
+  <p class="note ru">Токены в секунду, замер. Подсказка столбца даёт время шага и исходный эксперимент. Честная величина — время шага: ток/с зависит ещё и от того, сколько черновиков было принято в прогоне.</p>
+  <div class="scroll"><table class="data">
+    <tr><th><span class="en">Tried</span><span class="ru">Что пробовали</span></th><th><span class="en">Result (measured)</span><span class="ru">Результат (замер)</span></th><th><span class="en">State</span><span class="ru">Состояние</span></th></tr>
+    <tr><td colspan="3"><b><span class="en">Keeps 8 experts and the weights</span><span class="ru">Сохраняет 8 экспертов и веса</span></b></td></tr>
+    <tr><td><span class="en">AVX-512 kernels for Q4_K, Q5_K, IQ3_S and IQ4_XS; one barrier per layer</span><span class="ru">Ядра AVX-512 для Q4_K, Q5_K, IQ3_S и IQ4_XS; один барьер на слой</span></td><td><span class="en">+17.5% (Q4_K_XL file) and +9.8% (IQ4_XS file) decode speed; same bits or within 1e-7</span><span class="ru">+17,5% (файл Q4_K_XL) и +9,8% (файл IQ4_XS) к скорости декодирования; те же биты или в пределах 1e-7</span></td><td><span class="en">in <code>main</code></span><span class="ru">в <code>main</code></span></td></tr>
+    <tr><td><span class="en">A CPU frequency cap of 2.1 to 2.2 GHz instead of thermal throttling</span><span class="ru">Потолок частоты CPU 2,1–2,2 ГГц вместо теплового троттлинга</span></td><td><span class="en">31 to 34 tok/s sustained against 11 to 15 without a cap</span><span class="ru">31–34 ток/с устойчиво против 11–15 без потолка</span></td><td><span class="en">default</span><span class="ru">по умолчанию</span></td></tr>
+    <tr><td><span class="en">Prefetch of 3 guessed experts to the GPU over PCIe</span><span class="ru">Prefetch 3 угаданных экспертов на GPU через PCIe</span></td><td><span class="en">−10% per step; 16 to 22% of the expert entries on the GPU; KLD 0.005</span><span class="ru">−10% на шаг; 16–22% обращений к экспертам на GPU; KLD 0,005</span></td><td><span class="en">default where the memory is free</span><span class="ru">по умолчанию, если память свободна</span></td></tr>
+    <tr><td><span class="en">Resident experts in VRAM at a 16K window with a 300 MiB reserve</span><span class="ru">Резидентные эксперты в VRAM при окне 16K с резервом 300 МиБ</span></td><td><span class="en">9 per layer: 43.0 tok/s, 55.7 ms against 66.9; with prefetch 3: 44.8 tok/s, 53.3 ms</span><span class="ru">9 на слой: 43,0 ток/с, 55,7 мс против 66,9; с prefetch 3: 44,8 ток/с, 53,3 мс</span></td><td><span class="en">works; today it costs three quarters of the window</span><span class="ru">работает; сегодня стоит три четверти окна</span></td></tr>
+    <tr><td><span class="en">Overlap of GPU and CPU work inside a step</span><span class="ru">Перекрытие работы GPU и CPU внутри шага</span></td><td>+2.6%</td><td><span class="en">opt-in; cannot run with the prefetch</span><span class="ru">по запросу; не работает вместе с prefetch</span></td></tr>
+    <tr><td><span class="en">MTP depth 1 / 2 / 3</span><span class="ru">Глубина MTP 1 / 2 / 3</span></td><td><span class="en">44.6 / 43.7 / 42.4 tok/s on the stack; accepted per draft 0.815 / 0.666 / 0.599</span><span class="ru">44,6 / 43,7 / 42,4 ток/с на стеке; принято на черновик 0,815 / 0,666 / 0,599</span></td><td><span class="en">depth 2 stays</span><span class="ru">остаётся глубина 2</span></td></tr>
+    <tr><td><span class="en">n-gram drafts (statistics on 600,000 tokens of agent sessions)</span><span class="ru">n-граммные черновики (статистика по 600 000 токенов агентских сессий)</span></td><td><span class="en">+2.4% at today's row cost of 21 ms; +14% if a row cost 12 ms</span><span class="ru">+2,4% при сегодняшней цене строки 21 мс; +14%, если бы строка стоила 12 мс</span></td><td><span class="en">parked until rows get cheaper</span><span class="ru">отложено, пока строки не подешевеют</span></td></tr>
+    <tr><td><span class="en">Huge pages; software prefetch distance; spin wait of idle workers</span><span class="ru">Большие страницы; дистанция программного prefetch; активное ожидание простаивающих потоков</span></td><td><span class="en">no gain (52.4 against 53.2 GB/s; 35.2 tok/s at every distance; spin is slower under heat)</span><span class="ru">без выигрыша (52,4 против 53,2 ГБ/с; 35,2 ток/с при любой дистанции; активное ожидание медленнее под нагревом)</span></td><td><span class="en">closed</span><span class="ru">закрыто</span></td></tr>
+    <tr><td><span class="en">Integrated GPU for a share of the experts; RAPL power limit instead of the cap</span><span class="ru">Встроенный GPU для доли экспертов; лимит мощности RAPL вместо потолка</span></td><td><span class="en">−48 to −66%; 10 tok/s</span><span class="ru">−48…−66%; 10 ток/с</span></td><td><span class="en">closed</span><span class="ru">закрыто</span></td></tr>
+    <tr><td colspan="3"><b><span class="en">Changes the output (for reference only)</span><span class="ru">Меняет выход (только для справки)</span></b></td></tr>
+    <tr><td><span class="en">7 / 6 / 5 experts per token</span><span class="ru">7 / 6 / 5 экспертов на токен</span></td><td><span class="en">+14 / +19 / +31% tok/s; KLD 0.025 / 0.060 / 0.122</span><span class="ru">+14 / +19 / +31% ток/с; KLD 0,025 / 0,060 / 0,122</span></td><td><span class="en">7 is in the default stack</span><span class="ru">7 — в стеке по умолчанию</span></td></tr>
+    <tr><td><span class="en">Dense part in Q5_K / Q4_K</span><span class="ru">Плотная часть в Q5_K / Q4_K</span></td><td><span class="en">−9% / −14% per step; KLD 0.024 / 0.037</span><span class="ru">−9% / −14% на шаг; KLD 0,024 / 0,037</span></td><td><span class="en">Q5_K is in the default stack</span><span class="ru">Q5_K — в стеке по умолчанию</span></td></tr>
+    <tr><td><span class="en">Lower-bit expert files (UD-IQ3_XXS, UD-Q3_K_S)</span><span class="ru">Файлы экспертов с меньшей битностью (UD-IQ3_XXS, UD-Q3_K_S)</span></td><td><span class="en">2.1 to 2.7 times slower: no fast CPU kernels for their formats</span><span class="ru">в 2,1–2,7 раза медленнее: для их форматов нет быстрых ядер CPU</span></td><td><span class="en">closed</span><span class="ru">закрыто</span></td></tr>
+  </table></div>
+</section>
+
+<section id="budgets">
+  <h2><span class="en">7. Three budgets: bytes, cycles, watts</span><span class="ru">7. Три бюджета: байты, такты, ватты</span></h2>
+  <h3><span class="en">Bytes: the memory is not the limit of the CPU phase</span><span class="ru">Байты: память не является пределом фазы CPU</span></h3>
+  <p class="en">The first bar is today's step. The second bar is what the step would cost if only the read speed of the two memories counted: the GPU reading 2.1 GiB of dense weights at 172 GB/s and the CPU reading 0.68 GB of experts at 52 GB/s. The GPU part is close to its floor. The CPU part is three times above it. The two lines mark the step times that 50 and 60 tok/s need at 2.27 tokens a step.</p>
+  <p class="ru">Первая полоса — сегодняшний шаг. Вторая — сколько стоил бы шаг, если бы значение имела только скорость чтения двух памятей: GPU читает 2,1 ГиБ плотных весов на 172 ГБ/с, а CPU — 0,68 ГБ экспертов на 52 ГБ/с. Часть GPU близка к своему полу. Часть CPU втрое выше него. Две линии отмечают время шага, нужное для 50 и 60 ток/с при 2,27 токена за шаг.</p>
+  <div class="legend"><span><i class="sw a"></i><span class="en">GPU mixers</span><span class="ru">миксеры GPU</span></span><span><i class="sw b"></i><span class="en">CPU experts</span><span class="ru">эксперты CPU</span></span><span><i class="sw c"></i><span class="en">drafts, heads, glue</span><span class="ru">черновики, головы, склейка</span></span></div>
+  <div id="c-budget"></div>
+  <h3><span class="en">Cycles: the IQ3_S decode is where the CPU time goes</span><span class="ru">Такты: время CPU уходит на декодирование IQ3_S</span></h3>
+  <div class="scroll"><table class="data">
+    <tr><th><span class="en">Kernel (cycles per block of 256 weights, data in the cache)</span><span class="ru">Ядро (такты на блок из 256 весов, данные в кэше)</span></th><th class="n"><span class="en">1 row</span><span class="ru">1 строка</span></th><th class="n"><span class="en">2 rows</span><span class="ru">2 строки</span></th><th class="n"><span class="en">3 rows</span><span class="ru">3 строки</span></th><th class="n"><span class="en">share of an expert's blocks</span><span class="ru">доля блоков эксперта</span></th></tr>
+    <tr><td><span class="en">IQ3_S gate and up (8 blocks per row)</span><span class="ru">IQ3_S gate и up (8 блоков на строку)</span></td><td class="n">34.5</td><td class="n">46.8</td><td class="n">50.9</td><td class="n">67%</td></tr>
+    <tr><td><span class="en">IQ4_XS down (2 blocks per row)</span><span class="ru">IQ4_XS down (2 блока на строку)</span></td><td class="n">13.7</td><td class="n">22.7</td><td class="n">32.7</td><td class="n">33%</td></tr>
+  </table></div>
+  <p class="en">At the window's 2.1 rows per expert one expert costs about 484 thousand cycles, and 80% of them are the IQ3_S gate and up <span class="tag e">estimate</span> from the table <span class="tag m">measured</span>. IQ3_S packs 4 weights into a 9-bit index of a 512-entry table; the lookup keeps one execution port busy most of the time. IQ4_XS is a 4-bit code per weight and decodes with one byte shuffle.</p>
+  <p class="ru">При 2,1 строки на эксперта в окне один эксперт стоит около 484 тысяч тактов, и 80% из них — IQ3_S gate и up <span class="tag e">оценка</span> по таблице <span class="tag m">замер</span>. IQ3_S упаковывает 4 веса в 9-битный индекс таблицы из 512 записей; поиск по ней почти всё время занимает один порт исполнения. IQ4_XS — это 4-битный код на вес, он декодируется одной перестановкой байт.</p>
+  <h3><span class="en">Watts: the cap is a thermal balance</span><span class="ru">Ватты: потолок частоты — это тепловое равновесие</span></h3>
+  <div class="scroll"><table class="data">
+    <tr><th><span class="en">Cap (Q4_K_XL file, 8 requests of 900 tokens back to back)</span><span class="ru">Потолок (файл Q4_K_XL, 8 запросов по 900 токенов подряд)</span></th><th class="n"><span class="en">median tok/s</span><span class="ru">медиана ток/с</span></th><th class="n"><span class="en">package peak</span><span class="ru">пик пакета</span></th><th><span class="en">What happens</span><span class="ru">Что происходит</span></th></tr>
+    <tr><td>2.0 GHz</td><td class="n">32.2</td><td class="n">76 °C</td><td><span class="en">flat</span><span class="ru">ровно</span></td></tr>
+    <tr><td>2.1 GHz</td><td class="n">33.1</td><td class="n">77 °C</td><td><span class="en">flat over the whole series: the default</span><span class="ru">ровно на всей серии: значение по умолчанию</span></td></tr>
+    <tr><td>2.2 GHz</td><td class="n">33.8</td><td class="n">78–79 °C</td><td><span class="en">starts at 34, sags to 30.5 when the pauses begin</span><span class="ru">начинает с 34, проседает до 30,5, когда начинаются паузы</span></td></tr>
+    <tr><td>2.4 GHz</td><td class="n">29.3</td><td class="n">78 °C</td><td><span class="en">the governor pauses the engine; but +3 to +6% on requests of 200 to 1200 tokens that start cool</span><span class="ru">регулятор приостанавливает движок; но +3…+6% на запросах в 200–1200 токенов с холодного старта</span></td></tr>
+  </table></div>
+  <div class="callout">
+    <p class="en"><b>Speed ≈ heat the cooler removes at 78 °C ÷ energy per token.</b> Three measured facts stand behind this. Reading memory barely heats the CPU: four threads read 55.6 GB/s for two minutes at 56 to 61 °C. The heat comes from arithmetic: the expert kernel draws 16 to 18 W on 4 threads at 2.2 GHz. And the cooler is shared: with the prefetch stack the GPU works more and the package peaked at 82 °C against 79 °C at the same cap.</p>
+    <p class="ru"><b>Скорость ≈ тепло, которое охлаждение отводит при 78 °C ÷ энергия на токен.</b> За этим стоят три измеренных факта. Чтение памяти почти не греет CPU: четыре потока читали 55,6 ГБ/с две минуты при 56–61 °C. Тепло даёт арифметика: ядро экспертов потребляет 16–18 Вт на 4 потоках при 2,2 ГГц. И охлаждение общее: со стеком prefetch GPU работает больше, и пакет доходил до 82 °C против 79 °C при том же потолке.</p>
+  </div>
+  <p class="en">What follows for the backlog: (1) remove CPU cycles first (L3); (2) move expert work to the GPU, which is idle for most of a step, but watch the shared cooler (L1, L7, L11); (3) do not fill the CPU's idle gaps with extra work, because the gaps are part of the balance; (4) let a controller choose the frequency, so that every saved joule becomes speed (L2).</p>
+  <p class="ru">Что из этого следует для бэклога: (1) сначала убирать такты CPU (L3); (2) переносить работу экспертов на GPU, который простаивает большую часть шага, но следить за общим охлаждением (L1, L7, L11); (3) не заполнять простои CPU дополнительной работой, потому что простои — часть равновесия; (4) дать регулятору выбирать частоту, чтобы каждый сэкономленный джоуль превращался в скорость (L2).</p>
+</section>
+
+<section id="backlog">
+  <h2><span class="en">8. The backlog, most likely gains first</span><span class="ru">8. Бэклог: сначала самые вероятные выигрыши</span></h2>
+  <p class="en">Each point is one item: how likely it is to pay (my estimate) against its expected saving, as a share of today's 65 ms step when the item is applied alone. The probabilities are judgements, not measurements; the list below gives the evidence behind each.</p>
+  <p class="ru">Каждая точка — один пункт: насколько вероятно, что он окупится (моя оценка), против ожидаемой экономии в долях сегодняшнего шага 65 мс, если применить пункт отдельно. Вероятности — это суждения, а не замеры; в списке ниже для каждого приведены основания.</p>
+  <div id="c-scatter"></div>
+  <h3><span class="en">The whole list</span><span class="ru">Весь список</span></h3>
+  <div class="scroll"><table class="data">
+    <tr><th>ID</th><th><span class="en">Item</span><span class="ru">Пункт</span></th><th class="n"><span class="en">probability</span><span class="ru">вероятность</span></th><th class="n"><span class="en">saving alone, ms of 65</span><span class="ru">экономия отдельно, мс из 65</span></th><th><span class="en">Class</span><span class="ru">Класс</span></th><th><span class="en">Effort</span><span class="ru">Трудоёмкость</span></th></tr>
+    <tr><td>L1</td><td><span class="en">Hot experts in the VRAM the context does not use</span><span class="ru">Горячие эксперты в VRAM, не занятой контекстом</span></td><td class="n">85%</td><td class="n">9–13</td><td><span class="en">rounding</span><span class="ru">округление</span></td><td><span class="en">medium</span><span class="ru">средняя</span></td></tr>
+    <tr><td>L2</td><td><span class="en">Closed-loop frequency governor</span><span class="ru">Регулятор частоты с обратной связью</span></td><td class="n">80%</td><td class="n">2–4</td><td><span class="en">bit-exact</span><span class="ru">бит-в-бит</span></td><td><span class="en">small</span><span class="ru">малая</span></td></tr>
+    <tr><td>L3</td><td><span class="en">Exact 4-bit repack of IQ3_S gate and up</span><span class="ru">Точная 4-битная перепаковка IQ3_S gate и up</span></td><td class="n">75%</td><td class="n">8–14</td><td><span class="en">bit-exact</span><span class="ru">бит-в-бит</span></td><td><span class="en">medium to large</span><span class="ru">средняя–большая</span></td></tr>
+    <tr><td>L4</td><td><span class="en">Cheap draft head</span><span class="ru">Дешёвая черновая голова</span></td><td class="n">65%</td><td class="n">4–6</td><td><span class="en">drafts only</span><span class="ru">черновики</span></td><td><span class="en">medium</span><span class="ru">средняя</span></td></tr>
+    <tr><td>L5</td><td><span class="en">Draft depth chosen per step</span><span class="ru">Глубина черновиков на каждый шаг</span></td><td class="n">60%</td><td class="n"><span class="en">+3 to +12% tok/s</span><span class="ru">+3…+12% ток/с</span></td><td><span class="en">drafts only</span><span class="ru">черновики</span></td><td><span class="en">small to medium</span><span class="ru">малая–средняя</span></td></tr>
+    <tr><td>L6</td><td><span class="en">Audit of the 12 ms outside the layers</span><span class="ru">Аудит 12 мс вне слоёв</span></td><td class="n">50%</td><td class="n">1–3</td><td><span class="en">bit-exact</span><span class="ru">бит-в-бит</span></td><td><span class="en">small to medium</span><span class="ru">малая–средняя</span></td></tr>
+    <tr><td>L7</td><td><span class="en">PCIe prefetch, second version</span><span class="ru">PCIe prefetch, вторая версия</span></td><td class="n">45%</td><td class="n">1–4</td><td><span class="en">rounding</span><span class="ru">округление</span></td><td><span class="en">medium</span><span class="ru">средняя</span></td></tr>
+    <tr><td>L8</td><td><span class="en">n-gram drafts as a second proposer</span><span class="ru">n-граммные черновики как второй источник</span></td><td class="n">45%</td><td class="n"><span class="en">+5 to +14% on copying turns</span><span class="ru">+5…+14% на ходах с копированием</span></td><td><span class="en">drafts only</span><span class="ru">черновики</span></td><td><span class="en">medium</span><span class="ru">средняя</span></td></tr>
+    <tr><td>L9</td><td><span class="en">Dense GPU kernels near the card's read speed</span><span class="ru">Плотные ядра GPU у скорости чтения карты</span></td><td class="n">40%</td><td class="n">1–4</td><td><span class="en">bit-exact</span><span class="ru">бит-в-бит</span></td><td><span class="en">large</span><span class="ru">большая</span></td></tr>
+    <tr><td>L10</td><td><span class="en">Attention at a long context</span><span class="ru">Внимание на длинном контексте</span></td><td class="n">40%</td><td class="n"><span class="en">4 at a 16K fill, 8–10 at 28K</span><span class="ru">4 при заполнении 16K, 8–10 при 28K</span></td><td><span class="en">bit-exact</span><span class="ru">бит-в-бит</span></td><td><span class="en">medium</span><span class="ru">средняя</span></td></tr>
+    <tr><td>L11</td><td><span class="en">One arena for prompt buffers and expert slots</span><span class="ru">Одна арена для буферов промпта и слотов экспертов</span></td><td class="n">40%</td><td class="n">2–4</td><td><span class="en">rounding</span><span class="ru">округление</span></td><td><span class="en">large</span><span class="ru">большая</span></td></tr>
+    <tr><td>L12</td><td><span class="en">Platform profile <code>balanced-performance</code></span><span class="ru">Профиль платформы <code>balanced-performance</code></span></td><td class="n">30%</td><td class="n"><span class="en">unknown, 0–5</span><span class="ru">неизвестно, 0–5</span></td><td><span class="en">bit-exact</span><span class="ru">бит-в-бит</span></td><td><span class="en">one test</span><span class="ru">один тест</span></td></tr>
+    <tr><td>L13</td><td><span class="en">Warm the guessed experts into the CPU caches</span><span class="ru">Прогрев угаданных экспертов в кэши CPU</span></td><td class="n">25%</td><td class="n">1–2</td><td><span class="en">bit-exact</span><span class="ru">бит-в-бит</span></td><td><span class="en">small</span><span class="ru">малая</span></td></tr>
+    <tr><td>L14</td><td><span class="en">Exact two-stage verify head</span><span class="ru">Точная двухэтапная голова проверки</span></td><td class="n">25%</td><td class="n">about 1</td><td><span class="en">bit-exact</span><span class="ru">бит-в-бит</span></td><td><span class="en">medium</span><span class="ru">средняя</span></td></tr>
+  </table></div>
+
+  <div class="item" id="L1">
+    <h3>L1. <span class="en">Hot experts in the VRAM that the context does not use</span><span class="ru">Горячие эксперты в VRAM, которую не занимает контекст</span></h3>
+    <div class="meta"><span class="tag"><span class="en">probability 85%</span><span class="ru">вероятность 85%</span></span><span class="tag"><span class="en">−9 to −13 ms alone; −4 to −7 ms on top of prefetch</span><span class="ru">−9…−13 мс отдельно; −4…−7 мс поверх prefetch</span></span><span class="tag"><span class="en">rounding level</span><span class="ru">уровень округления</span></span><span class="tag"><span class="en">effort: medium</span><span class="ru">трудоёмкость: средняя</span></span></div>
+    <dl>
+      <dt><span class="en">What</span><span class="ru">Что</span></dt>
+      <dd class="en">Today the K/V cache is allocated for the whole 65,536-token window (0.73 GiB) and 768 MiB stay free as a fixed reserve, so no routed expert can live in VRAM. Make both elastic. Allocate the K/V cache in tiers (8K, 16K, 32K, 64K) and grow it when a conversation crosses a tier. Replace the fixed reserve by a low-water mark of about 300 MiB that the engine watches. Give every MiB above it to resident expert slots, filled by the usage scores the engine already keeps. A slot is a cache entry: it can be dropped within one step when the context grows or another program needs the memory.</dd>
+      <dd class="ru">Сегодня кэш K/V выделяется под всё окно в 65 536 токенов (0,73 ГиБ), а 768 МиБ остаются свободными как фиксированный резерв, поэтому ни один маршрутизируемый эксперт не может жить в VRAM. Сделать оба параметра эластичными. Выделять кэш K/V ступенями (8K, 16K, 32K, 64K) и наращивать его, когда разговор переходит ступень. Заменить фиксированный резерв нижней отметкой около 300 МиБ, за которой следит движок. Каждый МиБ выше неё отдавать резидентным слотам экспертов, которые заполняются по счётчикам использования, уже ведущимся в движке. Слот — это запись кэша: его можно сбросить за один шаг, когда растёт контекст или память нужна другой программе.</dd>
+      <dt><span class="en">Evidence</span><span class="ru">Основания</span></dt>
+      <dd class="en">Experiment E11 <span class="tag m">measured</span>: at a 16K window with a 300 MiB reserve 9 experts per layer are resident, and the step falls from 66.9 to 55.7 ms (36.2 to 43.0 tok/s) with 8 experts and the original weights; with prefetch 3 on top it is 53.3 ms and 44.8 tok/s. Nine slots are 3.5% of a layer's experts and take about 28% of the pool's work (an estimate from the two step times), so the routing is skewed inside a session and the usage scores follow it. llama.cpp merged the same idea in October 2026 (pull request 29887): on larger cards and another model it reports hit rates of 72 to 89% with caches of 6.5 to 19 GiB, and suggests a cache of about a tenth of the expert bytes.</dd>
+      <dd class="ru">Эксперимент E11 <span class="tag m">замер</span>: при окне 16K с резервом 300 МиБ резидентны 9 экспертов на слой, и шаг падает с 66,9 до 55,7 мс (с 36,2 до 43,0 ток/с) при 8 экспертах и исходных весах; с prefetch 3 сверху — 53,3 мс и 44,8 ток/с. Девять слотов — это 3,5% экспертов слоя, и они забирают около 28% работы пула (оценка по двум временам шага), то есть маршрутизация внутри сессии неравномерна, а счётчики использования за ней следуют. llama.cpp в октябре 2026 года влил ту же идею (pull request 29887): на картах побольше и на другой модели он сообщает о доле попаданий 72–89% при кэшах 6,5–19 ГиБ и советует кэш примерно в десятую часть байт экспертов.</dd>
+      <dt><span class="en">Slots per layer against the K/V tier</span><span class="ru">Слоты на слой в зависимости от ступени K/V</span></dt>
+      <dd><div id="c-slots"></div>
+      <p class="note en">Resident experts per layer with a 300 MiB low-water mark. The 16K value is measured (E11); the others are computed from the same VRAM budget: 276 MiB free at 64K, 12.97 KB per token of window, 57 MiB per slot across 40 layers.</p>
+      <p class="note ru">Резидентные эксперты на слой при нижней отметке 300 МиБ. Значение для 16K измерено (E11); остальные вычислены из того же бюджета VRAM: 276 МиБ свободно при 64K, 12,97 КБ на токен окна, 57 МиБ на слот по 40 слоям.</p>
+      <div id="c-vram"></div>
+      <div class="legend"><span><i class="sw a"></i><span class="en">dense weights and router</span><span class="ru">плотные веса и роутер</span></span><span><i class="sw b"></i><span class="en">K/V cache</span><span class="ru">кэш K/V</span></span><span><i class="sw n"></i><span class="en">buffers, CUDA context, kernel code</span><span class="ru">буферы, контекст CUDA, код ядер</span></span><span><i class="sw c"></i><span class="en">resident expert slots</span><span class="ru">резидентные слоты экспертов</span></span><span><i class="sw f"></i><span class="en">free (reserve)</span><span class="ru">свободно (резерв)</span></span></div>
+      <p class="note en">Where the 4096 MiB go, approximately (from the engine's allocation log and the free-memory lines).</p>
+      <p class="note ru">Куда уходят 4096 МиБ, приблизительно (по журналу выделений движка и строкам о свободной памяти).</p></dd>
+      <dt><span class="en">Expected</span><span class="ru">Ожидание</span></dt>
+      <dd class="en">Below a 16K fill: −9 to −13 ms per step on the plain baseline (measured: −11.2) and about −6 ms (−4 to −7) on top of prefetch 3. About half of that at 32K, nothing above about 48K. <span class="tag e">estimate</span></dd>
+      <dd class="ru">При заполнении ниже 16K: −9…−13 мс на шаг от простой базы (замер: −11,2) и около −6 мс (−4…−7) поверх prefetch 3. Около половины этого при 32K, ничего выше примерно 48K. <span class="tag e">оценка</span></dd>
+      <dt><span class="en">Cheap check first</span><span class="ru">Сначала дешёвая проверка</span></dt>
+      <dd class="en">Record <code>STRATA_ROUTE_TRACE</code> during a normal session and replay it offline: the hit rate against 1, 5, 9, 12 and 16 slots per layer. No engine change is needed for that.</dd>
+      <dd class="ru">Записать <code>STRATA_ROUTE_TRACE</code> в обычной сессии и проиграть офлайн: доля попаданий при 1, 5, 9, 12 и 16 слотах на слой. Изменений движка для этого не нужно.</dd>
+      <dt><span class="en">Risks</span><span class="ru">Риски</span></dt>
+      <dd class="en">Growing the K/V cache needs a moment with the old and the new buffer alive (drop slots first). Checkpoints and several sessions must follow the tier. The GPU works more, so the shared cooler gets more heat (L2 handles it). With a small reserve another program may fail to get VRAM before the engine gives slots back.</dd>
+      <dd class="ru">Наращивание кэша K/V требует момента, когда живы старый и новый буферы (сначала сбросить слоты). Контрольные точки и несколько сессий должны следовать ступени. GPU работает больше, значит общее охлаждение получает больше тепла (это берёт на себя L2). При малом резерве другая программа может не получить VRAM раньше, чем движок вернёт слоты.</dd>
+    </dl>
+  </div>
+
+  <div class="item" id="L2">
+    <h3>L2. <span class="en">A closed-loop frequency governor instead of a fixed cap</span><span class="ru">Регулятор частоты с обратной связью вместо фиксированного потолка</span></h3>
+    <div class="meta"><span class="tag"><span class="en">probability 80%</span><span class="ru">вероятность 80%</span></span><span class="tag"><span class="en">+3 to +6% on short and medium requests</span><span class="ru">+3…+6% на коротких и средних запросах</span></span><span class="tag"><span class="en">bit-exact</span><span class="ru">бит-в-бит</span></span><span class="tag"><span class="en">effort: small</span><span class="ru">трудоёмкость: малая</span></span></div>
+    <dl>
+      <dt><span class="en">What</span><span class="ru">Что</span></dt>
+      <dd class="en">The server holds one fixed cap (2.1 GHz) and, at 80 °C, pauses the engine for a part of every half second. Replace the fixed number by a controller. It reads the package and the GPU temperature once a second (the sensors and the 3-second look-ahead exist in <code>serve/thermal.py</code>), aims at 77 °C and moves the cap in steps of 100 MHz between 1.8 and 3.3 GHz. The pause at 80 °C stays as the backstop.</dd>
+      <dd class="ru">Сервер держит один фиксированный потолок (2,1 ГГц) и при 80 °C приостанавливает движок на часть каждой половины секунды. Заменить фиксированное число регулятором. Он раз в секунду читает температуру пакета и GPU (датчики и упреждение на 3 секунды уже есть в <code>serve/thermal.py</code>), целится в 77 °C и двигает потолок шагами по 100 МГц между 1,8 и 3,3 ГГц. Пауза при 80 °C остаётся как страховка.</dd>
+      <dt><span class="en">Evidence</span><span class="ru">Основания</span></dt>
+      <dd class="en">The cap table in section 7 <span class="tag m">measured</span>: 2.1 GHz is flat, 2.2 GHz sags after the heat soak, 2.4 GHz wins on requests that start cool and loses on long runs. One number cannot be right for both. The same setting also differed by up to a quarter between the night and the morning.</dd>
+      <dd class="ru">Таблица потолков в разделе 7 <span class="tag m">замер</span>: 2,1 ГГц идёт ровно, 2,2 ГГц проседает после прогрева, 2,4 ГГц выигрывает на запросах с холодного старта и проигрывает на длинных прогонах. Одно число не может быть верным для обоих случаев. Одна и та же настройка отличалась до четверти между ночью и утром.</dd>
+      <dt><span class="en">Expected</span><span class="ru">Ожидание</span></dt>
+      <dd class="en">+3 to +6% on short and medium requests; the speed of the best fixed cap on long ones, found by itself. It also turns every joule that L3, L1 and L4 save into frequency without a new sweep: with L3 the CPU's busy share of a step falls from about 60% to about 50% (to about 40% with L1 as well), which is worth roughly 0.2 to 0.3 GHz. <span class="tag e">estimate</span></dd>
+      <dd class="ru">+3…+6% на коротких и средних запросах; скорость лучшего фиксированного потолка на длинных, найденная автоматически. Он же превращает каждый джоуль, сэкономленный L3, L1 и L4, в частоту без нового перебора: с L3 доля занятости CPU в шаге падает примерно с 60% до 50% (до 40% вместе с L1), что стоит около 0,2–0,3 ГГц. <span class="tag e">оценка</span></dd>
+      <dt><span class="en">Risks</span><span class="ru">Риски</span></dt>
+      <dd class="en">Oscillation: needs a dead band and a rate limit. The cap is machine-wide, as today.</dd>
+      <dd class="ru">Колебания: нужны зона нечувствительности и ограничение скорости изменения. Потолок действует на всю машину, как и сегодня.</dd>
+    </dl>
+  </div>
+
+  <div class="item" id="L3">
+    <h3>L3. <span class="en">An exact 4-bit repack of the IQ3_S gate and up matrices</span><span class="ru">Точная 4-битная перепаковка матриц gate и up из IQ3_S</span></h3>
+    <div class="meta"><span class="tag"><span class="en">probability 75%</span><span class="ru">вероятность 75%</span></span><span class="tag"><span class="en">−8 to −14 ms alone; −6 to −10 ms after L1 and prefetch</span><span class="ru">−8…−14 мс отдельно; −6…−10 мс после L1 и prefetch</span></span><span class="tag"><span class="en">bit-exact</span><span class="ru">бит-в-бит</span></span><span class="tag"><span class="en">effort: medium to large</span><span class="ru">трудоёмкость: средняя–большая</span></span></div>
+    <dl>
+      <dt><span class="en">What</span><span class="ru">Что</span></dt>
+      <dd class="en">In an IQ3_S block 4 weights share a 9-bit index into a table of 512 entries, and each weight has a sign bit. Every table entry holds four odd numbers from 1 to 15. So a weight is exactly sign × one of {1, 3, …, 15} × (2s + 1) × d: one of 16 values, times the block's scales. Store that 4-bit code directly, in the 136-byte block layout that IQ4_XS already uses, with another 16-entry table. The decoded integers are the same; the decode becomes one byte shuffle. The repack runs once, at load into the pinned arena or offline into a pack file. This is not a requantisation: no weight changes its value.</dd>
+      <dd class="ru">В блоке IQ3_S 4 веса делят 9-битный индекс таблицы из 512 записей, и у каждого веса есть бит знака. Каждая запись таблицы содержит четыре нечётных числа от 1 до 15. Значит, вес — это в точности знак × одно из {1, 3, …, 15} × (2s + 1) × d: одно из 16 значений, умноженное на масштабы блока. Хранить этот 4-битный код напрямую, в 136-байтной раскладке блока, которую уже использует IQ4_XS, с другой таблицей из 16 записей. Декодированные целые те же; декодирование становится одной перестановкой байт. Перепаковка выполняется один раз: при загрузке в закреплённую арену или офлайн в файл-пакет. Это не переквантизация: ни один вес не меняет значение.</dd>
+      <dd><div id="d-format"></div></dd>
+      <dt><span class="en">Evidence</span><span class="ru">Основания</span></dt>
+      <dd class="en">The cycle table in section 7 <span class="tag m">measured</span>: 34.5 / 46.8 / 50.9 cycles per block for IQ3_S against 13.7 / 22.7 / 32.7 for the engine's 4-bit kernel, and the 4-bit figures include the per-row work of rows with only 2 blocks. The equivalence is arithmetic: it can be checked over all 512 table entries and all scale values.</dd>
+      <dd class="ru">Таблица тактов в разделе 7 <span class="tag m">замер</span>: 34,5 / 46,8 / 50,9 такта на блок для IQ3_S против 13,7 / 22,7 / 32,7 для 4-битного ядра движка, причём 4-битные цифры включают построчную работу строк всего из 2 блоков. Эквивалентность арифметическая: её можно проверить по всем 512 записям таблицы и всем значениям масштаба.</dd>
+      <dt><span class="en">Expected</span><span class="ru">Ожидание</span></dt>
+      <dd class="en">Expert cycles −40 to −46%. The pool time is multiplied by 0.69 (0.63 to 0.78), because 14% more bytes are read: 39 → 27 ms on the plain baseline. The CPU's energy per token falls by about a third, which L2 turns into frequency. <span class="tag e">estimate</span></dd>
+      <dd class="ru">Такты на эксперта −40…−46%. Время пула умножается на 0,69 (0,63–0,78), потому что читается на 14% больше байт: 39 → 27 мс от простой базы. Энергия CPU на токен падает примерно на треть, что L2 превращает в частоту. <span class="tag e">оценка</span></dd>
+      <dt><span class="en">Cost</span><span class="ru">Цена</span></dt>
+      <dd class="en">+2.0 GiB of RAM (gate and up 8.59 → 10.62 GiB, all experts 14.66 → 16.7 GiB). The GPU kernels for resident and guessed experts need the same 4-bit gate/up path (the down path exists). A guessed expert carries 14% more bytes over PCIe.</dd>
+      <dd class="ru">+2,0 ГиБ RAM (gate и up 8,59 → 10,62 ГиБ, все эксперты 14,66 → 16,7 ГиБ). Ядрам GPU для резидентных и угаданных экспертов нужен тот же 4-битный путь gate/up (путь down уже есть). Угаданный эксперт несёт через PCIe на 14% больше байт.</dd>
+      <dt><span class="en">Cheap check first</span><span class="ru">Сначала дешёвая проверка</span></dt>
+      <dd class="en">A microbenchmark next to <code>iq_vbmi_bench</code>: synthetic rows of 2048 weights in the 4-bit form against the IQ3_S kernel, 1 to 3 rows, in the cache and streamed. No model is needed. Go if a block costs less than 25 cycles at 2 rows.</dd>
+      <dd class="ru">Микробенчмарк рядом с <code>iq_vbmi_bench</code>: синтетические строки по 2048 весов в 4-битной форме против ядра IQ3_S, 1–3 строки, из кэша и потоком из памяти. Модель не нужна. Идти дальше, если блок стоит меньше 25 тактов при 2 строках.</dd>
+      <dt><span class="en">Risks</span><span class="ru">Риски</span></dt>
+      <dd class="en">Memory: 16.7 GiB pinned next to the desktop's own use. The float steps after the integer sums must keep their order to stay bit-identical. The prompt path and the pack tool must follow.</dd>
+      <dd class="ru">Память: 16,7 ГиБ закреплено рядом с собственным расходом рабочего стола. Шаги с плавающей точкой после целочисленных сумм должны сохранить порядок, чтобы остаться бит-в-бит. Путь промпта и инструмент упаковки должны следовать за форматом.</dd>
+    </dl>
+  </div>
+
+  <div class="item" id="L4">
+    <h3>L4. <span class="en">A cheap head for the drafts</span><span class="ru">Дешёвая голова для черновиков</span></h3>
+    <div class="meta"><span class="tag"><span class="en">probability 65%</span><span class="ru">вероятность 65%</span></span><span class="tag">−4 … −6 ms</span><span class="tag"><span class="en">drafts only</span><span class="ru">только черновики</span></span><span class="tag"><span class="en">effort: medium</span><span class="ru">трудоёмкость: средняя</span></span></div>
+    <dl>
+      <dt><span class="en">What</span><span class="ru">Что</span></dt>
+      <dd class="en">Each MTP draft ends with a full pass over the output matrix (248,320 rows, 417 MB) only to find its best token: two passes a step. A draft only proposes, so its head may look at a subset: the tokens already present in the context plus a list of the most frequent tokens of the owner's own sessions, 16 to 32 thousand rows (27 to 54 MB). The verify pass keeps the full matrix, so the text does not change.</dd>
+      <dd class="ru">Каждый черновик MTP заканчивается полным проходом по выходной матрице (248 320 строк, 417 МБ) только ради выбора лучшего токена: два прохода на шаг. Черновик лишь предлагает, поэтому его голова может смотреть на подмножество: токены, уже присутствующие в контексте, плюс список самых частых токенов из собственных сессий владельца, 16–32 тысячи строк (27–54 МБ). Проход проверки сохраняет полную матрицу, поэтому текст не меняется.</dd>
+      <dt><span class="en">Evidence</span><span class="ru">Основания</span></dt>
+      <dd class="en">On 30 October <code>--draft-vocab</code> (the first N token ids) cut the draft time from 9.7 to 3.7 ms per step, but the acceptance fell from 88 to 72% <span class="tag m">measured</span>. The saving is real; the list was poor. That kernel also works only for a Q8_0 head, and this file's head is Q6_K (code reading).</dd>
+      <dd class="ru">30 октября <code>--draft-vocab</code> (первые N идентификаторов токенов) сократил время черновиков с 9,7 до 3,7 мс на шаг, но доля принятых упала с 88 до 72% <span class="tag m">замер</span>. Экономия реальна; плохим был список. Кроме того, то ядро работает только для головы в Q8_0, а голова этого файла — Q6_K (чтение кода).</dd>
+      <dt><span class="en">Expected</span><span class="ru">Ожидание</span></dt>
+      <dd class="en">−4 to −6 ms per step, if at least 99% of the accepted drafts stay inside the set. <span class="tag e">estimate</span></dd>
+      <dd class="ru">−4…−6 мс на шаг, если не менее 99% принятых черновиков остаются внутри множества. <span class="tag e">оценка</span></dd>
+      <dt><span class="en">Cheap check first</span><span class="ru">Сначала дешёвая проверка</span></dt>
+      <dd class="en">Offline, from recorded generations: the share of accepted draft tokens that fall into "context plus the top N" for N of 8, 16 and 32 thousand. Go at 99%.</dd>
+      <dd class="ru">Офлайн, по записанным генерациям: доля принятых токенов-черновиков, попадающих в «контекст плюс первые N», для N в 8, 16 и 32 тысячи. Идти дальше при 99%.</dd>
+      <dt><span class="en">Risks</span><span class="ru">Риски</span></dt>
+      <dd class="en">A new GPU kernel (a row gather for Q6_K). The list must be rebuilt when the traffic changes. A draft outside the set is a lost draft.</dd>
+      <dd class="ru">Новое ядро GPU (выборка строк для Q6_K). Список нужно пересобирать, когда меняется трафик. Черновик вне множества — потерянный черновик.</dd>
+    </dl>
+  </div>
+
+  <div class="item" id="L5">
+    <h3>L5. <span class="en">Draft depth chosen for every step</span><span class="ru">Глубина черновиков, выбираемая на каждом шаге</span></h3>
+    <div class="meta"><span class="tag"><span class="en">probability 60%</span><span class="ru">вероятность 60%</span></span><span class="tag">+3 … +12% tok/s</span><span class="tag"><span class="en">drafts only</span><span class="ru">только черновики</span></span><span class="tag"><span class="en">effort: small to medium</span><span class="ru">трудоёмкость: малая–средняя</span></span></div>
+    <dl>
+      <dt><span class="en">What</span><span class="ru">Что</span></dt>
+      <dd class="en">Today every step verifies exactly 2 drafts. Let the engine decide per step, from the MTP block's own probability of each draft and from whether the last step's drafts were accepted: one row when the first draft is weak, 2 or 3 drafts when they are strong. The verification does not change, so the text is the same.</dd>
+      <dd class="ru">Сегодня каждый шаг проверяет ровно 2 черновика. Дать движку решать на каждом шаге — по собственной вероятности блока MTP для каждого черновика и по тому, были ли приняты черновики прошлого шага: одна строка, когда первый черновик слабый, 2 или 3 черновика, когда они сильные. Проверка не меняется, поэтому текст тот же.</dd>
+      <dt><span class="en">Evidence</span><span class="ru">Основания</span></dt>
+      <dd class="en">E12 <span class="tag m">measured</span>: accepted per draft 0.815 / 0.666 / 0.599 at depth 1 / 2 / 3. From these the second draft is right in about 63% of the steps where the first was right, and when two are right the third is right in about 90% (approximate: the depths were separate runs). Steps fall into "the chain works" and "it does not", and a fixed depth pays 16 to 21 ms for rows that fail. Published work agrees: draft confidence predicts acceptance (EAGLE-2), an adaptive draft length beats a fixed one (SpecDec++), and for MoE models speculation should be switched by its utility, because every verified token wakes more experts (arXiv 2506.20675).</dd>
+      <dd class="ru">E12 <span class="tag m">замер</span>: принято на черновик 0,815 / 0,666 / 0,599 при глубине 1 / 2 / 3. Отсюда второй черновик верен примерно в 63% шагов, где верен первый, а когда верны два, третий верен примерно в 90% (приближённо: глубины мерились в разных прогонах). Шаги делятся на «цепочка работает» и «не работает», а фиксированная глубина платит 16–21 мс за строки, которые проваливаются. Публикации говорят то же: уверенность черновика предсказывает принятие (EAGLE-2), адаптивная длина черновика лучше фиксированной (SpecDec++), а для моделей MoE спекуляцию следует включать по её полезности, потому что каждый проверяемый токен будит новых экспертов (arXiv 2506.20675).</dd>
+      <dt><span class="en">Expected</span><span class="ru">Ожидание</span></dt>
+      <dd class="en">+3 to +12% tok/s. A simple model with a perfect predictor gives +12% at today's row cost and +14% when a row costs 10 ms. <span class="tag e">estimate</span></dd>
+      <dd class="ru">+3…+12% ток/с. Простая модель с идеальным предсказателем даёт +12% при сегодняшней цене строки и +14%, когда строка стоит 10 мс. <span class="tag e">оценка</span></dd>
+      <dt><span class="en">Cheap check first</span><span class="ru">Сначала дешёвая проверка</span></dt>
+      <dd class="en">Log the pair (draft probability, accepted or not) for a few thousand steps and choose the threshold offline.</dd>
+      <dd class="ru">Записать пары (вероятность черновика, принят или нет) для нескольких тысяч шагов и выбрать порог офлайн.</dd>
+    </dl>
+  </div>
+
+  <h3><span class="en">L6 to L14: less likely, or smaller</span><span class="ru">L6–L14: менее вероятные или меньшие</span></h3>
+  <div class="scroll"><table class="data">
+    <tr><th>ID</th><th><span class="en">Idea</span><span class="ru">Идея</span></th><th><span class="en">Evidence and expected gain</span><span class="ru">Основания и ожидаемый выигрыш</span></th><th><span class="en">First check</span><span class="ru">Первая проверка</span></th></tr>
+    <tr><td>L6<br><span class="tag">50%</span></td><td><span class="en"><b>Audit of the 12 ms outside the layers.</b> Chain the two drafts on the device without the trip of the pick to the host; keep the MTP block's own hot experts in VRAM, so that a draft needs no CPU pool call.</span><span class="ru"><b>Аудит 12 мс вне слоёв.</b> Связать два черновика на устройстве без похода выбранного токена на хост; держать горячих экспертов самого блока MTP в VRAM, чтобы черновику не нужен был вызов пула CPU.</span></td><td><span class="en">"The rest" is 12 of 70 ms and was never profiled with MTP on. −1 to −3 ms.</span><span class="ru">«Остальное» — 12 из 70 мс, и с включённым MTP оно никогда не профилировалось. −1…−3 мс.</span></td><td><span class="en"><code>STRATA_Q36_OVERLAP_STATS=1</code> and one <code>nsys</code> run of the benchmark mode with MTP.</span><span class="ru"><code>STRATA_Q36_OVERLAP_STATS=1</code> и один прогон <code>nsys</code> в режиме бенчмарка с MTP.</span></td></tr>
+    <tr><td>L7<br><span class="tag">45%</span></td><td><span class="en"><b>PCIe prefetch, second version.</b> Guess two layers ahead, so that the copy engine never waits; give the MTP block a share.</span><span class="ru"><b>PCIe prefetch, вторая версия.</b> Угадывать на два слоя вперёд, чтобы механизм копирования не простаивал; выделить долю блоку MTP.</span></td><td><span class="en">Three guesses carry 4.5 MB per layer; in the 1.45 ms of an MTP layer the link could carry about 8.8 MB (estimate). A fourth guess was late too often in the test, and the project's own note says the copy rate is a tighter limit than the lead time, so this may give little. −1 to −4 ms.</span><span class="ru">Три догадки несут 4,5 МБ на слой; за 1,45 мс слоя с MTP канал мог бы перенести около 8,8 МБ (оценка). Четвёртая догадка в тесте слишком часто опаздывала, а в заметке самого проекта сказано, что скорость копирования ограничивает сильнее, чем упреждение, так что выигрыш может быть малым. −1…−4 мс.</span></td><td><span class="en">The recall of a guess two layers ahead, from the route trace.</span><span class="ru">Полнота догадки на два слоя вперёд, по трассе маршрутов.</span></td></tr>
+    <tr><td>L8<br><span class="tag">45%</span></td><td><span class="en"><b>n-gram drafts as a second proposer</b> when the last 6 to 12 tokens repeat an earlier stretch of the context.</span><span class="ru"><b>n-граммные черновики как второй источник,</b> когда последние 6–12 токенов повторяют более ранний фрагмент контекста.</span></td><td><span class="en">E13: +2.4% with a row at 21 ms, +14% at 12 ms. L1 and L3 bring a row near 10 ms. +5 to +14% on turns that copy text (edits, tool arguments), nothing on new prose.</span><span class="ru">E13: +2,4% при строке в 21 мс, +14% при 12 мс. L1 и L3 приближают строку к 10 мс. +5…+14% на ходах с копированием текста (правки, аргументы инструментов), ничего на новом тексте.</span></td><td><span class="en">Run the n-gram statistics again on the owner's own sessions.</span><span class="ru">Повторить n-граммную статистику на собственных сессиях владельца.</span></td></tr>
+    <tr><td>L9<br><span class="tag">40%</span></td><td><span class="en"><b>Dense GPU kernels near the card's read speed;</b> fewer launches (about 670 per token today).</span><span class="ru"><b>Плотные ядра GPU у скорости чтения карты;</b> меньше запусков (сегодня около 670 на токен).</span></td><td><span class="en">The kernels read 2.1 GiB at about two thirds of 172 GB/s. −1 to −4 ms.</span><span class="ru">Ядра читают 2,1 ГиБ примерно на двух третях от 172 ГБ/с. −1…−4 мс.</span></td><td><span class="en">Stall reasons in Nsight Compute (needs root once).</span><span class="ru">Причины простоев в Nsight Compute (один раз нужен root).</span></td></tr>
+    <tr><td>L10<br><span class="tag">40%</span></td><td><span class="en"><b>Attention at a long context.</b> Bring the K/V read of the decode attention closer to the card's read speed.</span><span class="ru"><b>Внимание на длинном контексте.</b> Приблизить чтение K/V во внимании декодирования к скорости чтения карты.</span></td><td><span class="en">At a 14K fill the kernel reads about 60 of 172 GB/s; an MTP step at a 28K fill takes 84.8 ms against 65. −4 ms at 16K, −8 to −10 ms at 28K.</span><span class="ru">При заполнении 14K ядро читает около 60 из 172 ГБ/с; шаг MTP при заполнении 28K занимает 84,8 мс против 65. −4 мс при 16K, −8…−10 мс при 28K.</span></td><td><span class="en">Per-kernel times of a long-context step in <code>nsys</code>.</span><span class="ru">Времена по ядрам для шага на длинном контексте в <code>nsys</code>.</span></td></tr>
+    <tr><td>L11<br><span class="tag">40%</span></td><td><span class="en"><b>One arena for prompt buffers and expert slots.</b> The chunk and attention buffers (about 330 MiB) are sized for a prompt chunk of 512 rows, and a decode step of 3 rows needs a small part of them: lend the rest to slots and take it back for a prompt chunk.</span><span class="ru"><b>Одна арена для буферов промпта и слотов экспертов.</b> Буферы чанка и внимания (около 330 МиБ) рассчитаны на чанк промпта в 512 строк, а шагу декодирования из 3 строк нужна малая их часть: отдавать остальное слотам и забирать обратно под чанк промпта.</span></td><td><span class="en">+3 to +5 slots per layer at any context, also at 64K. A refill of 300 MiB takes about 50 ms over PCIe. −2 to −4 ms.</span><span class="ru">+3…+5 слотов на слой при любом контексте, в том числе 64K. Дозаполнение 300 МиБ через PCIe занимает около 50 мс. −2…−4 мс.</span></td><td><span class="en">The same replay as L1, with 3 to 5 slots.</span><span class="ru">Тот же проигрыш трассы, что в L1, с 3–5 слотами.</span></td></tr>
+    <tr><td>L12<br><span class="tag">30%</span></td><td><span class="en"><b>Platform profile <code>balanced-performance</code>.</b> The only cooling switch the firmware gives to software: <code>performance</code> is refused and the fans cannot be set.</span><span class="ru"><b>Профиль платформы <code>balanced-performance</code>.</b> Единственный переключатель охлаждения, который прошивка даёт программам: <code>performance</code> отклоняется, вентиляторами управлять нельзя.</span></td><td><span class="en">Not measured. The <code>low-power</code> profile costs a third of the speed, so the profile does act. 0 to +8%.</span><span class="ru">Не измерено. Профиль <code>low-power</code> стоит трети скорости, то есть профиль действует. 0…+8%.</span></td><td><span class="en">One run of <code>tools/cooling_kit.py</code> with the profile (needs root once; the owner declined this test earlier).</span><span class="ru">Один прогон <code>tools/cooling_kit.py</code> с профилем (один раз нужен root; владелец раньше отказался от этого теста).</span></td></tr>
+    <tr><td>L13<br><span class="tag">25%</span></td><td><span class="en"><b>Warm the guessed experts into the CPU caches</b> while the GPU runs the mixer.</span><span class="ru"><b>Прогревать угаданных экспертов в кэши CPU,</b> пока GPU считает миксер.</span></td><td><span class="en">Memory reads are cheap in heat. The stall share of the pool is 15 to 25% (estimate) and the caches hold only a part of a layer's experts. −1 to −2 ms.</span><span class="ru">Чтения памяти дёшевы по теплу. Доля простоев в пуле 15–25% (оценка), и кэши вмещают лишь часть экспертов слоя. −1…−2 мс.</span></td><td><span class="en">Hardware counters of the pool: cycles stalled on memory.</span><span class="ru">Аппаратные счётчики пула: такты простоя на памяти.</span></td></tr>
+    <tr><td>L14<br><span class="tag">25%</span></td><td><span class="en"><b>Exact two-stage verify head.</b> A first pass over the top 4 bits of the 6-bit weights with a proven error bound, then the exact rows of the few candidates.</span><span class="ru"><b>Точная двухэтапная голова проверки.</b> Первый проход по старшим 4 битам 6-битных весов с доказанной границей ошибки, затем точные строки немногих кандидатов.</span></td><td><span class="en">Saves about a third of one pass over the output matrix: about −1 ms. The bound may be too loose on real logits.</span><span class="ru">Экономит около трети одного прохода по выходной матрице: примерно −1 мс. Граница может оказаться слишком слабой на реальных логитах.</span></td><td><span class="en">The size of the candidate set on dumped logits.</span><span class="ru">Размер множества кандидатов на сохранённых логитах.</span></td></tr>
+  </table></div>
+
+  <h3><span class="en">Three more, with a condition</span><span class="ru">Ещё три, с условием</span></h3>
+  <div class="scroll"><table class="data">
+    <tr><th>ID</th><th><span class="en">Idea</span><span class="ru">Идея</span></th><th><span class="en">When it matters</span><span class="ru">Когда это важно</span></th></tr>
+    <tr><td>C1</td><td><span class="en"><b>Strict mode:</b> experts computed on the GPU give the CPU's bits. The GPU quantises the activations in the CPU's blocks of 256 (the kernel exists for the overlap switch) and keeps the CPU kernels' order of float steps.</span><span class="ru"><b>Строгий режим:</b> эксперты, посчитанные на GPU, дают биты CPU. GPU квантует активации блоками CPU по 256 (ядро уже есть для переключателя overlap) и сохраняет порядок шагов с плавающей точкой, как в ядрах CPU.</span></td><td><span class="en">No speed. It turns the rounding-level items (L1, L7, L11 and today's prefetch) into bit-exact ones.</span><span class="ru">Скорости не даёт. Превращает пункты уровня округления (L1, L7, L11 и сегодняшний prefetch) в бит-в-бит.</span></td></tr>
+    <tr><td>C2</td><td><span class="en"><b>Speculative sampling</b> for requests with a temperature. Today such a request decodes without drafts. The standard rejection rule keeps the model's distribution exactly.</span><span class="ru"><b>Спекулятивное сэмплирование</b> для запросов с температурой. Сегодня такой запрос декодируется без черновиков. Стандартное правило отбора в точности сохраняет распределение модели.</span></td><td><span class="en">A prototype of 30 October (not committed) gave +39 to +126% on requests with temperature 0.7 <span class="tag m">measured</span>. It matters only if the clients sample; pi sends greedy requests, the model card recommends sampling.</span><span class="ru">Прототип от 30 октября (не закоммичен) дал +39…+126% на запросах с температурой 0,7 <span class="tag m">замер</span>. Важно, только если клиенты сэмплируют; pi шлёт жадные запросы, карточка модели рекомендует сэмплирование.</span></td></tr>
+    <tr><td>C3</td><td><span class="en"><b>Two interleaved streams:</b> the GPU runs the mixers of one request while the CPU computes the experts of the other.</span><span class="ru"><b>Два чередующихся потока:</b> GPU считает миксеры одного запроса, пока CPU считает экспертов другого.</span></td><td><span class="en">About 1.3 times the total tokens per second with MTP for two parallel requests <span class="tag e">estimate</span>; nothing for one stream, and more heat.</span><span class="ru">Примерно в 1,3 раза больше суммарных токенов в секунду с MTP для двух параллельных запросов <span class="tag e">оценка</span>; ничего для одного потока, и больше тепла.</span></td></tr>
+  </table></div>
+
+  <h3><span class="en">Checks that need no code</span><span class="ru">Проверки, не требующие кода</span></h3>
+  <ul class="en">
+    <li><b>Today's best inside the limits</b> (44.8 tok/s, E11) is a start command, at the price of a 16K window:
+      <pre>bin/strata-serve --model models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp.gguf \
+  --experts-used 8 --expert-prefetch 3 --context 16384 --vram-reserve 300</pre></li>
+    <li><b>The routing trace</b> for L1, L7 and L11: <code>STRATA_ROUTE_TRACE=&lt;file&gt;</code> in the engine's environment during normal work.</li>
+    <li><b>The split of a step</b> for L6: <code>STRATA_Q36_OVERLAP_STATS=1</code>.</li>
+    <li><b>For today's default stack</b> (outside the limits of this document, it keeps 7 experts and the Q5_K dense part): its lighter dense part frees about 0.68 GiB of VRAM, so <code>--vram-reserve 300</code> should give resident slots even at the 64K window. Not measured.</li>
+  </ul>
+  <ul class="ru">
+    <li><b>Лучшее на сегодня в рамках ограничений</b> (44,8 ток/с, E11) — это команда запуска, ценой окна в 16K:
+      <pre>bin/strata-serve --model models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp.gguf \
+  --experts-used 8 --expert-prefetch 3 --context 16384 --vram-reserve 300</pre></li>
+    <li><b>Трасса маршрутов</b> для L1, L7 и L11: <code>STRATA_ROUTE_TRACE=&lt;файл&gt;</code> в окружении движка во время обычной работы.</li>
+    <li><b>Разбивка шага</b> для L6: <code>STRATA_Q36_OVERLAP_STATS=1</code>.</li>
+    <li><b>Для сегодняшнего стека по умолчанию</b> (вне ограничений этого документа, он сохраняет 7 экспертов и плотную часть Q5_K): его облегчённая плотная часть освобождает около 0,68 ГиБ VRAM, поэтому <code>--vram-reserve 300</code> должен дать резидентные слоты даже при окне 64K. Не измерено.</li>
+  </ul>
+</section>
+
+<section id="projection">
+  <h2><span class="en">9. What the top items add up to</span><span class="ru">9. Во что складываются верхние пункты</span></h2>
+  <p class="en">The chart starts at today's measured step and subtracts the prefetch that already exists (measured) and the middle estimate of four items, in the order in which they depend on each other. The thin line beside a bar is the range of that item. The two horizontal lines are the step times that 50 and 60 tok/s need at 2.27 tokens a step. Short context, 8 experts, weights unchanged.</p>
+  <p class="ru">График начинается с сегодняшнего измеренного шага и вычитает уже существующий prefetch (замер) и среднюю оценку четырёх пунктов в порядке их зависимости друг от друга. Тонкая линия рядом со столбцом — диапазон этого пункта. Две горизонтальные линии — время шага, нужное для 50 и 60 ток/с при 2,27 токена за шаг. Короткий контекст, 8 экспертов, веса не изменены.</p>
+  <div id="c-water"></div>
+  <p class="note en">Step time in milliseconds. Grey: totals; blue: savings. All values after "prefetch 3" are estimates.</p>
+  <p class="note ru">Время шага в миллисекундах. Серое: итоги; синее: экономия. Все значения после «prefetch 3» — оценки.</p>
+  <div class="scroll"><table class="data">
+    <tr><th><span class="en">Scenario (short context, 8 experts, weights unchanged)</span><span class="ru">Сценарий (короткий контекст, 8 экспертов, веса не изменены)</span></th><th class="n"><span class="en">step, ms</span><span class="ru">шаг, мс</span></th><th class="n"><span class="en">tok/s at 2.27 tokens a step</span><span class="ru">ток/с при 2,27 токена за шаг</span></th></tr>
+    <tr><td><span class="en">Today <span class="tag m">measured</span></span><span class="ru">Сегодня <span class="tag m">замер</span></span></td><td class="n">65.0</td><td class="n">34.9</td></tr>
+    <tr><td><span class="en">Today's best inside the limits: 16K window, resident slots, prefetch 3 <span class="tag m">measured</span></span><span class="ru">Лучшее на сегодня в рамках ограничений: окно 16K, резидентные слоты, prefetch 3 <span class="tag m">замер</span></span></td><td class="n">53.3</td><td class="n"><span class="en">44.8 (as measured)</span><span class="ru">44,8 (как измерено)</span></td></tr>
+    <tr><td><span class="en">Prefetch + L1 + L3 + L2 + L4, every item at its low end <span class="tag e">estimate</span></span><span class="ru">Prefetch + L1 + L3 + L2 + L4, каждый пункт по нижней границе <span class="tag e">оценка</span></span></td><td class="n">44.7</td><td class="n">50.8</td></tr>
+    <tr><td><span class="en">The same, every gain multiplied by its probability <span class="tag e">estimate</span></span><span class="ru">То же, каждый выигрыш умножен на свою вероятность <span class="tag e">оценка</span></span></td><td class="n">42.5</td><td class="n">53.4</td></tr>
+    <tr><td><span class="en">The same, every item at its middle <span class="tag e">estimate</span></span><span class="ru">То же, каждый пункт по средней оценке <span class="tag e">оценка</span></span></td><td class="n">37.5</td><td class="n">60.5</td></tr>
+  </table></div>
+  <ul class="en">
+    <li><b>L5 comes on top</b> as more tokens per step, not as a shorter step: about +7% in the middle (+4% when weighted by its probability), so about 56 tok/s on the weighted row and about 65 on the middle row.</li>
+    <li><b>50 tok/s:</b> about 3 chances in 5. It needs L1 and L3 near their middle, or one of them together with L4.</li>
+    <li><b>60 tok/s:</b> about 1 chance in 5. It needs every one of the five items near its middle; L6 and L7 can cover one that falls short.</li>
+    <li><b>The context fill moves everything.</b> After a 16K prompt the baseline decodes at 30.0 tok/s and after 32K at 29.8, against 35 at a short prompt <span class="tag m">measured</span>, and L1 has fewer slots there. At a fill of 16K to 32K every figure above is about 15% lower unless L10 lands. When the 64K window is nearly full, L1 gives nothing and a step costs about 18 ms more for the attention: the same items then project to about 37 tok/s, about 43 with L10. <span class="tag e">estimate</span></li>
+    <li><b>The same items lift today's default stack</b> (dense Q5_K, 7 experts, prefetch 3: 52 to 53 ms, 44 to 46 tok/s). By the same arithmetic L3 and L4 would bring it to roughly 39 to 42 ms, 54 to 58 tok/s. This is arithmetic, not a measurement.</li>
+  </ul>
+  <ul class="ru">
+    <li><b>L5 идёт сверху</b> как больше токенов за шаг, а не как более короткий шаг: около +7% по средней оценке (+4% с учётом вероятности), то есть около 56 ток/с в строке с вероятностями и около 65 в строке со средними оценками.</li>
+    <li><b>50 ток/с:</b> примерно 3 шанса из 5. Нужны L1 и L3 около средней оценки либо один из них вместе с L4.</li>
+    <li><b>60 ток/с:</b> примерно 1 шанс из 5. Нужен каждый из пяти пунктов около средней оценки; L6 и L7 могут покрыть один недобор.</li>
+    <li><b>Заполнение контекста сдвигает всё.</b> После промпта в 16K база декодирует на 30,0 ток/с, после 32K — на 29,8, против 35 на коротком промпте <span class="tag m">замер</span>, и у L1 там меньше слотов. При заполнении 16–32K каждая цифра выше примерно на 15% ниже, если не сработает L10. Когда окно 64K почти заполнено, L1 не даёт ничего, а шаг стоит примерно на 18 мс больше из-за внимания: те же пункты дают по расчёту около 37 ток/с, около 43 с L10. <span class="tag e">оценка</span></li>
+    <li><b>Те же пункты поднимают и сегодняшний стек по умолчанию</b> (плотная Q5_K, 7 экспертов, prefetch 3: 52–53 мс, 44–46 ток/с). По той же арифметике L3 и L4 привели бы его примерно к 39–42 мс, 54–58 ток/с. Это арифметика, а не замер.</li>
+  </ul>
+  <h3><span class="en">A sensible order of work</span><span class="ru">Разумный порядок работ</span></h3>
+  <ol class="en">
+    <li>The checks without code: the routing trace, the step split, the draft statistics. A day, no risk.</li>
+    <li>The microbenchmark of L3. It decides the largest bit-exact item in a day.</li>
+    <li>L2: small, and it makes every later measurement fair under heat.</li>
+    <li>L1, then L4 and L5; after each the standard run (8 requests of 900 tokens back to back, the package peak recorded).</li>
+    <li>L3 in full, if its microbenchmark said go.</li>
+  </ol>
+  <ol class="ru">
+    <li>Проверки без кода: трасса маршрутов, разбивка шага, статистика черновиков. День, без риска.</li>
+    <li>Микробенчмарк L3. За день решает судьбу самого крупного пункта класса «бит-в-бит».</li>
+    <li>L2: небольшой и делает каждый последующий замер честным под нагревом.</li>
+    <li>L1, затем L4 и L5; после каждого стандартный прогон (8 запросов по 900 токенов подряд, с записью пика пакета).</li>
+    <li>L3 целиком, если микробенчмарк сказал «да».</li>
+  </ol>
+</section>
+
+<section id="thermal">
+  <h2><span class="en">10. Staying below 80 °C</span><span class="ru">10. Как оставаться ниже 80 °C</span></h2>
+  <p class="en">The limit holds today through two mechanisms: the frequency cap, and a governor that pauses the engine near 80 °C with a 3-second look-ahead (it held the package at 78 to 79 °C in the long runs). Nothing in this backlog removes them. L2 puts a controller in front of the pause, so that the pause becomes rare.</p>
+  <p class="ru">Сегодня предел держится двумя механизмами: потолком частоты и регулятором, который приостанавливает движок около 80 °C с упреждением на 3 секунды (в длинных прогонах он удерживал пакет на 78–79 °C). Ничто в этом бэклоге их не убирает. L2 ставит регулятор перед паузой, чтобы пауза стала редкой.</p>
+  <div id="d-thermal"></div>
+  <div class="scroll"><table class="data">
+    <tr><th><span class="en">Effect on heat</span><span class="ru">Влияние на тепло</span></th><th><span class="en">Items</span><span class="ru">Пункты</span></th></tr>
+    <tr><td><span class="en">Less energy per token</span><span class="ru">Меньше энергии на токен</span></td><td><span class="en">L3 (about a third less CPU work), L4 and L14 (less reading on the GPU), L5 and L8 (fewer rows that fail)</span><span class="ru">L3 (примерно на треть меньше работы CPU), L4 и L14 (меньше чтения на GPU), L5 и L8 (меньше проваленных строк)</span></td></tr>
+    <tr><td><span class="en">Moves work from the CPU to the GPU; the cooler is shared, so both sensors must be watched</span><span class="ru">Переносит работу с CPU на GPU; охлаждение общее, поэтому нужно следить за обоими датчиками</span></td><td>L1, L7, L11</td></tr>
+    <tr><td><span class="en">Neutral</span><span class="ru">Нейтрально</span></td><td>L2, L6, L9, L10, L12, C1</td></tr>
+    <tr><td><span class="en">Adds heat</span><span class="ru">Добавляет тепло</span></td><td><span class="en">L13 (a little), C3 (two streams)</span><span class="ru">L13 (немного), C3 (два потока)</span></td></tr>
+  </table></div>
+  <p class="en">Two rules follow from section 7. First, an idle core is not a wasted core: the pauses of the CPU while the GPU works are part of the thermal balance, and filling them with work lowers the frequency the cooler can hold. Second, every item is accepted only by the sustained figure: the median of the second half of a back-to-back series with the package peak next to it, not the first request on a cool machine.</p>
+  <p class="ru">Из раздела 7 следуют два правила. Первое: простаивающее ядро — не потерянное ядро. Паузы CPU, пока работает GPU, входят в тепловое равновесие, и если заполнить их работой, упадёт частота, которую способно удержать охлаждение. Второе: каждый пункт принимается только по устойчивой цифре — медиане второй половины серии запросов подряд с пиком пакета рядом, а не по первому запросу на холодной машине.</p>
+</section>
+
+<section id="closed">
+  <h2><span class="en">11. Closed: not worth repeating</span><span class="ru">11. Закрыто: повторять не стоит</span></h2>
+  <div class="scroll"><table class="data">
+    <tr><th><span class="en">Idea</span><span class="ru">Идея</span></th><th><span class="en">Why it is closed</span><span class="ru">Почему закрыто</span></th></tr>
+    <tr><td><span class="en">Integrated GPU for experts, or for the whole model</span><span class="ru">Встроенный GPU для экспертов или для всей модели</span></td><td><span class="en">−48 to −66% in every setting; 10.8 tok/s for the whole model. It shares the RAM and the heat budget.</span><span class="ru">−48…−66% при любой настройке; 10,8 ток/с для всей модели. Он делит RAM и тепловой бюджет.</span></td></tr>
+    <tr><td><span class="en">A RAPL power limit instead of the frequency cap</span><span class="ru">Лимит мощности RAPL вместо потолка частоты</span></td><td><span class="en">10 tok/s: the CPU still runs short bursts at full frequency and the governor must pause the engine.</span><span class="ru">10 ток/с: CPU всё равно даёт короткие всплески на полной частоте, и регулятору приходится приостанавливать движок.</span></td></tr>
+    <tr><td><span class="en">Huge pages, software prefetch distance, spin wait of idle workers</span><span class="ru">Большие страницы, дистанция программного prefetch, активное ожидание простаивающих потоков</span></td><td><span class="en">No effect measured; spinning is slower under sustained heat.</span><span class="ru">Эффекта не измерено; активное ожидание медленнее при длительном нагреве.</span></td></tr>
+    <tr><td><span class="en">A fixed MTP depth of 3 or 4</span><span class="ru">Фиксированная глубина MTP 3 или 4</span></td><td><span class="en">42.4 against 43.7 tok/s: the rows cost more than they bring. L5 is the version that can pay.</span><span class="ru">42,4 против 43,7 ток/с: строки стоят больше, чем приносят. Версия, которая может окупиться, — L5.</span></td></tr>
+    <tr><td><span class="en">Skewing the rows of a verify window by one layer</span><span class="ru">Сдвиг строк окна проверки на один слой</span></td><td><span class="en">The rows stop sharing experts (the CPU pays about 24% more) and the GPU reads the dense weights once per row.</span><span class="ru">Строки перестают делить экспертов (CPU платит примерно на 24% больше), а GPU читает плотные веса для каждой строки отдельно.</span></td></tr>
+    <tr><td><span class="en">Applying the MoE output one layer late</span><span class="ru">Применение выхода MoE на слой позже</span></td><td><span class="en">Changes the output; +5% on another model.</span><span class="ru">Меняет выход; +5% на другой модели.</span></td></tr>
+    <tr><td><span class="en">Tree verification with an external drafter</span><span class="ru">Древовидная проверка с внешним генератором черновиков</span></td><td><span class="en">A 32-node tree needs about 160 of the 256 experts per layer, and the drafter does not fit in the VRAM that is left.</span><span class="ru">Дерево из 32 узлов требует около 160 из 256 экспертов на слой, а генератор черновиков не помещается в оставшуюся VRAM.</span></td></tr>
+    <tr><td><span class="en">The GPU reading the SSD directly; other page-cache policies</span><span class="ru">Чтение SSD напрямую с GPU; другие политики кэша страниц</span></td><td><span class="en">The card gets only the compatibility mode; LRU is within 2 points of the oracle.</span><span class="ru">Карта получает только режим совместимости; LRU в пределах 2 пунктов от оракула.</span></td></tr>
+    <tr><td><span class="en">Outside the limits of this document</span><span class="ru">Вне ограничений этого документа</span></td><td><span class="en">Fewer experts, a different count per layer, top-p routing, mixed-precision experts, lower-bit expert files, a coarser dense part, another model.</span><span class="ru">Меньше экспертов, разное их число по слоям, маршрутизация top-p, эксперты смешанной точности, файлы экспертов меньшей битности, более грубая плотная часть, другая модель.</span></td></tr>
+  </table></div>
+</section>
+
+<section id="sources">
+  <h2><span class="en">12. Sources and method</span><span class="ru">12. Источники и метод</span></h2>
+  <p class="en"><b>Project records:</b> <code>docs/TPS_REPORT.md</code> (E1 to E18), <code>docs/TPS_EXPERIMENTS.md</code>, <code>docs/TUNING.md</code>, <code>docs/BACKLOG.md</code>, <code>docs/qwen36-backlog.html</code>. <b>Code read for this document:</b> <code>src/qwen35/q36_engine.cu</code> (the speculative step, the hybrid expert path, the expert placement), <code>src/kernels/cpu/iq3s_vbmi.cpp</code>, <code>src/kernels/cpu/iq4xs_vnni.cpp</code>, <code>src/kernels/cpu/pool.cpp</code>. <b>Hardware:</b> read from the machine on 12 November 2026. <b>No benchmark was run</b> and no engine code was changed for this document; every estimate is arithmetic on the measured parts above.</p>
+  <p class="ru"><b>Записи проекта:</b> <code>docs/TPS_REPORT.md</code> (E1–E18), <code>docs/TPS_EXPERIMENTS.md</code>, <code>docs/TUNING.md</code>, <code>docs/BACKLOG.md</code>, <code>docs/qwen36-backlog.html</code>. <b>Код, прочитанный для этого документа:</b> <code>src/qwen35/q36_engine.cu</code> (спекулятивный шаг, гибридный путь экспертов, размещение экспертов), <code>src/kernels/cpu/iq3s_vbmi.cpp</code>, <code>src/kernels/cpu/iq4xs_vnni.cpp</code>, <code>src/kernels/cpu/pool.cpp</code>. <b>Железо:</b> снято с машины 12 ноября 2026 года. <b>Ни один бенчмарк не запускался</b>, и код движка для этого документа не менялся; каждая оценка — арифметика на измеренных частях выше.</p>
+  <p class="en"><b>External sources</b> (each page was opened on 12 November 2026):</p>
+  <p class="ru"><b>Внешние источники</b> (каждая страница открыта 12 ноября 2026 года):</p>
+  <ul>
+    <li><a href="https://huggingface.co/Qwen/Qwen3.6-35B-A3B">Qwen/Qwen3.6-35B-A3B</a> <span class="en">— model card and <code>config.json</code>: the architecture numbers of section 4.</span><span class="ru">— карточка модели и <code>config.json</code>: числа архитектуры из раздела 4.</span></li>
+    <li><a href="https://github.com/ggml-org/llama.cpp/pull/29887">llama.cpp #29887</a> <span class="en">— a GPU cache for MoE experts kept in host memory; hit rates of 72 to 89% (L1).</span><span class="ru">— кэш на GPU для экспертов MoE, хранящихся в памяти хоста; доля попаданий 72–89% (L1).</span></li>
+    <li><a href="https://github.com/ggml-org/llama.cpp/pull/22673">llama.cpp #22673</a> <span class="en">— MTP drafts for Qwen3.6 in llama.cpp.</span><span class="ru">— черновики MTP для Qwen3.6 в llama.cpp.</span></li>
+    <li><a href="https://arxiv.org/abs/2506.20675">arXiv 2506.20675</a> <span class="en">— utility-driven speculative decoding for MoE: speculation is switched by token gain against verification cost (L5).</span><span class="ru">— спекулятивное декодирование для MoE по полезности: спекуляция включается по выигрышу в токенах против цены проверки (L5).</span></li>
+    <li><a href="https://arxiv.org/abs/2405.19715">arXiv 2405.19715</a> <span class="en">(SpecDec++), </span><span class="ru">(SpecDec++), </span><a href="https://arxiv.org/abs/2406.16858">arXiv 2406.16858</a> <span class="en">(EAGLE-2) — adaptive draft length; draft confidence approximates the acceptance rate (L5).</span><span class="ru">(EAGLE-2) — адаптивная длина черновика; уверенность черновика приближает долю принятия (L5).</span></li>
+    <li><a href="https://arxiv.org/abs/2411.04975">arXiv 2411.04975</a> <span class="en">(SuffixDecoding), </span><span class="ru">(SuffixDecoding), </span><a href="https://arxiv.org/abs/2408.08696">arXiv 2408.08696</a> <span class="en">(Token Recycling) — model-free drafts from earlier text (L8).</span><span class="ru">(Token Recycling) — черновики без модели из более раннего текста (L8).</span></li>
+    <li><a href="https://arxiv.org/abs/2603.19289">arXiv 2603.19289</a><span class="en">, </span><span class="ru">, </span><a href="https://arxiv.org/abs/2511.14102">arXiv 2511.14102</a> <span class="en">— predicting future experts to overlap transfers with compute (L7).</span><span class="ru">— предсказание будущих экспертов, чтобы совместить передачу с вычислением (L7).</span></li>
+    <li><a href="https://arxiv.org/abs/2411.01433">arXiv 2411.01433</a> <span class="en">(HOBBIT), </span><span class="ru">(HOBBIT), </span><a href="https://arxiv.org/abs/2402.07033">arXiv 2402.07033</a> <span class="en">(Fiddler), </span><span class="ru">(Fiddler), </span><a href="https://arxiv.org/abs/2401.14361">arXiv 2401.14361</a> <span class="en">(MoE-Infinity) — expert offloading and caching on small GPUs.</span><span class="ru">(MoE-Infinity) — выгрузка и кэширование экспертов на малых GPU.</span></li>
+    <li><a href="https://arxiv.org/abs/2211.17192">arXiv 2211.17192</a> <span class="en">— speculative decoding that keeps the sampling distribution exactly (C2).</span><span class="ru">— спекулятивное декодирование, в точности сохраняющее распределение сэмплирования (C2).</span></li>
+    <li><a href="https://github.com/ikawrakow/ik_llama.cpp">ik_llama.cpp</a> <span class="en">— repacked, row-interleaved quant formats for faster CPU kernels: the same direction as L3.</span><span class="ru">— перепакованные форматы квантов с чередованием строк для более быстрых ядер CPU: то же направление, что и L3.</span></li>
+  </ul>
+</section>
+
+<footer><span class="en">Strata · docs/qwen36-lossless-backlog.html · 12 November 2026 · analysis only, nothing here is implemented</span><span class="ru">Strata · docs/qwen36-lossless-backlog.html · 12 ноября 2026 года · только анализ, ничего из этого не реализовано</span></footer>
+
+</div>
+<div id="tip" role="tooltip"></div>
+<script>
+(function(){
+var doc=document,root=doc.documentElement,NS='http://www.w3.org/2000/svg';
+function lang(){return root.getAttribute('data-lang')||'en'}
+function E(n,a,p){var e=doc.createElementNS(NS,n);if(a)for(var k in a)e.setAttribute(k,a[k]);if(p)p.appendChild(e);return e}
+function T(p,x,y,s,c,anc){var a=anc||'start';
+  if(typeof s!=='object'){s=String(s);
+    if(/^[−+-]?\d+\.\d+$/.test(s))s={en:s,ru:s.replace('.',',')};
+    else{var t=E('text',{x:x,y:y,'class':c||'tl','text-anchor':a},p);t.textContent=s;return}}
+  ['en','ru'].forEach(function(l){var t=E('text',{x:x,y:y,'class':(c||'tl')+' '+l,'text-anchor':a},p);t.textContent=s[l]})}
+function len(s){return typeof s==='object'?Math.max(s.en.length,s.ru.length):String(s).length}
+function tip(n,s){if(!s)return;n.setAttribute('tabindex','0');n.setAttribute('data-tip-en',s.en);n.setAttribute('data-tip-ru',s.ru)}
+function S(id,w,h){var host=doc.getElementById(id);if(!host)return null;return E('svg',{viewBox:'0 0 '+w+' '+h,'class':'chart',role:'img'},host)}
+function hb(x,y,w,h){w=Math.max(w,2);var r=Math.min(4,w/2);return 'M'+x+' '+y+'h'+(w-r)+'a'+r+' '+r+' 0 0 1 '+r+' '+r+'v'+(h-2*r)+'a'+r+' '+r+' 0 0 1 '+(-r)+' '+r+'h'+(-(w-r))+'z'}
+function vb(x,y,w,h){h=Math.max(h,2);var r=Math.min(4,h/2);return 'M'+x+' '+(y+h)+'v'+(-(h-r))+'a'+r+' '+r+' 0 0 1 '+r+' '+(-r)+'h'+(w-2*r)+'a'+r+' '+r+' 0 0 1 '+r+' '+r+'v'+(h-r)+'z'}
+
+function hbars(id,rows,max,step,marks){
+  var L=330,W=760,rh=30,top=marks?28:8,h=top+rows.length*rh+28,s=S(id,W,h);if(!s)return;var pw=W-L-56;
+  for(var g=0;g<=max;g+=step){var x=L+pw*g/max;E('line',{x1:x,y1:top,x2:x,y2:h-26,'class':'grid'},s);T(s,x,h-9,g,'tk','middle')}
+  (marks||[]).forEach(function(m){var x=L+pw*m.v/max;E('line',{x1:x,y1:top-6,x2:x,y2:h-26,'class':'mark'},s);T(s,x,top-11,m.label,'tk','middle')});
+  rows.forEach(function(r,i){var y=top+i*rh+7,w=pw*r.v/max,g=E('g',{'class':'hit'},s);
+    E('rect',{x:0,y:y-7,width:W,height:rh,'class':'hitbox'},g);
+    T(g,L-10,y+12,r.label,'tl','end');E('path',{d:hb(L,y,w,16),'class':r.cls},g);T(g,L+w+6,y+12,r.val,'tv');tip(g,r.tip)});
+}
+function segrows(id,rows,max,marks){
+  var L=14,W=760,pw=W-L-20,rh=62,top=marks?30:6,h=top+rows.length*rh+4,s=S(id,W,h);if(!s)return;
+  rows.forEach(function(r,i){var y=top+i*rh,x=L;T(s,L,y+14,r.label,'tl');
+    r.segs.forEach(function(q){var w=pw*q.v/max,g=E('g',{'class':'hit'},s);
+      E('rect',{x:x,y:y+22,width:Math.max(w-2,1),height:26,rx:4,'class':q.cls},g);
+      if(q.txt&&w-2>len(q.txt)*6.8+14)T(g,x+7,y+40,q.txt,q.tc||'ti');tip(g,q.tip);x+=w});
+    if(r.end)T(s,x+6,y+40,r.end,'tv')});
+  (marks||[]).forEach(function(m){var x=L+pw*m.v/max;E('line',{x1:x,y1:top-8,x2:x,y2:h-4,'class':'mark'},s);T(s,x,top-13,m.label,'tk','middle')});
+}
+function cols(id,rows,max,step){
+  var W=760,H=220,L=46,B=H-44,top=22,pw=W-L-20,ph=B-top,bw=pw/rows.length,s=S(id,W,H);if(!s)return;
+  function Y(v){return B-ph*v/max}
+  for(var g=0;g<=max;g+=step){E('line',{x1:L,y1:Y(g),x2:L+pw,y2:Y(g),'class':'grid'},s);T(s,L-8,Y(g)+4,g,'tk','end')}
+  rows.forEach(function(r,i){var cx=L+bw*i+bw/2,g=E('g',{'class':'hit'},s);E('rect',{x:L+bw*i,y:top,width:bw,height:ph,'class':'hitbox'},g);
+    if(r.v>0)E('path',{d:vb(cx-11,Y(r.v),22,B-Y(r.v)),'class':'s1'},g);T(g,cx,Y(r.v)-7,r.val,'tv','middle');
+    T(g,cx,B+16,r.l1,'tk','middle');if(r.l2)T(g,cx,B+30,r.l2,'tk','middle');tip(g,r.tip)});
+  E('line',{x1:L,y1:B,x2:L+pw,y2:B,'class':'axis'},s);
+}
+function waterfall(id,steps,max,marks){
+  var W=760,H=330,L=46,B=H-56,top=24,ph=B-top,pw=W-L-74,bw=pw/steps.length,s=S(id,W,H);if(!s)return;var run=0;
+  function Y(v){return B-ph*v/max}
+  for(var g=0;g<=max;g+=10){E('line',{x1:L,y1:Y(g),x2:L+pw,y2:Y(g),'class':'grid'},s);T(s,L-8,Y(g)+4,g,'tk','end')}
+  (marks||[]).forEach(function(m){E('line',{x1:L,y1:Y(m.v),x2:L+pw+4,y2:Y(m.v),'class':'mark'},s);T(s,L+pw+8,Y(m.v)+4,m.label,'tk')});
+  steps.forEach(function(st,i){var cx=L+bw*i+bw/2,g=E('g',{'class':'hit'},s),prev=run,y0,y1,a,b;
+    E('rect',{x:L+bw*i,y:top,width:bw,height:ph,'class':'hitbox'},g);
+    if(st.total!==undefined){run=st.total;E('path',{d:vb(cx-11,Y(run),22,B-Y(run)),'class':'neu'},g);T(g,cx,Y(run)-7,st.total.toFixed(1),'tv','middle')}
+    else{run=prev+st.d;y0=Y(prev);y1=Y(run);E('rect',{x:cx-11,y:y0+1,width:22,height:Math.max(y1-y0-2,2),rx:3,'class':'s1'},g);
+      T(g,cx-16,(y0+y1)/2+4,'−'+Math.abs(st.d).toFixed(1),'tv','end');
+      if(st.lo!==undefined){a=Y(prev+st.lo);b=Y(prev+st.hi);E('line',{x1:cx+18,y1:a,x2:cx+18,y2:b,'class':'whisk'},g);E('line',{x1:cx+14,y1:a,x2:cx+22,y2:a,'class':'whisk'},g);E('line',{x1:cx+14,y1:b,x2:cx+22,y2:b,'class':'whisk'},g)}}
+    T(g,cx,B+16,st.l1,'tk','middle');if(st.l2)T(g,cx,B+30,st.l2,'tk','middle');tip(g,st.tip)});
+  E('line',{x1:L,y1:B,x2:L+pw,y2:B,'class':'axis'},s);
+}
+function scatter(id,pts,xt,yt){
+  var W=760,H=350,L=52,B=H-46,top=30,pw=W-L-28,ph=B-top,s=S(id,W,H);if(!s)return;
+  function X(v){return L+pw*(v-20)/70}function Y(v){return B-ph*v/20}
+  for(var g=0;g<=20;g+=5){E('line',{x1:L,y1:Y(g),x2:L+pw,y2:Y(g),'class':'grid'},s);T(s,L-8,Y(g)+4,g+'%','tk','end')}
+  for(var q=20;q<=90;q+=10)T(s,X(q),B+18,q+'%','tk','middle');
+  E('line',{x1:L,y1:B,x2:L+pw,y2:B,'class':'axis'},s);
+  T(s,L+pw,B+36,xt,'tk','end');T(s,L,top-14,yt,'tk');
+  pts.forEach(function(p){var x=X(p.x),y=Y(p.y),g=E('g',{'class':'hit'},s);
+    E('circle',{cx:x,cy:y,r:13,'class':'hitbox'},g);E('circle',{cx:x,cy:y,r:5,'class':'dot'},g);
+    T(g,p.left?x-9:x+9,y+4,p.id,'tv',p.left?'end':'start');tip(g,p.tip)});
+}
+function box(s,x,y,w,h,c,title,lines){E('rect',{x:x,y:y,width:w,height:h,rx:10,'class':'bx '+(c||'')},s);if(title)T(s,x+12,y+21,title,'th');(lines||[]).forEach(function(l,i){T(s,x+12,y+40+i*16,l,'tk')})}
+function head(s,x1,y1,x2,y2){var a=Math.atan2(y2-y1,x2-x1),k=8,p=[x2,y2,x2-k*Math.cos(a-0.42),y2-k*Math.sin(a-0.42),x2-k*Math.cos(a+0.42),y2-k*Math.sin(a+0.42)];E('polygon',{points:p.join(','),'class':'arrh'},s)}
+function arr(s,x1,y1,x2,y2,both){E('line',{x1:x1,y1:y1,x2:x2,y2:y2,'class':'arr'},s);head(s,x1,y1,x2,y2);if(both)head(s,x2,y2,x1,y1)}
+
+/* ---- diagram: the machine ---- */
+(function(){var s=S('d-hw',760,316);if(!s)return;
+  E('path',{d:'M139 40V24H621V40','class':'arr'},s);
+  T(s,380,16,{en:'one cooler for the CPU and the GPU: one heat budget, limit 80 °C',ru:'одно охлаждение на CPU и GPU: один тепловой бюджет, предел 80 °C'},'tk','middle');
+  box(s,14,40,250,96,'c2','CPU · i7-11370H',[{en:'4 cores / 8 threads, AVX-512',ru:'4 ядра / 8 потоков, AVX-512'},{en:'cap 2.1–2.2 GHz, turbo off',ru:'потолок 2,1–2,2 ГГц, без турбо'},{en:'L2 1.25 MiB × 4, L3 12 MiB',ru:'L2 1,25 МиБ × 4, L3 12 МиБ'}]);
+  box(s,14,206,250,96,'c2','RAM · 32 GiB LPDDR4-4267',[{en:'routed experts: 14.66 GiB',ru:'эксперты: 14,66 ГиБ'},{en:'embedding table',ru:'таблица эмбеддингов'},{en:'read 52–54 GB/s',ru:'чтение 52–54 ГБ/с'}]);
+  box(s,496,40,250,96,'c1','GPU · RTX 3050 Ti Laptop',[{en:'mixers, router, shared expert,',ru:'миксеры, роутер, общий эксперт,'},{en:'output matrix; 20 SMs',ru:'выходная матрица; 20 SM'}]);
+  box(s,496,206,250,96,'c1','VRAM · 4 GiB',[{en:'dense weights 2.1 GiB',ru:'плотные веса 2,1 ГиБ'},{en:'K/V cache 0.73 GiB at 64K',ru:'кэш K/V 0,73 ГиБ при 64K'},{en:'read 172 GB/s',ru:'чтение 172 ГБ/с'}]);
+  box(s,300,250,160,52,'','NVMe SSD',[{en:'3.4 GB/s',ru:'3,4 ГБ/с'}]);
+  arr(s,139,136,139,206,true);T(s,149,175,{en:'52–54 GB/s',ru:'52–54 ГБ/с'},'tk');
+  arr(s,621,136,621,206,true);T(s,631,175,{en:'172 GB/s',ru:'172 ГБ/с'},'tk');
+  arr(s,264,228,496,228);T(s,380,220,{en:'PCIe 4.0 ×4 · 6.1 GB/s',ru:'PCIe 4.0 ×4 · 6,1 ГБ/с'},'tk','middle');
+  arr(s,300,278,264,278);
+})();
+
+/* ---- diagram: the model ---- */
+(function(){var s=S('d-model',760,362);if(!s)return;var i,y;
+  box(s,14,10,286,36,'c2',{en:'Embedding (table in host RAM)',ru:'Эмбеддинг (таблица в RAM)'});
+  box(s,14,60,286,190,'',{en:'10 groups × 4 layers = 40 layers',ru:'10 групп × 4 слоя = 40 слоёв'});
+  for(i=0;i<4;i++){y=92+i*38;E('rect',{x:28,y:y,width:258,height:30,rx:8,'class':'bx c1'},s);
+    T(s,40,y+20,i<3?{en:'Gated DeltaNet + MoE block',ru:'Gated DeltaNet + блок MoE'}:{en:'Full attention + MoE block',ru:'полное внимание + блок MoE'},'tl')}
+  box(s,14,264,286,36,'c1',{en:'Output: 248,320 tokens',ru:'Выход: 248 320 токенов'});
+  box(s,14,314,286,36,'c3',{en:'MTP block: 1 layer, draft tokens',ru:'Блок MTP: 1 слой, черновики'});
+  arr(s,157,46,157,60);arr(s,157,250,157,264);arr(s,157,300,157,314);
+  box(s,340,10,406,340,'',{en:'The MoE block of every layer',ru:'Блок MoE каждого слоя'});
+  box(s,356,44,374,36,'c1',{en:'Router: 256 scores → the best 8 (GPU)',ru:'Роутер: 256 оценок → лучшие 8 (GPU)'});
+  box(s,356,98,374,96,'c2',{en:'8 routed experts of 256 (CPU pool, RAM)',ru:'8 из 256 экспертов (пул CPU, RAM)'},[{en:'gate, up: 512 × 2048, IQ3_S, 3.44 bits per weight',ru:'gate, up: 512 × 2048, IQ3_S, 3,44 бита на вес'},{en:'down: 2048 × 512, IQ4_XS, 4.25 bits per weight',ru:'down: 2048 × 512, IQ4_XS, 4,25 бита на вес'},{en:'1.5 MB each, 14.66 GiB in all',ru:'по 1,5 МБ, всего 14,66 ГиБ'}]);
+  box(s,356,212,374,36,'c1',{en:'Shared expert, always on (GPU)',ru:'Общий эксперт, всегда включён (GPU)'});
+  box(s,356,266,374,36,'',{en:'Weighted sum → next layer',ru:'Взвешенная сумма → следующий слой'});
+  arr(s,543,80,543,98);arr(s,543,194,543,212);arr(s,543,248,543,266);arr(s,300,155,340,155);
+  T(s,356,322,{en:'blue: computed on the GPU',ru:'синее: считает GPU'},'tk');T(s,356,338,{en:'orange: computed on the CPU, read from RAM',ru:'оранжевое: считает CPU, читает из RAM'},'tk');
+})();
+
+/* ---- chart: one step on a time line ---- */
+(function(){var W=760,L=14,sc=(W-28)/65,s=S('c-timeline',W,104);if(!s)return;var x=L,y=30,h=30,i,t;
+  function seg(ms,cls,lab,tp){var w=ms*sc,g=E('g',tp?{'class':'hit'}:null,s);E('rect',{x:x,y:y,width:Math.max(w-1.5,1),height:h,rx:2,'class':cls},g);if(lab&&w>len(lab)*6.2+10)T(g,x+6,y+19,lab,'ti');if(tp)tip(g,tp);x+=w}
+  seg(5,'s3','1',{en:'Draft 1: the MTP block and a full pass over the output matrix, about 5 ms (estimate)',ru:'Черновик 1: блок MTP и полный проход по выходной матрице, около 5 мс (оценка)'});
+  seg(4.5,'s3','2',{en:'Draft 2: the MTP block on its own output and another full pass over the output matrix, about 4.5 ms (estimate)',ru:'Черновик 2: блок MTP на своём выходе и ещё один полный проход по выходной матрице, около 4,5 мс (оценка)'});
+  for(i=0;i<40;i++){seg(0.35,'s1');seg(0.975,'s2')}
+  seg(2.5,'s3',null,{en:'Output matrix for the 3 rows, the pick and the commit of the recurrent state, about 2.5 ms (estimate)',ru:'Выходная матрица для 3 строк, выбор и фиксация рекуррентного состояния, около 2,5 мс (оценка)'});
+  for(t=0;t<=60;t+=10){E('line',{x1:L+t*sc,y1:y+h+4,x2:L+t*sc,y2:y+h+9,'class':'axis'},s);T(s,L+t*sc,y+h+23,t,'tk','middle')}
+  T(s,W-14,y+h+23,{en:'65 ms',ru:'65 мс'},'tk','end');
+  T(s,L,y-10,{en:'MTP drafts',ru:'черновики MTP'},'tk');
+  T(s,L+9.5*sc+2,y-10,{en:'verify window: 40 layers, in each the GPU (blue) and then the CPU experts (orange)',ru:'окно проверки: 40 слоёв, в каждом GPU (синее), затем эксперты на CPU (оранжевое)'},'tk');
+})();
+
+/* ---- chart: measured configurations ---- */
+hbars('c-measured',[
+ {label:{en:'Baseline: 8 experts, weights as in the file',ru:'База: 8 экспертов, веса как в файле'},v:35.2,val:'35.2',cls:'s1',tip:{en:'64.5 ms a step, 2.27 tokens a step (E7)',ru:'64,5 мс на шаг, 2,27 токена за шаг (E7)'}},
+ {label:{en:'Prefetch 3',ru:'Prefetch 3'},v:39.1,val:'39.1',cls:'s1',tip:{en:'58.6 ms a step (E6); a later run gave 42.1 tok/s with more drafts accepted',ru:'58,6 мс на шаг (E6); более поздний прогон дал 42,1 ток/с при большем числе принятых черновиков'}},
+ {label:{en:'9 resident experts per layer, 16K window',ru:'9 резидентных экспертов на слой, окно 16K'},v:43.0,val:'43.0',cls:'s1',tip:{en:'55.7 ms a step against 66.9 at that window (E11)',ru:'55,7 мс на шаг против 66,9 при этом окне (E11)'}},
+ {label:{en:'6 resident + 3 guessed experts, 16K window',ru:'6 резидентных + 3 угаданных, окно 16K'},v:44.8,val:'44.8',cls:'s1',tip:{en:'53.3 ms a step (E11): the best figure with 8 experts and the original weights',ru:'53,3 мс на шаг (E11): лучшая цифра при 8 экспертах и исходных весах'}},
+ {label:{en:'7 experts',ru:'7 экспертов'},v:40.2,val:'40.2',cls:'s2',tip:{en:'KLD 0.025 (E1)',ru:'KLD 0,025 (E1)'}},
+ {label:{en:'Dense part in Q5_K',ru:'Плотная часть в Q5_K'},v:42.1,val:'42.1',cls:'s2',tip:{en:'58.8 ms a step, KLD 0.024 (E4)',ru:'58,8 мс на шаг, KLD 0,024 (E4)'}},
+ {label:{en:'Default stack: Q5_K, 7 experts, prefetch 3',ru:'Стек по умолчанию: Q5_K, 7 экспертов, prefetch 3'},v:44.1,val:'44.1',cls:'s2',tip:{en:'53.1 ms a step; the runs gave 46.2, 44.1 and 43.7 tok/s; KLD 0.025 (E7)',ru:'53,1 мс на шаг; прогоны дали 46,2, 44,1 и 43,7 ток/с; KLD 0,025 (E7)'}},
+ {label:{en:'Maximum stack: Q4_K, 5 experts, prefetch 3',ru:'Максимальный стек: Q4_K, 5 экспертов, prefetch 3'},v:52.1,val:'52.1',cls:'s2',tip:{en:'44.3 ms a step, KLD 0.083 (E18)',ru:'44,3 мс на шаг, KLD 0,083 (E18)'}},
+ {label:{en:'Maximum stack with resident slots, 16K window',ru:'Максимальный стек со слотами, окно 16K'},v:55.4,val:'55.4',cls:'s2',tip:{en:'41.8 ms a step; its KLD was not measured (E18)',ru:'41,8 мс на шаг; KLD не измерялась (E18)'}}
+],65,10,[{v:50,label:{en:'50 tok/s',ru:'50 ток/с'}},{v:60,label:{en:'60 tok/s',ru:'60 ток/с'}}]);
+
+/* ---- chart: the step budget ---- */
+segrows('c-budget',[
+ {label:{en:'Today: 65 ms (measured)',ru:'Сегодня: 65 мс (замер)'},end:{en:'65 ms',ru:'65 мс'},segs:[
+  {v:14,cls:'s1',txt:{en:'14 ms',ru:'14 мс'},tip:{en:'GPU mixers and routers that the CPU waits for: about 14 ms',ru:'Миксеры и роутеры GPU, которых ждёт CPU: около 14 мс'}},
+  {v:39,cls:'s2',txt:{en:'39 ms',ru:'39 мс'},tip:{en:'CPU pool: the routed experts of 3 rows in 40 layers, about 39 ms',ru:'Пул CPU: маршрутизируемые эксперты 3 строк в 40 слоях, около 39 мс'}},
+  {v:12,cls:'s3',txt:{en:'12 ms',ru:'12 мс'},tip:{en:'Drafts, output matrix, launches, syncs, commit: about 12 ms',ru:'Черновики, выходная матрица, запуски, синхронизации, фиксация: около 12 мс'}}]},
+ {label:{en:'Read speed of the two memories only: 26 ms (estimate)',ru:'Только скорость чтения двух памятей: 26 мс (оценка)'},end:{en:'26 ms',ru:'26 мс'},segs:[
+  {v:13.1,cls:'s1',txt:{en:'13 ms',ru:'13 мс'},tip:{en:'2.1 GiB of dense weights at 172 GB/s: 13.1 ms',ru:'2,1 ГиБ плотных весов на 172 ГБ/с: 13,1 мс'}},
+  {v:13,cls:'s2',txt:{en:'13 ms',ru:'13 мс'},tip:{en:'0.68 GB of experts at 52 GB/s: 13 ms',ru:'0,68 ГБ экспертов на 52 ГБ/с: 13 мс'}}]}
+],70,[{v:45.4,label:{en:'50 tok/s',ru:'50 ток/с'}},{v:37.8,label:{en:'60 tok/s',ru:'60 ток/с'}}]);
+
+/* ---- chart: slots against the K/V tier ---- */
+(function(){var est={en:'estimate',ru:'оценка'},mea={en:'measured',ru:'замер'};
+cols('c-slots',[
+ {v:10,val:'10',l1:'8K',l2:est,tip:{en:'8K tier: about 985 MiB free, about 10 experts per layer (estimate)',ru:'Ступень 8K: свободно около 985 МиБ, около 10 экспертов на слой (оценка)'}},
+ {v:9,val:'9',l1:'16K',l2:mea,tip:{en:'16K tier: 9 experts per layer, 43.0 tok/s (measured, E11)',ru:'Ступень 16K: 9 экспертов на слой, 43,0 ток/с (замер, E11)'}},
+ {v:5,val:'5',l1:'32K',l2:est,tip:{en:'32K tier: about 681 MiB free, about 5 experts per layer (estimate)',ru:'Ступень 32K: свободно около 681 МиБ, около 5 экспертов на слой (оценка)'}},
+ {v:2,val:'2',l1:'48K',l2:est,tip:{en:'48K tier: about 479 MiB free, about 2 experts per layer (estimate)',ru:'Ступень 48K: свободно около 479 МиБ, около 2 экспертов на слой (оценка)'}},
+ {v:0,val:'0',l1:'64K',l2:mea,tip:{en:'64K tier: 276 MiB free, no room for a slot (measured)',ru:'Ступень 64K: свободно 276 МиБ, места для слота нет (замер)'}}
+],12,3)})();
+
+/* ---- chart: where the VRAM goes ---- */
+segrows('c-vram',[
+ {label:{en:'65,536-token window (today): no room for experts',ru:'Окно 65 536 токенов (сегодня): места для экспертов нет'},segs:[
+  {v:2080,cls:'s1',txt:{en:'2.0 GiB',ru:'2,0 ГиБ'},tip:{en:'Dense weights and router: about 2.0 GiB',ru:'Плотные веса и роутер: около 2,0 ГиБ'}},
+  {v:748,cls:'s2',txt:'0.73',tip:{en:'K/V cache for 65,536 tokens: 0.73 GiB',ru:'Кэш K/V на 65 536 токенов: 0,73 ГиБ'}},
+  {v:992,cls:'neu',txt:'0.97',tip:{en:'Buffers, CUDA context, cuBLAS and kernel code: about 0.97 GiB',ru:'Буферы, контекст CUDA, cuBLAS и код ядер: около 0,97 ГиБ'}},
+  {v:276,cls:'fr',txt:'0.27',tc:'tif',tip:{en:'Free: 0.27 GiB, less than the 768 MiB reserve',ru:'Свободно: 0,27 ГиБ, меньше резерва в 768 МиБ'}}]},
+ {label:{en:'16,384-token window, 300 MiB reserve: 9 experts per layer',ru:'Окно 16 384 токена, резерв 300 МиБ: 9 экспертов на слой'},segs:[
+  {v:2080,cls:'s1',txt:{en:'2.0 GiB',ru:'2,0 ГиБ'},tip:{en:'Dense weights and router: about 2.0 GiB',ru:'Плотные веса и роутер: около 2,0 ГиБ'}},
+  {v:187,cls:'s2',tip:{en:'K/V cache for 16,384 tokens: 0.18 GiB',ru:'Кэш K/V на 16 384 токена: 0,18 ГиБ'}},
+  {v:944,cls:'neu',txt:'0.92',tip:{en:'Buffers, CUDA context, cuBLAS and kernel code: about 0.92 GiB',ru:'Буферы, контекст CUDA, cuBLAS и код ядер: около 0,92 ГиБ'}},
+  {v:515,cls:'s3',txt:'0.50',tip:{en:'Resident expert slots: 9 per layer, about 0.50 GiB',ru:'Резидентные слоты экспертов: 9 на слой, около 0,50 ГиБ'}},
+  {v:370,cls:'fr',txt:'0.36',tc:'tif',tip:{en:'Free: the 300 MiB reserve and slack',ru:'Свободно: резерв 300 МиБ и запас'}}]}
+],4096);
+
+/* ---- diagram: IQ3_S block against the 4-bit block ---- */
+(function(){var s=S('d-format',760,196);if(!s)return;var k=4,x0=14;
+  function row(y,parts){var x=x0;parts.forEach(function(p){var w=p.b*k;E('rect',{x:x,y:y,width:Math.max(w-2,2),height:26,rx:4,'class':p.cls},s);if(p.txt&&w-2>len(p.txt)*6.8+14)T(s,x+7,y+18,p.txt,'ti');x+=w})}
+  T(s,x0,14,{en:'IQ3_S block: 110 bytes for 256 weights, 3.44 bits per weight',ru:'Блок IQ3_S: 110 байт на 256 весов, 3,44 бита на вес'},'th');
+  row(22,[{b:2,cls:'neu'},{b:64,cls:'s2',txt:{en:'index, low 8 bits: 64 B',ru:'индекс, младшие 8 бит: 64 Б'}},{b:8,cls:'s2'},{b:32,cls:'s3',txt:{en:'signs: 32 B',ru:'знаки: 32 Б'}},{b:4,cls:'neu'}]);
+  T(s,x0,66,{en:'scale d (2 B) · index (64 B + 8 B of ninth bits) · signs (32 B) · sub-block scales s (4 B)',ru:'масштаб d (2 Б) · индекс (64 Б + 8 Б девятых битов) · знаки (32 Б) · масштабы подблоков s (4 Б)'},'tk');
+  T(s,x0,84,{en:'decode: 9-bit index → table of 512 entries of 4 values → signs → × (2s + 1) × d',ru:'декодирование: 9-битный индекс → таблица из 512 записей по 4 значения → знаки → × (2s + 1) × d'},'tl');
+  T(s,x0,118,{en:'4-bit block: 136 bytes for 256 weights, 4.25 bits per weight, the same values',ru:'4-битный блок: 136 байт на 256 весов, 4,25 бита на вес, те же значения'},'th');
+  row(126,[{b:2,cls:'neu'},{b:6,cls:'neu'},{b:128,cls:'s1',txt:{en:'4-bit codes: sign and one of {1, 3, …, 15}: 128 B',ru:'4-битные коды: знак и одно из {1, 3, …, 15}: 128 Б'}}]);
+  T(s,x0,170,{en:'scale d (2 B) · sub-block scales s (6 B) · codes (128 B)',ru:'масштаб d (2 Б) · масштабы подблоков s (6 Б) · коды (128 Б)'},'tk');
+  T(s,x0,188,{en:'decode: one byte shuffle through a table of 16 entries → × (2s + 1) × d',ru:'декодирование: одна перестановка байт по таблице из 16 записей → × (2s + 1) × d'},'tl');
+})();
+
+/* ---- chart: the projection ---- */
+waterfall('c-water',[
+ {total:65.0,l1:{en:'today',ru:'сегодня'},l2:{en:'measured',ru:'замер'},tip:{en:'Today: 65.0 ms a step, 34.9 tok/s (measured)',ru:'Сегодня: 65,0 мс на шаг, 34,9 ток/с (замер)'}},
+ {d:-7.0,l1:'prefetch 3',l2:{en:'measured',ru:'замер'},tip:{en:'Prefetch 3, exists: −7.0 ms, to 58.0 ms (measured)',ru:'Prefetch 3, уже есть: −7,0 мс, до 58,0 мс (замер)'}},
+ {d:-5.8,lo:-4,hi:-7,l1:'L1',l2:{en:'hot experts',ru:'горячие эксп.'},tip:{en:'L1 on top of the prefetch: −5.8 ms (−4 to −7), to 52.2 ms; below a 16K fill',ru:'L1 поверх prefetch: −5,8 мс (−4…−7), до 52,2 мс; при заполнении ниже 16K'}},
+ {d:-8.1,lo:-5.8,hi:-9.7,l1:'L3',l2:{en:'4-bit repack',ru:'4 бита'},tip:{en:'L3: the remaining pool time × 0.69 (0.63 to 0.78): −8.1 ms (−5.8 to −9.7), to 44.1 ms',ru:'L3: оставшееся время пула × 0,69 (0,63–0,78): −8,1 мс (−5,8…−9,7), до 44,1 мс'}},
+ {d:-1.6,lo:-0.5,hi:-2.5,l1:'L2',l2:{en:'governor',ru:'регулятор'},tip:{en:'L2: the saved CPU energy becomes frequency: −1.6 ms (−0.5 to −2.5), to 42.5 ms',ru:'L2: сэкономленная энергия CPU становится частотой: −1,6 мс (−0,5…−2,5), до 42,5 мс'}},
+ {d:-5.0,lo:-3,hi:-6,l1:'L4',l2:{en:'draft head',ru:'черн. голова'},tip:{en:'L4: two draft passes over the output matrix become cheap: −5.0 ms (−3 to −6), to 37.5 ms',ru:'L4: два черновых прохода по выходной матрице дешевеют: −5,0 мс (−3…−6), до 37,5 мс'}},
+ {total:37.5,l1:{en:'projected',ru:'расчёт'},l2:{en:'estimate',ru:'оценка'},tip:{en:'Projected: 37.5 ms, 60.5 tok/s if every item lands at its middle; 44.7 ms and 50.8 tok/s at the low ends',ru:'Расчёт: 37,5 мс, 60,5 ток/с, если каждый пункт сработает по средней оценке; 44,7 мс и 50,8 ток/с по нижним границам'}}
+],70,[{v:45.4,label:{en:'50 tok/s',ru:'50 ток/с'}},{v:37.8,label:{en:'60 tok/s',ru:'60 ток/с'}}]);
+
+/* ---- chart: probability against gain ---- */
+(function(){function p(id,x,y,en,ru,left){return {id:id,x:x,y:y,left:left,tip:{en:id+': '+en,ru:id+': '+ru}}}
+scatter('c-scatter',[
+ p('L1',85,16.9,'hot experts in VRAM; 85%, about 11 ms alone','горячие эксперты в VRAM; 85%, около 11 мс отдельно'),
+ p('L2',80,4.6,'closed-loop governor; 80%, about 3 ms','регулятор с обратной связью; 80%, около 3 мс'),
+ p('L3',75,18.6,'exact 4-bit repack; 75%, about 12 ms alone','точная 4-битная перепаковка; 75%, около 12 мс отдельно'),
+ p('L4',65,7.7,'cheap draft head; 65%, about 5 ms','дешёвая черновая голова; 65%, около 5 мс'),
+ p('L5',60,7.0,'draft depth per step; 60%, about +7% tok/s','глубина черновиков на шаг; 60%, около +7% ток/с'),
+ p('L6',50,3.1,'audit of the 12 ms outside the layers; 50%, about 2 ms','аудит 12 мс вне слоёв; 50%, около 2 мс'),
+ p('L7',45,3.8,'PCIe prefetch, second version; 45%, about 2.5 ms','PCIe prefetch, вторая версия; 45%, около 2,5 мс'),
+ p('L8',45,6.0,'n-gram drafts; 45%, about +6% on average traffic','n-граммные черновики; 45%, около +6% на среднем трафике'),
+ p('L9',40,3.8,'dense GPU kernels; 40%, about 2.5 ms','плотные ядра GPU; 40%, около 2,5 мс',true),
+ p('L10',40,5.4,'attention at a long context; 40%, about 4 ms at a 16K fill','внимание на длинном контексте; 40%, около 4 мс при заполнении 16K',true),
+ p('L11',40,4.6,'one arena for prompt buffers and slots; 40%, about 3 ms','одна арена для буферов промпта и слотов; 40%, около 3 мс'),
+ p('L12',30,3.8,'platform profile; 30%, unknown, 0 to 5 ms','профиль платформы; 30%, неизвестно, 0–5 мс'),
+ p('L13',25,2.6,'warm the guessed experts into the caches; 25%, about 1.5 ms','прогрев угаданных экспертов в кэши; 25%, около 1,5 мс'),
+ p('L14',25,1.2,'exact two-stage verify head; 25%, about 1 ms','точная двухэтапная голова проверки; 25%, около 1 мс',true)
+],{en:'probability that the item pays (estimate) →',ru:'вероятность, что пункт окупится (оценка) →'},{en:'expected saving alone, % of today’s 65 ms step',ru:'ожидаемая экономия отдельно, % от сегодняшнего шага 65 мс'})})();
+
+/* ---- diagram: the thermal loop ---- */
+(function(){var s=S('d-thermal',760,196);if(!s)return;
+  box(s,14,30,170,64,'',{en:'Sensors',ru:'Датчики'},[{en:'CPU package, GPU',ru:'пакет CPU, GPU'},{en:'once a second',ru:'раз в секунду'}]);
+  box(s,214,30,170,64,'c1',{en:'Controller (L2)',ru:'Регулятор (L2)'},[{en:'target 77 °C',ru:'цель 77 °C'},{en:'look-ahead 3 s',ru:'упреждение 3 с'}]);
+  box(s,414,30,170,64,'c1',{en:'Frequency cap',ru:'Потолок частоты'},[{en:'1.8–3.3 GHz',ru:'1,8–3,3 ГГц'},{en:'steps of 100 MHz',ru:'шаги по 100 МГц'}]);
+  box(s,614,30,132,64,'c2',{en:'Engine',ru:'Движок'},[{en:'CPU pool + GPU',ru:'пул CPU + GPU'},{en:'make heat',ru:'дают тепло'}]);
+  arr(s,184,62,214,62);arr(s,384,62,414,62);arr(s,584,62,614,62);
+  E('path',{d:'M680 94V124H99V102','class':'arr'},s);head(s,99,124,99,95);
+  T(s,250,118,{en:'temperature',ru:'температура'},'tk','middle');
+  arr(s,399,124,399,152);
+  box(s,214,152,370,36,'c3',{en:'Backstop: pause the engine at 80 °C (exists)',ru:'Страховка: пауза движка при 80 °C (уже есть)'});
+})();
+
+/* ---- tooltips ---- */
+var tipEl=doc.getElementById('tip');
+function show(n,x,y){var t=n.getAttribute('data-tip-'+lang());if(!t)return;tipEl.textContent=t;tipEl.style.display='block';
+  var w=tipEl.offsetWidth,h=tipEl.offsetHeight,l=Math.min(Math.max(8,x+12),window.innerWidth-w-8),tp=y-h-10;if(tp<8)tp=y+18;
+  tipEl.style.left=l+'px';tipEl.style.top=tp+'px'}
+function hide(){tipEl.style.display='none'}
+doc.addEventListener('mousemove',function(e){var n=e.target.closest?e.target.closest('[data-tip-en]'):null;if(n)show(n,e.clientX,e.clientY);else hide()});
+doc.addEventListener('focusin',function(e){var n=e.target.closest?e.target.closest('[data-tip-en]'):null;if(n){var r=n.getBoundingClientRect();show(n,r.left+r.width/2,r.top)}});
+doc.addEventListener('focusout',hide);
+
+/* ---- language ---- */
+var first='en';
+try{first=localStorage.getItem('q36ll-lang')||'en'}catch(e){}
+var hash=(location.hash||'').replace('#','');
+if(hash==='ru'||hash==='en')first=hash;
+function setLang(l){root.setAttribute('data-lang',l);root.lang=l;
+  doc.title=l==='ru'?'Qwen3.6-35B-A3B на 50–60 ток/с: бэклог без потерь':'Qwen3.6-35B-A3B at 50 to 60 tok/s: a lossless backlog';
+  try{localStorage.setItem('q36ll-lang',l)}catch(e){}}
+setLang(first);
+doc.querySelectorAll('.toggle button').forEach(function(b){b.addEventListener('click',function(){setLang(b.getAttribute('data-l'))})});
+})();
+</script>
+</body>
+</html>

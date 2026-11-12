@@ -7,7 +7,7 @@ concluded) is in `docs/TPS_REPORT.md`; the list of the follow-up checks T1 to T9
 
 ## Setup of the measurements
 
-- Machine: RTX 3050 Ti Laptop (4 GiB), 31 GiB RAM, 4 physical cores, DDR5. Model: `UD-IQ4_XS` with the MTP block grafted from the
+- Machine: RTX 3050 Ti Laptop (4 GiB), 31 GiB RAM (LPDDR4 at 4267 MT/s, as DMI reports it), 4 physical cores. Model: `UD-IQ4_XS` with the MTP block grafted from the
   Q4_K_XL file (17.0 GiB); the routed experts (14.66 GiB) are read in place from the page cache and computed on the CPU pool.
 - Engine speed: `tools/lever_matrix.py` or `tools/quant_bench.py`, 2.2 GHz CPU cap, 6 pool workers, `STRATA_POOL_SPIN_US=0`,
   `STRATA_IQ_VBMI=1`, MTP 2, the code prompt, 900 tokens, three repeats, the package cooled to 55 C before each request.

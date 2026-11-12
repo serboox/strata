@@ -4,6 +4,9 @@ The full record of each item (what was expected, what was done, the numbers, the
 numbers are also kept in the ledger `docs/TPS_EXPERIMENTS.md`. This file is the list of the items T1 to T9, with the reason each was
 added, how it was run and where its result is. An item is closed when its result is in the report and the ledger.
 
+What could raise the speed further with all 8 experts and the weights unchanged (proposals only, ordered by how likely each is to
+pay; nothing in it is implemented) is in [qwen36-lossless-backlog.html](qwen36-lossless-backlog.html).
+
 Reference points (code prompt, MTP 2, 2.2 GHz cap, 80 C limit): baseline 35.2 tok/s and 64.5 ms a step; the stack "dense Q5_K + 7
 experts + prefetch 3" runs a step in 52.1 ms (46.2 tok/s, engine KLD about 0.025; two repeats gave 53.1 and 53.4 ms, 44.1 and 43.7 tok/s); with the dense part in Q4_K 50.3 ms (48.3 tok/s,
 KLD about 0.04). HumanEval on the engine: baseline 153 of 164, the two stacks 150 and 152.

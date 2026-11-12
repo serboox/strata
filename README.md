@@ -41,6 +41,8 @@ The default window is 65,536 tokens, with about 0.15 GiB of VRAM left (0.49 GiB 
 
 The long-form explanation with charts, in Russian and English, is `docs/index.html`; `docs/TUNING.md` has the tables, `docs/PI.md` the agent setup, and `docs/TPS_REPORT.md` the record of the November 2026 speed experiments (what
 was expected, done, measured and concluded; the numbers are in `docs/TPS_EXPERIMENTS.md`, the work items in `docs/TPS_BACKLOG.md`).
+`docs/qwen36-lossless-backlog.html` lists what could raise the speed further with all 8 experts and the weights unchanged (proposals, not
+implemented).
 
 ## Steady speed under a temperature limit
 
