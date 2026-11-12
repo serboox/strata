@@ -73,12 +73,23 @@ Prefetch + L1 + L3 + L2 + L4: 44.7 ms (50.8 tok/s) at the low ends, 42.5 ms (53.
 - **Concluded.** GO. The IQ3_S gate/up cost drops by about 31% at the engine's 4 threads and 2-3 rows. Nothing else is needed on the CPU side: the existing 4-bit kernel does the work. What remains is the engine part: a one-time repack of IQ3_S gate/up into the 136-byte layout at load, +2.0 GiB RAM, and the GPU gate/up path for resident and guessed experts (they read the same arena).
 - **Incident.** The 4-thread run without a frequency cap took the package to 86 C for a few seconds, above the 80 C limit. Later runs of this kind use `tools/cpucap` at 2200 MHz.
 
-### Implementation status (12 November 2026; code only, nothing was run on the model)
+### Implementation status (12 November 2026; code written, nothing built or run since the first benchmark)
 
-| Item | State |
-| --- | --- |
-| L2 | coded: `serve/capctl.py`, `CpuCap.set_mhz`, launcher `--cpu-adaptive` (off by default); unit tests written and passed |
-| L5 | coded in a simple form: `STRATA_Q36_MTP_ADAPT=1` / `--mtp-adapt` verifies one draft after a step whose first draft failed (no draft probabilities yet); not built, not run |
-| L1 | only the launcher part: `--resident-experts` (16K window, 300 MiB reserve); the elastic K/V tiers and slot dropping are not written |
-| L3 | the CPU kernel is proven (benchmark); the load-time repack and the GPU gate/up 4-bit path are not written |
-| L4, L6-L14, C1-C3 | not started |
+Every switch is off by default. The code of the items below has not been compiled; the first build will show syntax and type errors.
+
+| Item | Code | Switch |
+| --- | --- | --- |
+| L2 closed-loop governor | `serve/capctl.py`, `CpuCap.set_mhz`, unit tests (these passed) | `--cpu-adaptive` |
+| L3 4-bit repack of IQ3_S gate/up | `iq3s_repack_to_4bit`, odd-table variant of the IQ4_XS kernel, CPU dispatch (`NativeFmt::gu_odd4`), load-time repack, check in `iq_vbmi_bench`; CPU path of the mapped experts only (the GPU paths and the pinned arena keep IQ3_S) | `--iq3s-4bit` |
+| L4 draft head over a token list | `STRATA_Q36_DRAFT_LIST`, a copy of the listed output rows in VRAM, `tools/draft_list.py`; the list is by frequency only (no context tokens yet) | `--draft-list FILE` |
+| L5 draft depth per step | one draft after a step whose first draft failed (no draft probabilities) | `--mtp-adapt` |
+| L6 chain the drafts on the device | draft tokens go device to device, picks return once | `--chain-device` |
+| L8 n-gram drafts | `ngram_continuation`, an external draft list in `spec_step` | `--ngram MATCH[,MAX]` |
+| L10 attention | V-load depth 16 instead of 8 (same order of sums) | `--attn-ahead` |
+| L12 platform profile | `apply_platform_profile` (sudo -A fallback) | `--platform-profile NAME` |
+| L13 warm guessed experts | prefetcht2 of the guessed experts' first bytes | `--warm-experts KIB` |
+| L1 hot experts | launcher part only | `--resident-experts` |
+| C1 strict mode | every expert on the CPU: no prefetch, no resident experts | `--strict` |
+| C2 speculative sampling | `target_distribution`, `judge_sampled`, a judge hook in `spec_step` | `--spec-sampling` |
+
+Not written: L1's elastic K/V tiers and slot dropping, L7 (guess two layers ahead needs a third ring), L9 (dense GPU kernels), L11 (shared arena for prompt buffers and slots), L14 (two-stage verify head: the cheap bound found for it was too loose to prune rows), C1's GPU-side bit-exactness (the strict flag is the CPU-only form), C3 (two interleaved streams).

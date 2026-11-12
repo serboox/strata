@@ -434,6 +434,7 @@ __global__ void k_attn_part(const float* q, const uint8_t* kc, const uint8_t* vc
 /// k_attn_part for the q8 cache with head_dim 256 and kGqa query heads per K / V head, doing the same arithmetic in the same
 /// order (so the same bits): one block per (chunk, row, K / V head) reads the chunk's K and V once for all kGqa heads
 /// instead of once per head.  grid (n_chunk, n_rows / kGqa), block 256 (= kChunkCells).
+template <int kAhead>   // cells whose V loads are issued together: 8 (the default) or 16 (STRATA_Q36_ATTN_AHEAD=16); the sums keep their order
 __global__ void k_attn_part_gqa(const float* q, const uint8_t* kc, const uint8_t* vc, const int32_t* pos0, int t0, int H,
                                 int HKV, int ctx, float scale, int n_chunk, float* pacc, float* pm, float* pl, RowSel rs) {
     constexpr int HD = 256, G = kGqa, kPad = kQ8Block + 4, kPtRow = 72;   // qs rows padded: the 8 lanes of a cell read distinct banks
@@ -534,7 +535,6 @@ __global__ void k_attn_part_gqa(const float* q, const uint8_t* kc, const uint8_t
     float acc[G] = {};
     const uint8_t* vp = vc + ((size_t) kvh * ctx + p0) * rowb + (size_t) (j / kQ8Block) * sizeof(BlockQ8);
     const int vi = (int) sizeof(__half) + j % kQ8Block;
-    constexpr int kAhead = 8;   // cells whose V loads are issued together, so their latencies overlap
     for (int k0 = 0; k0 < n; k0 += kAhead) {
         float d[kAhead];
         int8_t qv[kAhead];
@@ -2912,10 +2912,16 @@ struct Engine {
                     const int nc = graph_mode ? n_chunk
                                               : (int) std::min<int64_t>(n_chunk, (p0 + t0 + nt + kChunkCells - 1) / kChunkCells);
                     if (kv_q8 && HD == 256 && H == HKV * kGqa && !attn_per_head) {
-                        k_attn_part_gqa<<<dim3(nc, nt * HKV), kChunkCells, 0, st>>>(q, rows_mode ? nullptr : kc[li],
-                                                                                    rows_mode ? nullptr : vc[li], dpos, t0, H, HKV,
-                                                                                    ctx, 1.0f / sqrtf((float) HD), n_chunk, pacc, pm,
-                                                                                    pl, rs);
+                        if (attn_ahead == 16)
+                            k_attn_part_gqa<16><<<dim3(nc, nt * HKV), kChunkCells, 0, st>>>(q, rows_mode ? nullptr : kc[li],
+                                                                                            rows_mode ? nullptr : vc[li], dpos, t0, H, HKV,
+                                                                                            ctx, 1.0f / sqrtf((float) HD), n_chunk, pacc, pm,
+                                                                                            pl, rs);
+                        else
+                            k_attn_part_gqa<8><<<dim3(nc, nt * HKV), kChunkCells, 0, st>>>(q, rows_mode ? nullptr : kc[li],
+                                                                                           rows_mode ? nullptr : vc[li], dpos, t0, H, HKV,
+                                                                                           ctx, 1.0f / sqrtf((float) HD), n_chunk, pacc, pm,
+                                                                                           pl, rs);
                     } else {
                         k_attn_part<<<dim3(nc, nt * H), kChunkCells, 0, st>>>(q, rows_mode ? nullptr : kc[li],
                                                                              rows_mode ? nullptr : vc[li], dpos, t0, H, HKV, ctx,
@@ -3106,6 +3112,7 @@ struct Engine {
     /// rejected draft and nothing else - the answer is the plain greedy answer whatever draft_n is.  0 = the whole vocabulary.
     int draft_n = 0;
     bool chain_device = false;   // STRATA_Q36_CHAIN_DEV
+    int attn_ahead = 8;          // STRATA_Q36_ATTN_AHEAD: V cells loaded together by the decode attention kernel
     bool head_sub_off() const { return m->head_sub.d == nullptr; }
     int32_t draft_token(int32_t picked) const {
         return m->head_sub.d != nullptr && picked >= 0 && picked < (int32_t) m->draft_ids.size() ? m->draft_ids[(size_t) picked] : picked;
@@ -5915,6 +5922,7 @@ int strata::qwen35::run(int argc, char** argv) {
     E.mtp_d = m.has_mtp ? mtp_d : 0;
     if (const char* w = std::getenv("STRATA_Q36_WARM")) E.warm_kib = (size_t) std::max(0, std::atoi(w));
     E.chain_device = std::getenv("STRATA_Q36_CHAIN_DEV") != nullptr && std::string(std::getenv("STRATA_Q36_CHAIN_DEV")) != "0";
+    if (const char* a = std::getenv("STRATA_Q36_ATTN_AHEAD")) E.attn_ahead = std::atoi(a) == 16 ? 16 : 8;
     E.mtp_adapt = std::getenv("STRATA_Q36_MTP_ADAPT") != nullptr && std::string(std::getenv("STRATA_Q36_MTP_ADAPT")) != "0";
     if (E.mtp_adapt && E.mtp_d > 1) std::fprintf(stderr, "strata-q36: adaptive draft depth: one draft after a step whose first draft failed\n");
     if (draft_vocab < 0 && std::getenv("STRATA_Q36_DRAFT_VOCAB") != nullptr) draft_vocab = std::atoi(std::getenv("STRATA_Q36_DRAFT_VOCAB"));
