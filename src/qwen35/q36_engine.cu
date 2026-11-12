@@ -4218,7 +4218,8 @@ struct Engine {
     /// stopped mid-answer leaves the state at the tokens it has shown: a conversation that continues from them (the server's
     /// hand-over of a stopped request to a batch slot) reuses it instead of reading them again.
     int spec_step(int x_tok, const std::vector<int32_t>& fix, int D, std::vector<int32_t>& drafts, int32_t* picks,
-                  const std::atomic<bool>* cancel = nullptr, const std::vector<int32_t>* ext = nullptr) {
+                  const std::atomic<bool>* cancel = nullptr, const std::vector<int32_t>* ext = nullptr,
+                  const std::function<int(const float*, int, const std::vector<int32_t>&, int32_t*)>* judge = nullptr) {
         const int N = (int) m->g.n_embd;
         OvMark step_mark;
         if (ov.stats) step_mark = ov_mark();
@@ -4298,7 +4299,14 @@ struct Engine {
         CK(cudaMemcpyAsync(hpin + 2, pick, (size_t) T * 4, cudaMemcpyDeviceToHost, st));
         CK(cudaStreamSynchronize(st));
         int a = 0;
-        while (a < D && hpin[2 + a] == drafts[(size_t) a]) ++a;
+        if (judge != nullptr) {   // speculative sampling: the caller's rejection rule over the window's logits, all T rows
+            std::vector<float> all((size_t) T * (size_t) m->g.n_vocab);
+            CK(cudaMemcpyAsync(all.data(), logits, all.size() * 4, cudaMemcpyDeviceToHost, st));
+            CK(cudaStreamSynchronize(st));
+            a = (*judge)(all.data(), T, drafts, hpin + 2);
+        } else {
+            while (a < D && hpin[2 + a] == drafts[(size_t) a]) ++a;
+        }
         if (cancel != nullptr && cancel->load()) a = 0;
         for (int i = 0; i <= a; ++i) picks[i] = hpin[2 + i];
         if (ov.commit) commit_overlapped(a + 1);
@@ -4789,6 +4797,80 @@ std::vector<int32_t> parse_ids(const char* s) {
         s = e;
     }
     return v;
+}
+
+/// The distribution sample() draws from (penalties, top-k, min-p and top-p applied, normalised): ids and their probabilities.
+void target_distribution(std::vector<float>& lg, const Sampling& s, const std::vector<int32_t>& hist, std::vector<int>& idx, std::vector<double>& p) {
+    if (s.last_n != 0 && (s.repeat != 1.f || s.freq != 0.f || s.present != 0.f)) {
+        std::map<int, int> cnt;
+        const size_t from = s.last_n < 0 || (size_t) s.last_n >= hist.size() ? 0 : hist.size() - (size_t) s.last_n;
+        for (size_t i = from; i < hist.size(); ++i) ++cnt[hist[i]];
+        for (const auto& [id, c] : cnt) {
+            float& v = lg[(size_t) id];
+            if (s.repeat != 1.f) v = v > 0 ? v / s.repeat : v * s.repeat;
+            v -= (float) c * s.freq + s.present;
+        }
+    }
+    const int kk = std::max(1, std::min(s.top_k > 0 ? s.top_k : 64, (int) lg.size()));
+    idx.resize(lg.size());
+    for (size_t i = 0; i < idx.size(); ++i) idx[i] = (int) i;
+    std::partial_sort(idx.begin(), idx.begin() + kk, idx.end(), [&](int a, int b) { return lg[a] > lg[b]; });
+    idx.resize((size_t) kk);
+    p.assign(idx.size(), 0.0);
+    const double mx = lg[(size_t) idx[0]];
+    double sum = 0;
+    const double temp = s.temperature > 0.f ? s.temperature : 1.0;
+    for (size_t i = 0; i < idx.size(); ++i) sum += (p[i] = std::exp((lg[(size_t) idx[i]] - mx) / temp));
+    size_t keep = idx.size();
+    double cum = 0;
+    for (size_t i = 0; i < idx.size(); ++i) {
+        if (p[i] / sum < s.min_p * (p[0] / sum)) { keep = i; break; }
+        cum += p[i] / sum;
+        if (cum >= s.top_p) { keep = i + 1; break; }
+    }
+    keep = std::max<size_t>(1, keep);
+    idx.resize(keep);
+    p.resize(keep);
+    double tot = 0;
+    for (double v : p) tot += v;
+    for (double& v : p) v /= tot;
+}
+
+/// Speculative sampling for drafts picked by argmax (a point mass): draft i is kept with the probability the target distribution gives
+/// it; on a rejection the next token is drawn from that distribution with the draft removed; when every draft is kept the window's last
+/// row gives a further token.  The tokens come out with exactly the distribution plain sampling has.  Returns the number kept and
+/// writes picks[0 .. kept].
+int judge_sampled(const float* all, int rows, const std::vector<int32_t>& drafts, int32_t* picks, size_t vocab, const Sampling& smp,
+                  std::vector<int32_t> hist, std::mt19937_64& rng) {
+    std::uniform_real_distribution<double> unit(0.0, 1.0);
+    std::vector<int> idx;
+    std::vector<double> p;
+    const int D = (int) drafts.size();
+    for (int i = 0; i < rows; ++i) {
+        std::vector<float> row(all + (size_t) i * vocab, all + (size_t) (i + 1) * vocab);
+        target_distribution(row, smp, hist, idx, p);
+        if (i < D) {
+            size_t at = idx.size();
+            for (size_t j = 0; j < idx.size(); ++j)
+                if (idx[j] == drafts[(size_t) i]) at = j;
+            const double keep_p = at < idx.size() ? p[at] : 0.0;
+            if (unit(rng) < keep_p) {
+                picks[i] = drafts[(size_t) i];
+                hist.push_back(drafts[(size_t) i]);
+                continue;
+            }
+            if (at < idx.size()) p[at] = 0.0;   // the residual: the draft's mass removed, the rest renormalised by the draw below
+        }
+        double tot = 0;
+        for (double v : p) tot += v;
+        double r = unit(rng) * tot;
+        int tok = idx.back();
+        for (size_t j = 0; j < idx.size(); ++j)
+            if ((r -= p[j]) <= 0) { tok = idx[j]; break; }
+        picks[i] = tok;
+        return i;
+    }
+    return rows - 1;
 }
 
 bool is_eos(int t) { return t == 248044 || t == 248046; }
@@ -5379,7 +5461,10 @@ struct Serve {
             const char* comma = e != nullptr ? std::strchr(e, ',') : nullptr;
             return comma != nullptr ? std::max(1, std::min(6, std::atoi(comma + 1))) : 4;
         }();
-        const bool spec = E.mtp_d > 0 && !smp.needs_logits() && !adm;
+        // STRATA_Q36_SPEC_SAMPLING=1: requests with a temperature or penalties use the drafts too, with the rejection rule of judge_sampled
+        static const bool spec_sampling = std::getenv("STRATA_Q36_SPEC_SAMPLING") != nullptr && std::string(std::getenv("STRATA_Q36_SPEC_SAMPLING")) != "0";
+        bool carry = false;   // the next token came out of a sampled speculative step: it is not drawn again from the logits
+        const bool spec = E.mtp_d > 0 && (!smp.needs_logits() || spec_sampling) && !adm;
         std::vector<int32_t> fix, drafts;
         int32_t picks[16];
         int nx = smp.needs_logits() ? -1 : E.greedy();
@@ -5418,10 +5503,11 @@ struct Serve {
             return;
         }
         for (;;) {
-            if (smp.needs_logits()) {
+            if (smp.needs_logits() && !carry) {
                 E.host_logits(lg);
                 nx = sample(lg, smp, hist, rng);
             }
+            carry = false;
             auto emit = [&](int t) {   // false: the answer ends here
                 std::printf("T %d\n", t);
                 std::fflush(stdout);
@@ -5443,7 +5529,12 @@ struct Serve {
                     ngram = ngram_continuation(hist, ngram_min, ngram_max);
                     if ((int) ngram.size() <= depth) ngram.clear();   // not longer than the MTP drafts: they stay
                 }
-                const int a = E.spec_step(nx, fix, depth, drafts, picks, &stop, ngram.empty() ? nullptr : &ngram);
+                std::function<int(const float*, int, const std::vector<int32_t>&, int32_t*)> judge;
+                if (smp.needs_logits())
+                    judge = [&](const float* all, int rows, const std::vector<int32_t>& d, int32_t* out) {
+                        return judge_sampled(all, rows, d, out, (size_t) E.m->g.n_vocab, smp, hist, rng);
+                    };
+                const int a = E.spec_step(nx, fix, depth, drafts, picks, &stop, ngram.empty() ? nullptr : &ngram, judge ? &judge : nullptr);
                 E.mtp_note(a, depth);
                 offered += depth;
                 accepted += a;
@@ -5459,6 +5550,7 @@ struct Serve {
                     if (!emit(drafts[(size_t) i])) ended = true;
                 if (ended) break;
                 nx = picks[a];
+                carry = smp.needs_logits();
                 continue;
             }
             if (E.pos + 1 > E.ctx) break;
