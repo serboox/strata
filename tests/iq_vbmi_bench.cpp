@@ -266,6 +266,104 @@ void bench(int threads, double seconds) {
     }
 }
 
+// The IQ3_S gate/up matrices stored as 4-bit IQ4_XS rows of 2048 weights (the repack of backlog item L3): the same kernel
+// as the down projection, 2 * kFf rows of 8 blocks each.
+constexpr int kGuRows = 2 * kFf;
+
+struct Gu4Rows {
+    size_t row = 0;
+    std::vector<uint8_t> blob;
+    Gu4Rows() : row(ggml_row_size(GGML_TYPE_IQ4_XS, kEmbd)), blob((size_t) kGuRows * row) {
+        for (auto& byte : blob) byte = (uint8_t) rng();
+        std::uniform_real_distribution<float> scale(0.0005f, 0.06f);
+        for (size_t b = 0; b < blob.size() / sizeof(block_iq4_xs); ++b) {
+            const ggml_fp16_t d = ggml_fp32_to_fp16(scale(rng));
+            std::memcpy(blob.data() + b * sizeof(block_iq4_xs), &d, 2);
+        }
+    }
+};
+
+int check_gu4() {
+    int failures = 0;
+    const auto dot = ggml_get_type_traits_cpu(GGML_TYPE_IQ4_XS)->vec_dot;
+    for (int nt : {1, 2, 3, 8}) {
+        double worst = 0, scale = 0;
+        for (int round = 0; round < 3; ++round) {
+            Gu4Rows rows;
+            std::vector<std::vector<block_q8_K>> act;
+            std::vector<const void*> act_ptr;
+            std::vector<std::vector<float>> want(nt, std::vector<float>(kGuRows)), got(nt, std::vector<float>(kGuRows));
+            std::vector<float*> got_ptr;
+            for (int t = 0; t < nt; ++t) {
+                act.push_back(make_activation());
+                act_ptr.push_back(act.back().data());
+                got_ptr.push_back(got[t].data());
+                for (int r = 0; r < kGuRows; ++r) dot(kEmbd, &want[t][r], 0, rows.blob.data() + (size_t) r * rows.row, 0, act.back().data(), 0, 1);
+            }
+            iq4xs_vnni_rows(rows.blob.data(), rows.row, kEmbd, act_ptr.data(), nt, got_ptr.data(), 0, kGuRows);
+            for (int t = 0; t < nt; ++t)
+                for (int r = 0; r < kGuRows; ++r) {
+                    worst = std::max(worst, mismatch(want[t][r], got[t][r]));
+                    scale = std::max(scale, (double) std::fabs(want[t][r]));
+                }
+        }
+        const double relative = worst / (scale + 1e-30);
+        const bool ok = relative < 1e-6;
+        std::printf("gate/up as 4-bit nt=%2d  largest difference %.3g of %.3g (relative %.2g)  %s\n", nt, worst, scale, relative, ok ? "ok" : "FAIL");
+        failures += !ok;
+    }
+    return failures;
+}
+
+// Throughput of both gate/up forms. `sets` experts per thread: a large number streams from memory, 1 stays in the cache.
+void bench_gu(int threads, double seconds, int sets) {
+    for (int nt : {1, 2, 3}) {
+        for (int variant = 0; variant < 2; ++variant) {
+            std::vector<Expert> iq3((size_t) threads * (variant == 0 ? sets : 0));
+            std::vector<Gu4Rows> q4((size_t) threads * (variant == 1 ? sets : 0));
+            std::vector<long> done((size_t) threads, 0);
+            std::vector<std::vector<std::vector<block_q8_K>>> thread_act((size_t) threads);
+            for (auto& per_thread : thread_act)
+                for (int t = 0; t < nt; ++t) per_thread.push_back(make_activation());
+            std::atomic<int> ready{0};
+            std::atomic<bool> go{false}, stop{false};
+            std::vector<std::thread> pool;
+            for (int th = 0; th < threads; ++th)
+                pool.emplace_back([&, th] {
+                    const auto& act = thread_act[(size_t) th];
+                    std::vector<const void*> act_ptr;
+                    std::vector<std::vector<float>> out(nt, std::vector<float>(kGuRows));
+                    std::vector<float*> out_ptr;
+                    for (int t = 0; t < nt; ++t) {
+                        act_ptr.push_back(act[t].data());
+                        out_ptr.push_back(out[t].data());
+                    }
+                    ready++;
+                    while (!go.load()) std::this_thread::yield();
+                    size_t at = 0;
+                    while (!stop.load()) {
+                        const size_t k = (size_t) th * sets + (at++ % sets);
+                        if (variant == 0) iq3s_vbmi_gu_rows(iq3[k].blob.data(), iq3[k].row, iq3[k].up_off(), kEmbd, act_ptr.data(), nt, out_ptr.data(), 0, kFf);
+                        else iq4xs_vnni_rows(q4[k].blob.data(), q4[k].row, kEmbd, act_ptr.data(), nt, out_ptr.data(), 0, kGuRows);
+                        done[(size_t) th]++;
+                    }
+                });
+            while (ready.load() < threads) std::this_thread::yield();
+            go = true;
+            const double t0 = now();
+            std::this_thread::sleep_for(std::chrono::duration<double>(seconds));
+            stop = true;
+            const double wall = now() - t0;
+            for (auto& t : pool) t.join();
+            long total = 0;
+            for (long d : done) total += d;
+            const double bytes = variant == 0 ? (double) iq3[0].blob.size() : (double) q4[0].blob.size();
+            std::printf("gate/up nt=%d threads=%d sets=%-3d %-14s %8.0f experts/s  %6.1f us per expert and thread  %5.1f GB/s\n", nt, threads, sets,
+                        variant == 0 ? "IQ3_S kernel" : "4-bit repack", total / wall, wall * threads / (double) total * 1e6, total / wall * bytes / 1e9);
+        }
+    }
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -286,10 +384,12 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "this CPU has no AVX-512 VBMI and BITALG: nothing to test\n");
         return 77;
     }
-    const int failures = check() + check_down();
+    const int failures = check() + check_down() + check_gu4();
     if (run_bench) {
         bench(std::max(1, std::min(threads, 8)), seconds);
         bench_down(std::max(1, std::min(threads, 8)), seconds);
+        bench_gu(std::max(1, std::min(threads, 8)), seconds, 48);
+        bench_gu(std::max(1, std::min(threads, 8)), seconds, 1);
     }
     std::printf("%s\n", failures == 0 ? "iq vbmi parity: ok" : "iq vbmi parity: FAILED");
     return failures == 0 ? 0 : 1;

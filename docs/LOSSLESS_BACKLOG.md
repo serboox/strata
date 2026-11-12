@@ -14,7 +14,7 @@ Classes: **bit-exact** (same numbers as today), **drafts only** (only proposed t
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | L1 | Hot experts in the VRAM the context does not use: tiered K/V cache (8K/16K/32K/64K) and a watched 300 MiB reserve instead of 768 MiB; the rest goes to resident expert slots | 85% | -9..-13 ms (-4..-7 ms on top of prefetch) | rounding | medium | - | replay `STRATA_ROUTE_TRACE` offline: hit rate at 1, 5, 9, 12, 16 slots per layer | not started |
 | L2 | Closed-loop frequency governor (aim 77 C, steps of 100 MHz, 1.8-3.3 GHz) in front of the 80 C pause | 80% | -2..-4 ms (+3..+6% on short and medium requests) | bit-exact | small | - | none; compare with the fixed 2.1 GHz cap on 8 back-to-back requests | not started |
-| L3 | Exact 4-bit repack of the IQ3_S gate/up matrices (same decoded values, 136-byte block, one byte shuffle); +2.0 GiB RAM | 75% | -8..-14 ms (-6..-10 ms after L1 and prefetch) | bit-exact | medium-large | GPU gate/up 4-bit path for resident and guessed experts | microbenchmark next to `iq_vbmi_bench`; go if a block costs under 25 cycles at 2 rows | not started |
+| L3 | Exact 4-bit repack of the IQ3_S gate/up matrices (same decoded values, 136-byte block, one byte shuffle); +2.0 GiB RAM | 75% | -8..-14 ms (-6..-10 ms after L1 and prefetch) | bit-exact | medium-large | GPU gate/up 4-bit path for resident and guessed experts | microbenchmark next to `iq_vbmi_bench`; go if a block costs under 25 cycles at 2 rows | microbenchmark done: GO (see Results); engine work not started |
 | L4 | Cheap draft head: context tokens plus a frequency list (16-32K rows) instead of a full pass over the 248,320-row output matrix, twice a step | 65% | -4..-6 ms | drafts only | medium | new Q6_K row-gather kernel | offline: share of accepted drafts inside "context + top N" for N = 8, 16, 32K; go at 99% | not started |
 | L5 | Draft depth chosen for every step from the MTP block's own probability and the last step's acceptance | 60% | +3..+12% tok/s | drafts only | small-medium | - | log (draft probability, accepted) for a few thousand steps; pick the threshold offline | not started |
 | L6 | Audit of the 12 ms outside the layers: chain the two drafts on the device, keep the MTP block's hot experts in VRAM | 50% | -1..-3 ms | bit-exact | small-medium | - | `STRATA_Q36_OVERLAP_STATS=1` and one `nsys` run of the benchmark mode with MTP | not started |
@@ -54,3 +54,21 @@ Acceptance of every item: the sustained figure (median of the second half of a b
 ## Projection
 
 Prefetch + L1 + L3 + L2 + L4: 44.7 ms (50.8 tok/s) at the low ends, 42.5 ms (53.4) weighted by probability, 37.5 ms (60.5) at the middle estimates; L5 comes on top as more tokens a step. At a 16-32K fill every figure is about 15% lower unless L10 lands.
+
+## Results
+
+### L3 microbenchmark (12 November 2026)
+
+- **Expected.** A gate/up row stored as 4-bit IQ4_XS-format codes (same decoded values as IQ3_S) should cost fewer cycles than the IQ3_S kernel; go if under 25 cycles a block at 2 rows, pool time about x0.69.
+- **Done.** `tests/iq_vbmi_bench.cpp` got `check_gu4` (the existing `iq4xs_vnni_rows` kernel on rows of 2048 weights against ggml's IQ4_XS dot, 1, 2, 3 and 8 tokens) and `bench_gu` (both gate/up forms, streaming from 48 experts per thread and cache-resident with 1). Run: `ninja iq_vbmi_bench && ./iq_vbmi_bench --bench --threads N --seconds 2`. Synthetic experts, no model. Turbo off, no frequency cap, machine not idle (load 0.7).
+- **Got.** Correctness: relative error 1e-7 to 1.7e-7 against ggml for every token count, so the kernel already handles 8-block rows. Speed, one expert (gate and up) per call, us per expert and thread:
+
+  | | IQ3_S kernel | 4-bit repack | ratio |
+  | --- | --- | --- | --- |
+  | 1 thread, streaming, 1 / 2 / 3 rows | 98.5 / 123.7 / 138.1 | 71.8 / 72.2 / 93.8 | 0.73 / 0.58 / 0.68 |
+  | 1 thread, in cache, 1 / 2 / 3 rows | 122.8 / 135.4 / 160.9 | 41.3 / 63.8 / 85.5 | 0.34 / 0.47 / 0.53 |
+  | 4 threads, streaming, 2 / 3 rows | 124.6 / 136.8 | 85.8 / 94.0 | 0.69 / 0.69 |
+
+  At 4 threads the repack reads 52.0 / 47.4 GB/s: the RAM ceiling (52-54 GB/s) is reached, so there the gain is memory-bound, and it matches the x0.69 estimate.
+- **Concluded.** GO. The IQ3_S gate/up cost drops by about 31% at the engine's 4 threads and 2-3 rows. Nothing else is needed on the CPU side: the existing 4-bit kernel does the work. What remains is the engine part: a one-time repack of IQ3_S gate/up into the 136-byte layout at load, +2.0 GiB RAM, and the GPU gate/up path for resident and guessed experts (they read the same arena).
+- **Incident.** The 4-thread run without a frequency cap took the package to 86 C for a few seconds, above the 80 C limit. Later runs of this kind use `tools/cpucap` at 2200 MHz.
