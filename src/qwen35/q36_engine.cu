@@ -2184,7 +2184,6 @@ struct Engine {
         return layers * 2 * (size_t) m->g.n_head_kv * (size_t) std::min<int64_t>(kv_tier, ctx) * kv_row_bytes(m->g.head_dim, kv_q8);
     }
     bool evict_one_layer_of_slots() {
-        if (pf_n > 0) return false;   // the guess slots sit after the resident ones in the same blobs
         for (size_t li = hy.size(); li-- > 0;) {
             Layer& L = const_cast<Layer&>(layer_at((int) li));
             if (L.n_slots <= 0 || L.blobs == nullptr) continue;
@@ -2193,9 +2192,11 @@ struct Engine {
             std::fill(H.slot_of.begin(), H.slot_of.end(), -1);
             CK(cudaMemcpy(H.slot_of_d, H.slot_of.data(), H.slot_of.size() * 4, cudaMemcpyHostToDevice));
             H.exp_in_slot.clear();
-            CK(cudaFree(L.blobs));
+            CK(cudaFree(L.blobs));   // the guess slots sit after the resident ones in the same blobs: the layer gives up its prefetch too
             L.blobs = nullptr;
             L.n_slots = 0;
+            L.pf_base = -1;
+            if (li < pf_ready.size()) pf_ready[li] = 0;
             return true;
         }
         return false;

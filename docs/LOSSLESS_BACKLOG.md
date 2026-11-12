@@ -88,7 +88,7 @@ Every switch is off by default. The code of the items below has not been compile
 | L10 attention | V-load depth 16 instead of 8 (same order of sums) | `--attn-ahead` |
 | L12 platform profile | `apply_platform_profile` (sudo -A fallback) | `--platform-profile NAME` |
 | L7 prefetch two layers ahead | guess for layer li+2 after layer li's router, three rings and three guess buffers, per-layer ready flags | `--prefetch-lead2` |
-| L1 hot experts, elastic | `--resident-experts` (16K window, 300 MiB reserve) and `--kv-lazy TIER`: K/V on CUDA virtual memory, pages mapped as the position grows (`VmmBuf`, `kv_ensure`), the experts' slots sized for the tier, whole layers of slots given up when the context outgrows it; one session, not with prefetch | `--resident-experts`, `--kv-lazy` |
+| L1 hot experts, elastic | `--resident-experts` (16K window, 300 MiB reserve) and `--kv-lazy TIER`: K/V on CUDA virtual memory, pages mapped as the position grows (`VmmBuf`, `kv_ensure`), the experts' slots sized for the tier, whole layers of slots (with their guess slots, so also with prefetch) given up when the context outgrows it; one session | `--resident-experts`, `--kv-lazy` |
 | L9 dense GPU | the software side only: GPU clock lock (`--gpu-clocks MIN,MAX`, release with `reset`); no kernel was rewritten (they need stall data from Nsight Compute first) | `--gpu-clocks` |
 | L11 shared arena | the expert staging pair (about 70 MiB) mapped only while a prompt is read (`lent_alloc`, `lend_map`); the mixer scratch region is not lent | `--lend-buffers` |
 | L13 warm guessed experts | prefetcht2 of the guessed experts' first bytes | `--warm-experts KIB` |

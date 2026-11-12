@@ -543,7 +543,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="with --draft-list: the verify pass takes the best of the listed tokens when the row norms prove no other token can beat it, else the whole matrix runs (off by default)")
     parser.add_argument("--kv-lazy", type=int, default=0, metavar="TIER_CELLS",
                         help="give the K/V cache physical memory as the context grows (CUDA virtual memory) and let the experts' slots use the rest, leaving room for TIER_CELLS cells; "
-                             "slots are given up layer by layer when the context outgrows the room; one session, not with --expert-prefetch (off by default)")
+                             "slots (and a layer's guess slots with them) are given up layer by layer when the context outgrows the room; one session (off by default)")
     parser.add_argument("--lend-buffers", action="store_true",
                         help="the expert staging buffers (about 70 MiB) hold video memory only while a prompt is read, the rest of the time it is free for the K/V cache (off by default)")
     parser.add_argument("--parallel", type=int, default=1, metavar="N",
