@@ -77,7 +77,12 @@ the maximum single-position values are 0.2 to 1.1, and the KLDs do not add up ex
 
 The tok/s of the rows with a high draft acceptance flatter them; the step time is the fair figure. Dense Q5_K with 7 experts and a
 prefetch of 3 is 0.8 ms a step slower than 6 experts with a prefetch of 3 and has a KLD about a third lower (0.0253 against
-0.0384); dense Q4_K with 7 experts and a prefetch of 3 is the fastest measured. Quality on tasks (tool calls, agent runs) was not measured for any of these.
+0.0384); dense Q4_K with 7 experts and a prefetch of 3 is the fastest measured. On both prompts (12 November, final runs, baseline 34.4 and 34.6 tok/s on the code prompt, 34.2 and 34.3 on the text prompt): dense
+Q5_K with prefetch 3 ran 42.5 and 44.0 tok/s on the code prompt and 36.6 and 40.1 on the text prompt (two runs, the draft
+acceptance differing between them); dense Q5_K with 7 experts and a prefetch of 3 ran 43.7 on the code prompt and 41.8 on the
+text prompt. HumanEval on the engine (164 problems): baseline 153, prefetch 3 alone 153, dense Q5_K + 7 experts + prefetch 3 150,
+dense Q4_K + 7 experts + prefetch 3 152; compared problem by problem the differences are balanced (2 lost and 2 gained, 5 and 2,
+4 and 3) and inside noise (exact two-sided p 1.0, 0.45, 1.0). Quality on tool calls and agent runs was not measured for any of these.
 
 ## Lossless and system-level ideas that gave nothing (or little)
 
