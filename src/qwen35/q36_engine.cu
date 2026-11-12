@@ -33,6 +33,8 @@
 #include "q36_overlap.hpp"
 #if defined(STRATA_Q36_CPU_POOL)
 #include "strata/kernels/cpu/native_expert.hpp"
+#include "strata/kernels/cpu/expert_layout.hpp"
+#include "strata/kernels/cpu/iq4xs_vnni.hpp"
 #include "strata/kernels/cpu/pool.hpp"
 #endif
 
