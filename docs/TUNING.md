@@ -598,6 +598,15 @@ context no expert sits in VRAM at all (0.27 GiB free, the reserve is 768 MiB). `
   baseline's after 360 to 1050 characters (a float rounding flipping a close token) and stays coherent. In the benchmark mode
   (`--bench-tg`, one row, synthetic tokens, 29.3 tok/s baseline) P=2 gave +7.5 and P=3 +4 percent (the engine settles on 2 there);
   nearly every guess was right in that mode (97 percent), which real text does not do.
+- With fewer experts (12 November, code prompt, baseline 34.9 and 35.3 tok/s, 65.1 and 64.4 ms a step): 6 experts alone 41.8 tok/s,
+  55.3 ms; 6 experts with P=3 44.9 tok/s (+28 percent against the baseline), 51.3 ms (-7 percent against 6 experts alone). P=3 alone
+  gave 42.1 tok/s and 58.0 ms (drafts accepted 0.72, so the tok/s flatter it), P=4 41.5 tok/s and 58.8 ms: the engine settled on 3 of 4
+  guesses with 5,424 late layers, so P above 3 does not pay.
+- Quality of the changed rounding (12 November, `strata-q36 --tokens ... --force ... --dump-full-logits`, teacher forcing, 40 prompt
+  tokens and 260 forced tokens of this project's text, the decode steps of one row): against the CPU-only run the logits of P=3 have
+  a mean KLD of 0.0057 (median 0.0021, maximum 0.25) and the same best token in 97.3 percent of the positions, P=2 0.0062 and 95.4
+  percent; two CPU-only runs are identical (KLD 0). The difference is not only the order of float sums: the GPU quantises the
+  activations in blocks of 32 (q8_1) and the CPU in blocks of 256 (Q8_K). For comparison, 7 experts cost a mean KLD of 0.025.
 - What went wrong first, and why the order matters: the first version queued the guess kernels before the router and the copies
   at the start of the CPU part. The router result came late (the guess kernels ran in front of it) and the copies kept the copy
   engine busy when the CPU rows had to go to the card, so the rows queued behind them: -32 percent at P=3. Now the guess runs
@@ -608,9 +617,9 @@ context no expert sits in VRAM at all (0.27 GiB free, the reserve is 768 MiB). `
   late layers, U of P guesses in use` every 8192 layers (and at a normal exit of the benchmark mode). P=3 had 0.4 percent late layers.
 - `--vram-reserve MiB` (default 768) sets the VRAM the expert placement leaves free; a smaller value gives resident slots (and
   so room for guess slots) at a long context, at the cost of the margin for the driver and other programs.
-- Not done or not measured: P above 3, a guess made two layers ahead (the copy rate, about 2.8 experts per layer through PCIe,
-  limits P more than the lead time does), a share for the MTP block, a guess from more than the current residual stream, the
-  combination with resident slots, the quality (KLD) of the changed rounding, and the effect on long contexts.
+- Not done or not measured: a guess made two layers ahead (the copy rate, about 2.8 experts per layer through PCIe, limits P more
+  than the lead time does), a share for the MTP block, a guess from more than the current residual stream, the combination with
+  resident slots, and the effect on long contexts.
 - Reading the VRAM: the engine prints where the card went (K/V caches, recurrent states); the K/V caches cost about 0.011 GiB
   per 1024 cells per session.
 
