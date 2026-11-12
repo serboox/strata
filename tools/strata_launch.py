@@ -525,6 +525,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--kv-lazy", type=int, default=0, metavar="TIER_CELLS",
                         help="give the K/V cache physical memory as the context grows (CUDA virtual memory) and let the experts' slots use the rest, leaving room for TIER_CELLS cells; "
                              "slots are given up layer by layer when the context outgrows the room; one session, not with --expert-prefetch (off by default)")
+    parser.add_argument("--lend-buffers", action="store_true",
+                        help="the expert staging buffers (about 70 MiB) hold video memory only while a prompt is read, the rest of the time it is free for the K/V cache (off by default)")
     parser.add_argument("--mtp-adapt", action="store_true",
                         help="after a step whose first draft was rejected, verify one draft only in the next step (the text is unchanged; off by default)")
     parser.add_argument("--cpu-adaptive", action="store_true",
@@ -633,7 +635,7 @@ def main() -> int:
     (ROOT / "logs").mkdir(exist_ok=True)
     config_path = RUN_DIR / "qwen36.json"
     kernel_env = iq_kernel_env(args.iq_kernels, MODEL_FILE)
-    lever_env = {**experts_used_env(experts_used), **(overlap_environment(args.overlap) or {}), **({"STRATA_Q36_MTP_ADAPT": "1"} if args.mtp_adapt else {}), **({"STRATA_Q36_CHAIN_DEV": "1"} if args.chain_device else {}), **({"STRATA_Q36_KV_LAZY": "1", "STRATA_Q36_KV_TIER": str(args.kv_lazy)} if args.kv_lazy else {}), **({"STRATA_Q36_HEAD2": "1"} if args.head2 else {}), **({"STRATA_Q36_STRICT": "1"} if args.strict else {}), **({"STRATA_Q36_PF_LEAD": "2"} if args.prefetch_lead2 else {}), **({"STRATA_Q36_ATTN_AHEAD": "16"} if args.attn_ahead else {}), **({"STRATA_IQ3S_4BIT": "1"} if args.iq3s_4bit else {}), **({"STRATA_Q36_SPEC_SAMPLING": "1"} if args.spec_sampling else {}), **({"STRATA_Q36_NGRAM": str(args.ngram)} if args.ngram else {}), **({"STRATA_Q36_WARM": str(args.warm_experts)} if args.warm_experts else {}), **({"STRATA_Q36_DRAFT_LIST": str(args.draft_list)} if args.draft_list else {})}
+    lever_env = {**experts_used_env(experts_used), **(overlap_environment(args.overlap) or {}), **({"STRATA_Q36_MTP_ADAPT": "1"} if args.mtp_adapt else {}), **({"STRATA_Q36_CHAIN_DEV": "1"} if args.chain_device else {}), **({"STRATA_Q36_LEND": "1"} if args.lend_buffers else {}), **({"STRATA_Q36_KV_LAZY": "1", "STRATA_Q36_KV_TIER": str(args.kv_lazy)} if args.kv_lazy else {}), **({"STRATA_Q36_HEAD2": "1"} if args.head2 else {}), **({"STRATA_Q36_STRICT": "1"} if args.strict else {}), **({"STRATA_Q36_PF_LEAD": "2"} if args.prefetch_lead2 else {}), **({"STRATA_Q36_ATTN_AHEAD": "16"} if args.attn_ahead else {}), **({"STRATA_IQ3S_4BIT": "1"} if args.iq3s_4bit else {}), **({"STRATA_Q36_SPEC_SAMPLING": "1"} if args.spec_sampling else {}), **({"STRATA_Q36_NGRAM": str(args.ngram)} if args.ngram else {}), **({"STRATA_Q36_WARM": str(args.warm_experts)} if args.warm_experts else {}), **({"STRATA_Q36_DRAFT_LIST": str(args.draft_list)} if args.draft_list else {})}
     config = build_config(profile, args.port, args.sampling, args.max_temp,
                           with_igpu(engine_environment(kernel_env, cpu_max_mhz, lever_env), args.igpu_experts))
     config_path.write_text(json.dumps(config, indent=1) + "\n", encoding="utf-8")

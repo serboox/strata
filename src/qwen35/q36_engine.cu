@@ -1689,6 +1689,15 @@ struct VmmBuf {
         }
         return true;
     }
+    /// Gives every mapped page back to the driver (the address range stays reserved).
+    void unmap_all() {
+        for (size_t gi = 0; gi < mapped.size(); ++gi) {
+            if (!mapped[gi]) continue;
+            cuMemUnmap(base + gi * gran, gran);
+            cuMemRelease(handles[gi]);
+            mapped[gi] = 0;
+        }
+    }
 };
 
 template <class T> T* dalloc_t(size_t n) {
@@ -2122,6 +2131,36 @@ struct Engine {
     // ---- lazy K / V (STRATA_Q36_KV_LAZY=1, one session): physical pages follow the position; when the card is full, whole layers' resident
     // expert slots are given up (evict_one_layer_of_slots) to make room.  STRATA_Q36_KV_TIER=<cells> (default 8192) is the context the
     // expert placement leaves room for.
+    // STRATA_Q36_LEND=1: the expert staging pair (about 70 MiB, read only while a prompt chunk streams its experts) has physical memory only while
+    // a prompt is read; the rest of the time its pages belong to the K / V cache and the slots
+    bool lend = false;
+    struct Lent { size_t bytes; VmmBuf buf; };
+    std::vector<std::unique_ptr<Lent>> lent;
+    template <class T> void lent_alloc(T*& field, size_t bytes) {
+        auto l = std::make_unique<Lent>();
+        l->bytes = bytes;
+        if (!l->buf.reserve(bytes)) {
+            std::fprintf(stderr, "strata-q36: STRATA_Q36_LEND: the address range could not be reserved\n");
+            std::exit(1);
+        }
+        field = reinterpret_cast<T*>(l->buf.base);
+        lent.push_back(std::move(l));
+    }
+    void lend_map(bool on) {
+        for (auto& l : lent) {
+            if (!on) {
+                CK(cudaDeviceSynchronize());
+                l->buf.unmap_all();
+                continue;
+            }
+            while (!l->buf.map(0, l->bytes)) {
+                if (!evict_one_layer_of_slots()) {
+                    std::fprintf(stderr, "strata-q36: STRATA_Q36_LEND: no video memory for the prompt buffers and no expert slots left to give up\n");
+                    std::exit(1);
+                }
+            }
+        }
+    }
     bool kv_lazy = false;
     int64_t kv_tier = 8192;
     mutable std::map<const uint8_t*, std::unique_ptr<VmmBuf>> vmm;
@@ -4259,6 +4298,11 @@ struct Engine {
             on_chunk(1);
             return 1;
         }
+        struct LendGuard {
+            Engine* e;
+            ~LendGuard() { if (e->lend) e->lend_map(false); }
+        } lend_guard{this};
+        if (lend) lend_map(true);
         for (int64_t i = 0; i < n; i += tmax) {
             const int T = (int) std::min<int64_t>(tmax, n - i);
             CK(cudaStreamSynchronize(st));
@@ -4987,8 +5031,12 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
     if (staging) {
         CK(cudaStreamCreateWithFlags(&E.cst, cudaStreamNonBlocking));
         for (int b = 0; b < 2; ++b) {
-            CK(cudaMalloc(&E.stage[b], stage_bytes));
-            CK(cudaMemset(E.stage[b], 0, stage_bytes));
+            if (E.lend) {
+                E.lent_alloc(E.stage[b], stage_bytes);
+            } else {
+                CK(cudaMalloc(&E.stage[b], stage_bytes));
+                CK(cudaMemset(E.stage[b], 0, stage_bytes));
+            }
             CK(cudaEventCreateWithFlags(&E.ev_copy[b], cudaEventDisableTiming));
             CK(cudaEventCreateWithFlags(&E.ev_used[b], cudaEventDisableTiming));
             CK(cudaEventRecord(E.ev_used[b], E.st));
@@ -6134,6 +6182,7 @@ int strata::qwen35::run(int argc, char** argv) {
     }
     E.ckpt_token = ckpt_token_arg;
     if (mmq_group_arg > 0) E.mmq_group = mmq_group_arg;
+    E.lend = std::getenv("STRATA_Q36_LEND") != nullptr && std::string(std::getenv("STRATA_Q36_LEND")) != "0";
     if (const char* lazy = std::getenv("STRATA_Q36_KV_LAZY")) {
         E.kv_lazy = lazy[0] != '0' && batch <= 1;
         if (const char* tier = std::getenv("STRATA_Q36_KV_TIER")) E.kv_tier = std::max<long long>(256, std::atoll(tier));
