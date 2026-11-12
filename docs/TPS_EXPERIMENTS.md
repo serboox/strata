@@ -17,9 +17,12 @@ Every row says what was measured, the number, and whether the idea is worth anot
 
 ## Verdict
 
-Decode speed can be raised in software, and the only large lever is fewer routed experts per token, which changes the output.
-Everything lossless that was found adds up to a few percent. The decode step is a strict chain GPU, then CPU experts, then GPU,
-so the GPU is idle for more than half of it; the options to change that are listed at the end.
+Decode speed can be raised in software. The large levers change the output: fewer routed experts per token, and a lighter dense
+part (Q5_K or Q4_K instead of Q8_0). Letting the GPU compute a few guessed experts (`--expert-prefetch`) gives about 10 percent
+per step for a small change in the output (a mean KLD of about 0.005). A good compromise among the measured combinations is the
+dense part in Q5_K with 7 experts and a prefetch of 3: a step in 52.1 ms against 64.5 (46.2 against 35.2 tok/s) for a mean KLD of
+about 0.025; the fastest measured, with the dense part in Q4_K, takes 50.3 ms for about 0.04 (see "Settings that stack"). The decode step is a strict chain GPU, then CPU experts, then GPU, so the GPU is idle for much of it; the
+options to change that are listed at the end.
 
 ## Fewer experts per token (K, run-time setting `--experts-used`)
 
@@ -48,9 +51,33 @@ Variants of the same idea that do not beat the plain setting:
 | --- | --- | --- |
 | Dense part Q8_0 to Q6_K, attention + GDN + shared expert | +0.9 % per step (+1.1 % tok/s), KLD 0.0124 | measured, small |
 | Dense part Q8_0 to Q6_K, all groups (with output and embeddings) | +3.2 % per step (+9.7 % tok/s on the code prompt, +2.9 % on a text prompt: part of it is higher draft acceptance), KLD 0.0125 | measured; per unit of KLD K=7 is the better trade (+10.8 % per step at KLD 0.025 against +3.2 % at 0.0125) |
-| Dense part Q8_0 to Q5_K / Q4_K | the Q5_K file was written (saves 0.68 GiB, about +5 % per step expected from the Q6_K slope), neither was measured; Q4_K was not made | paused; make the files with a ggml quantiser called through ctypes as in `tools/requant_dense.py`'s reference |
+| Dense part Q8_0 to Q5_K / Q4_K (all groups; made with `tools/requant_dense.py --to q5_K` / `--to q4_K`, branch `requant_dense_kquants`) | 12 November, code prompt, MTP, baseline 35.2 tok/s and 64.5 ms a step: Q5_K 42.1 tok/s and 58.8 ms (-9 % per step), Q4_K 42.6 tok/s and 55.5 ms (-14 %); llama.cpp KLD against the IQ4_XS file: Q5_K 0.0216 (perplexity +1.1 %, same best token 93.8 %), Q4_K 0.0428 (+1.7 %, 92.1 %) | measured; the step gain is larger than the Q6_K slope suggested (-3 %) and worth its KLD, see "Settings that stack" |
 | Lower-bit expert files, `UD-IQ3_XXS` (13.2 GB) and `UD-Q3_K_S` (15.4 GB) | KLD 0.071 and 0.051, perplexity +2.3 % and +0.9 %, same best token in 89.0 % and 91.3 %. At first the engine refused both files: the down projections are IQ3_XXS and IQ3_S, which were not in `STRATA_D_FMTS` in `src/kernels/cuda/iq_kernels.cu` (the gate/up lists did contain 18, 21 and 22); the branch `iq3_down_formats` adds them. | Speed of the `UD-Q3_K_S` file with the MTP block grafted (`tools/gguf_graft.py --prefix blk.40. --set-u32 qwen35moe.block_count=41 --add-u32 qwen35moe.nextn_predict_layers=1 BASE DONOR OUT`, donor the Q4_K_XL file, as in the README), 11 November: 13.6 / 12.8 tok/s on the code / text prompt against 35.1 / 34.5 for the IQ4_XS file in the same session, drafts accepted 0.62 / 0.57, so 2.6 to 2.7 times slower (the CPU kernels for IQ3_XXS gate/up and IQ3_S down are not the fast ones of IQ3_S / IQ4_XS). The `UD-IQ3_XXS` file (gate/up IQ2_S, down IQ3_XXS) ran at 17.1 / 16.4 tok/s against 35.1 / 34.5 (IQ4_XS again 35.2 / 34.6), drafts accepted 0.69 / 0.62, 2.1 times slower. The byte saving is 26 % and 15 % of the expert bytes, but the CPU kernel speed decides, so these files lose to K=6 (+18.7 % at KLD 0.060) and K=7 (+14.4 % at 0.025) unless IQ3_XXS and IQ3_S get kernels as fast as the IQ4_XS ones |
 | Rank-based mixed precision of the experts (Q4 for the top ranks, Q2 for the rest) | judged unattractive on this base file: IQ4_XS is already about 3.4 to 4 bits; see `docs/MIXED_PRECISION_EXPERTS.md` | not implemented for Qwen3.6 |
+
+## Settings that stack (12 November)
+
+Code prompt, MTP 2, 2.2 GHz cap, baseline 34.9 to 35.3 tok/s and 64.4 to 65.1 ms a step (the baseline runs lie between 34.9 and 35.3 tok/s, about 1 percent apart). The KLD is
+the mean over 261 teacher-forced positions of the engine's own logits against the CPU-only run of the unchanged file (40 prompt tokens
+and 260 forced tokens of this project's text, `strata-q36 --tokens ... --force ... --dump-full-logits`); it is noisy at that size,
+the maximum single-position values are 0.2 to 1.1, and the KLDs do not add up exactly.
+
+| Setting | tok/s | ms a step | step against the baseline | mean KLD | same best token |
+| --- | --- | --- | --- | --- | --- |
+| baseline | 35.2 | 64.5 | - | 0 | - |
+| prefetch 3 | 42.1 (drafts accepted 0.72) | 58.0 | -10 % | 0.0052 | 96.9 % |
+| 7 experts | about 40 (earlier run) | about 58 | about -10 % | 0.0185 | 93.1 % |
+| dense Q5_K | 42.1 (accepted 0.69) | 58.8 | -9 % | 0.0241 | 92.7 % |
+| dense Q4_K | 42.6 (accepted 0.67) | 55.5 | -14 % | 0.0369 | 92.0 % |
+| 6 experts | 41.8 | 55.3 | -14 % | 0.0376 | 91.6 % |
+| 6 experts + prefetch 3 | 44.9 | 51.3 | -20 % | 0.0384 | 90.8 % |
+| dense Q4_K + prefetch 3 | 44.6 (accepted 0.59) | 53.4 | -17 % | 0.0355 | 91.6 % |
+| dense Q5_K + 7 experts + prefetch 3 | 46.2 (accepted 0.71) | 52.1 | -19 % | 0.0253 | 91.6 % |
+| dense Q4_K + 7 experts + prefetch 3 | 48.3 (accepted 0.75) | 50.3 | -22 % | 0.0407 | 91.6 % |
+
+The tok/s of the rows with a high draft acceptance flatter them; the step time is the fair figure. Dense Q5_K with 7 experts and a
+prefetch of 3 is 0.8 ms a step slower than 6 experts with a prefetch of 3 and has a KLD about a third lower (0.0253 against
+0.0384); dense Q4_K with 7 experts and a prefetch of 3 is the fastest measured. Quality on tasks (tool calls, agent runs) was not measured for any of these.
 
 ## Lossless and system-level ideas that gave nothing (or little)
 
@@ -85,7 +112,7 @@ about 52 us (0.42 ms per layer for 8 experts). DRAM read by 6 threads: 52 GB/s a
 Measuring tips: a `serve` run under `nsys` loses its report when the launcher stops the engine, so profile the benchmark mode,
 which exits by itself. The engine counters (`CPU path ms`) are printed only at a normal exit.
 
-## Ways to put more load on the GPU (proposals, none implemented)
+## Ways to put more load on the GPU (proposals; the PCIe prefetch is implemented and measured)
 
 Reaching 80 to 100 % GPU duty in one decode stream is not possible while the experts are computed on the CPU after the router:
 the chain GPU, CPU, GPU is a data dependency. What can change the balance:
@@ -101,7 +128,7 @@ the chain GPU, CPU, GPU is a data dependency. What can change the balance:
 
 ## What was not covered
 
-- Tool-call accuracy and multi-step agent quality at K below 8 (HumanEval only covers code).
-- Speed of the lower-bit expert files (the engine needs the two down formats first).
-- The Q5_K and Q4_K dense variants (one file exists, nothing measured).
+- Tool-call accuracy and multi-step agent quality at K below 8, with a Q5_K or Q4_K dense part and with the prefetch (HumanEval only
+  covers code, and only K was run on it).
+- HumanEval or another task benchmark of the stacked settings.
 - n-gram drafting inside the engine and `nsys` of a step with MTP.
