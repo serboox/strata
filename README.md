@@ -112,10 +112,36 @@ check, with the engine's default of 4 CPU threads; the cap and the pool spin of 
 | KL divergence from BF16 (published figures) | 0.033 | 0.012 |
 
 IQ4_XS decodes about 6 % faster, which is inside the spread of its runs (29.6 to 36.1), and processes a prompt 1.5 to 1.7 times
-faster (1.2 to 1.6 times before the faster kernels). Q4_K_XL, the default, has the smaller loss against BF16 (Unsloth's KLD chart gives IQ4_XS a KLD 2.8 times larger; accuracy
+faster (1.2 to 1.6 times before the faster kernels). Q4_K_XL, the file of the quick start, has the smaller loss against BF16 (Unsloth's KLD chart gives IQ4_XS a KLD 2.8 times larger; accuracy
 on tasks is not measured for this model) and needs about 23 GB of free RAM for full speed. IQ4_XS needs about 18 GB, so it is the
 better file when a browser and chat programs hold part of the memory; without a cap it is also the faster one (14.7 against 12.9
 tokens per second).
+
+## The default stack: dense Q5_K, 7 experts, prefetch 3
+
+`bin/strata-serve` starts the measured fast setting of this model unless told otherwise:
+
+- the file `Qwen3.6-35B-A3B-UD-IQ4_XS-mtp-d5.gguf` when it exists (else the Q4_K_XL file): the IQ4_XS file with the dense matrices
+  (attention, recurrent blocks, shared expert, embeddings, MTP projection) re-quantised from Q8_0 to Q5_K;
+- 7 routed experts per token instead of 8 (`--experts-used`);
+- a prefetch of 3 guessed experts per layer to the GPU over PCIe (`--expert-prefetch`), on the `auto` profile.
+
+On the reference laptop (code prompt, MTP 2, 2.2 GHz cap) this takes a decode step from 65 ms to about 53 ms: 44 to 46 against 35 tokens per
+second, at a mean KL divergence of about 0.025 from the unchanged file; HumanEval 150 of 164 against 153, and no loss on the
+generated tool-call tests. The measurements and the other settings that were tried are in [docs/TPS_REPORT.md](docs/TPS_REPORT.md).
+
+```sh
+python3 tools/requant_dense.py models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp.gguf \
+    models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp-d5.gguf --groups all --to q5_K     # makes the 16.3 GiB file
+bin/strata-serve --experts-used 8 --expert-prefetch 0                                      # the model's own routing, no prefetch
+bin/strata-serve --model models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp.gguf       # another file, same two settings
+```
+
+The prefetch keeps all the experts page-locked in RAM (about 15 GiB) and the server takes about a minute to start. The launcher
+leaves the prefetch off by itself, with a line on stderr, when less memory is free than the file plus 2 GiB, or when `--overlap`
+or `--igpu-experts` is used, and on the memory-limited profiles (`lean`, `balanced`, `fast`, `max`); `--expert-prefetch P` asks for
+it explicitly. The 7 experts apply to every profile. See "Expert prefetch over PCIe" and "Fewer experts per token" in
+[docs/TUNING.md](docs/TUNING.md).
 
 ## What it needs
 
@@ -134,7 +160,7 @@ bin/strata-serve           # the server on http://127.0.0.1:8080, no memory limi
 tools/spi                  # in another terminal: pi on that server inside a sandbox (setup: docs/PI.md)
 ```
 
-The default profile `auto` sets no memory limit: the kernel keeps the model's experts in the page cache while memory is
+The default profile `auto` sets no memory limit: unless the prefetch of "The default stack" is on (it page-locks the experts), the kernel keeps the model's experts in the page cache while memory is
 free and takes them back when another program asks, so the speed (about 30 tokens per second sustained with 23 GB free and the
 default frequency cap) falls gradually instead of the program failing. `bin/strata-serve --profile lean|balanced|fast|max` caps the server's memory
 (8, 12, 16 or 22 GB) when a hard budget is needed; `--ram 14G` sets one by hand. A hard cap costs speed, because the

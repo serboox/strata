@@ -126,17 +126,19 @@ it when `spi` ends. The models it may start are listed in `~/.pi/agent-local/loc
 ```json
 {
   "root": "~/path/to/strata",
-  "default": "qwen3.6-35b-a3b-iq4xs",
+  "default": "qwen3.6-35b-a3b-q5k",
   "models": {
-    "qwen3.6-35b-a3b-iq4xs": {"file": "models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp.gguf"},
-    "qwen3.6-35b-a3b-q4kxl": {"file": "models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf", "args": ["--profile", "auto"]}
+    "qwen3.6-35b-a3b-q5k": {"file": "models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp-d5.gguf"},
+    "qwen3.6-35b-a3b-iq4xs": {"file": "models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp.gguf", "args": ["--experts-used", "8", "--expert-prefetch", "0"]},
+    "qwen3.6-35b-a3b-q4kxl": {"file": "models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf", "args": ["--experts-used", "8", "--expert-prefetch", "0"]}
   }
 }
 ```
 
 A model id is the `id` of an entry in `models.json`, so `/model` in pi lists the same models. The first one (`default`) starts with `spi`.
-The UD-IQ4_XS file is the default because it processes a prompt 1.5 to 1.7 times faster than Q4_K_XL (see "Which file to run" in the
-README). When another model is chosen with `/model` or `Ctrl+P`, the next request makes the manager finish the request that is running,
+The dense Q5_K file is the default because it runs the measured fast setting of the launcher (7 experts per token, a prefetch of 3; see
+"The default stack" in the README); the two entries with `--experts-used 8 --expert-prefetch 0` run their files with the model's own
+routing and no prefetch, which is what to pick when the output must not differ from the original model's. When another model is chosen with `/model` or `Ctrl+P`, the next request makes the manager finish the request that is running,
 stop the server, start the other one and pass the request on: the first answer after a switch waits for the load, about ten seconds
 with the files in the page cache and longer from the SSD. Only one model is in memory at a time. The manager answers `GET /v1/models`
 itself (the local models and which one is loaded), replaces the `model` of a request with the name the server knows itself by, and

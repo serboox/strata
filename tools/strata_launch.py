@@ -15,6 +15,7 @@ from serve.cpucap import MAX_MHZ, MIN_MHZ  # noqa: E402
 from serve.thermal import MAX_LIMIT_C, MIN_LIMIT_C  # noqa: E402
 MODEL_DIR = ROOT / "models" / "qwen3.6-35b-a3b"
 MODEL_FILE = MODEL_DIR / "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
+DENSE_Q5K_FILE = MODEL_DIR / "Qwen3.6-35B-A3B-UD-IQ4_XS-mtp-d5.gguf"
 MODEL_NAME = "qwen3.6-35b-a3b"
 RUN_DIR = ROOT / "run"
 
@@ -43,6 +44,9 @@ def turn_start_token() -> int:
 
 
 MAX_EXPERT_PREFETCH = 8   # the engine takes at most this many guessed experts per layer
+PINNED_EXPERTS_IO = "pinned"   # the experts are copied once into page-locked memory, so the page cache is not used after the start
+DEFAULT_EXPERT_PREFETCH = 3   # measured: P=4 does not pay, and P=3 gives about 10 percent per step (docs/TPS_REPORT.md)
+PREFETCH_DEFAULT_PROFILES = ("auto",)   # the other profiles cap the memory below the 15 GiB of page-locked experts
 
 
 def engine_args(profile: dict) -> list:
@@ -50,7 +54,7 @@ def engine_args(profile: dict) -> list:
             "--mmq-group", str(profile["group"]), "--att-scores", str(profile["att_scores"]), "--kv", profile["kv"],
             "--experts", "pinned" if profile.get("expert_prefetch") else "mapped", "--stream-io", profile["io"], "--mtp",
             str(profile["mtp"]), "--pool-workers", str(profile["workers"])]
-    if profile.get("expert_prefetch"):
+    if profile.get("expert_prefetch") is not None:
         args += ["--expert-prefetch", str(profile["expert_prefetch"])]
     if profile.get("vram_reserve") is not None:
         args += ["--vram-reserve", str(profile["vram_reserve"])]
@@ -88,6 +92,37 @@ def resolve_cpu_cap(profile_name: str, requested: float | None) -> float:
 
 EXPERTS_USED_ENV = "STRATA_Q36_EXPERTS_USED"
 MODEL_EXPERTS_USED = 8   # what the Qwen3.6-35B-A3B file routes per token; the engine refuses more than a file's own count
+DEFAULT_EXPERTS_USED = 7   # mean KLD about 0.025 against 8 experts, a step about 10 percent shorter (docs/TPS_REPORT.md)
+
+
+def default_model_file() -> Path:
+    """The file served when --model is not given: the dense Q5_K variant of the IQ4_XS file (made with tools/requant_dense.py) when it
+    exists, else the Q4_K_XL file."""
+    return DENSE_Q5K_FILE if DENSE_Q5K_FILE.exists() else MODEL_FILE
+
+
+def resolve_stack(experts_used: int | None, expert_prefetch: int | None, profile_name: str, model_size: int, available: int | None,
+                  budget: int | None, overlap: bool, igpu_experts: bool) -> tuple:
+    """The experts per token and the prefetch the server starts with, as (experts, prefetch or 0 for off, notes). Nothing asked means
+    the measured stack: 7 experts, and a prefetch of 3 where it can run, which needs the memory for the page-locked experts both free
+    (`available`) and inside the server's cgroup limit (`budget`, None for no limit). An explicit value wins."""
+    experts = DEFAULT_EXPERTS_USED if experts_used is None else experts_used
+    if expert_prefetch is not None:
+        return experts, expert_prefetch, []
+    if profile_name not in PREFETCH_DEFAULT_PROFILES:
+        return experts, 0, []
+    if overlap or igpu_experts:
+        return experts, 0, ["expert prefetch is off: it does not combine with --overlap or --igpu-experts"]
+    needed = model_size + PROTECT_MARGIN
+    if available is None:
+        return experts, 0, ["expert prefetch is off: the free memory could not be read"]
+    if available < needed:
+        free = f"{available / GIB:.1f} GiB of memory is available and the page-locked experts need about {needed / GIB:.1f} GiB"
+        return experts, 0, [f"expert prefetch is off: {free}"]
+    if budget is not None and budget < needed:
+        limit = f"the memory budget of {budget / GIB:.1f} GiB is below the {needed / GIB:.1f} GiB the page-locked experts need"
+        return experts, 0, [f"expert prefetch is off: {limit}"]
+    return experts, DEFAULT_EXPERT_PREFETCH, []
 
 
 def experts_used_env(experts_used: int | None) -> dict:
@@ -271,7 +306,7 @@ def memory_available() -> int:
 def prewarm_plan(io: str, budget: str | None, model_size: int, available: int) -> tuple[int | None, str]:
     """How many bytes of the model to read into the page cache before the server starts, or None and the reason not to."""
     if io != "buffered":
-        return None, "this profile reads the model with O_DIRECT, so the page cache would not be used"
+        return None, "this setting does not use the page cache (O_DIRECT reads or page-locked experts)"
     if budget and model_size > parse_size(budget):
         return None, f"the model does not fit the {budget} budget"
     needed = model_size + PROTECT_MARGIN
@@ -346,7 +381,7 @@ def plan_memory(protect: bool | None, prewarm: bool | None, io: str, budget: str
             messages.append(f"memory protection skipped: {error}")
         if memory_low is None and io != "buffered":
             if protect:
-                messages.append("memory protection skipped: this profile reads the model with O_DIRECT, so the page cache is not used")
+                messages.append("memory protection skipped: this setting does not use the page cache (O_DIRECT reads or page-locked experts)")
         elif memory_low is not None and not have_systemd:
             if protect:
                 messages.append("memory protection skipped: it needs systemd-run")
@@ -397,7 +432,8 @@ def ensure_tokenizer() -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Start the Qwen3.6-35B-A3B server inside a memory budget.")
     parser.add_argument("--profile", choices=list(PROFILES), default="auto")
-    parser.add_argument("--model", type=Path, help="the GGUF file to serve (default: the Q4_K_XL file); its MTP block must be in it")
+    parser.add_argument("--model", type=Path, help="the GGUF file to serve (default: the dense Q5_K variant of the IQ4_XS file when it exists, "
+                                                   "else the Q4_K_XL file); its MTP block must be in it")
     parser.add_argument("--iq-kernels", choices=("auto", "on", "off"), default="auto",
                         help="the AVX-512 kernels for IQ3_S and IQ4_XS experts: auto (default) turns them on when the model has such "
                              "experts, on and off force it; the Q4_K_XL file is never affected")
@@ -424,11 +460,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--experts-used", type=int, default=None, metavar="K",
                         help=f"route every token to K experts instead of the model's {MODEL_EXPERTS_USED} (1 to {MODEL_EXPERTS_USED}): fewer expert products per "
                              "token, so a faster and cooler decode at some cost in quality, which tools/kld_experts.py measures; "
-                             "default: the model's own count")
+                             f"default: {DEFAULT_EXPERTS_USED}, the measured stack (mean KLD about 0.025); {MODEL_EXPERTS_USED} gives the model's own count")
     parser.add_argument("--expert-prefetch", type=int, default=None, metavar="P",
                         help=f"copy P (1 to {MAX_EXPERT_PREFETCH}) guessed experts of the next layer to the GPU while the CPU computes the current layer, so the GPU "
                              "takes part of the expert work; keeps all the experts page-locked in RAM (--experts pinned, about 15 GiB), "
-                             "see the expert prefetch section of docs/TUNING.md; default: off")
+                             "see the expert prefetch section of docs/TUNING.md; 0 turns it off; "
+                             f"default: {DEFAULT_EXPERT_PREFETCH} on the {'/'.join(PREFETCH_DEFAULT_PROFILES)} profile when the memory is free for the experts "
+                             "and neither --overlap nor --igpu-experts is used, else off")
     parser.add_argument("--vram-reserve", type=int, default=None, metavar="MIB",
                         help="the VRAM the expert placement leaves free, in MiB (the engine's default is 768); a smaller value leaves room for "
                              "resident experts or guess slots at a long context, with less margin for other programs")
@@ -460,14 +498,15 @@ def main() -> int:
     if not (cpu_max_mhz == 0 or (math.isfinite(cpu_max_mhz) and MIN_MHZ <= cpu_max_mhz <= MAX_MHZ)):
         parser.error(f"--cpu-max-mhz must be 0 (off) or from {MIN_MHZ:g} to {MAX_MHZ:g} MHz, not {cpu_max_mhz:g}")
 
-    if args.expert_prefetch is not None and not 1 <= args.expert_prefetch <= MAX_EXPERT_PREFETCH:
-        parser.error(f"--expert-prefetch must be from 1 to {MAX_EXPERT_PREFETCH}, not {args.expert_prefetch}")
+    if args.expert_prefetch is not None and not 0 <= args.expert_prefetch <= MAX_EXPERT_PREFETCH:
+        parser.error(f"--expert-prefetch must be from 0 (off) to {MAX_EXPERT_PREFETCH}, not {args.expert_prefetch}")
     if args.vram_reserve is not None and args.vram_reserve < 0:
         parser.error(f"--vram-reserve must not be negative, not {args.vram_reserve}")
     if args.experts_used is not None and not 1 <= args.experts_used <= MODEL_EXPERTS_USED:
         parser.error(f"--experts-used must be from 1 to {MODEL_EXPERTS_USED}, not {args.experts_used}")
 
     global MODEL_FILE
+    MODEL_FILE = default_model_file()
     if args.model:
         MODEL_FILE = args.model.expanduser().resolve()
         if MODEL_DIR.resolve() not in MODEL_FILE.parents:
@@ -486,19 +525,31 @@ def main() -> int:
         profile["workers"] = CAPPED_WORKERS
     if args.workers:
         profile["workers"] = args.workers
-    if args.expert_prefetch:
-        profile["expert_prefetch"] = args.expert_prefetch
     if args.vram_reserve is not None:
         profile["vram_reserve"] = args.vram_reserve
     for path in (ROOT / "build" / "strata-q36", MODEL_FILE):
         if not path.exists():
             sys.exit(f"strata-launch: {path} is missing (see README.md)")
+    model_size = MODEL_FILE.stat().st_size
+    try:
+        available = memory_available()
+    except OSError:
+        available = None
+    try:
+        budget_bytes = None if args.no_limit or not profile["ram"] else parse_size(profile["ram"])
+    except ValueError:
+        budget_bytes = None
+    experts_used, expert_prefetch, stack_notes = resolve_stack(args.experts_used, args.expert_prefetch, args.profile, model_size, available,
+                                                               budget_bytes, bool(args.overlap), bool(args.igpu_experts))
+    for note in stack_notes:
+        print(f"strata-launch: {note}", file=sys.stderr)
+    profile["expert_prefetch"] = expert_prefetch
     ensure_tokenizer()
     RUN_DIR.mkdir(exist_ok=True)
     (ROOT / "logs").mkdir(exist_ok=True)
     config_path = RUN_DIR / "qwen36.json"
     kernel_env = iq_kernel_env(args.iq_kernels, MODEL_FILE)
-    lever_env = {**experts_used_env(args.experts_used), **(overlap_environment(args.overlap) or {})}
+    lever_env = {**experts_used_env(experts_used), **(overlap_environment(args.overlap) or {})}
     config = build_config(profile, args.port, args.sampling, args.max_temp,
                           with_igpu(engine_environment(kernel_env, cpu_max_mhz, lever_env), args.igpu_experts))
     config_path.write_text(json.dumps(config, indent=1) + "\n", encoding="utf-8")
@@ -514,9 +565,9 @@ def main() -> int:
     if background and not (have_systemd and (args.dry_run or background_scope_works())):
         print("strata-launch: this machine does not give the server its own CPU weight, so only the idle scheduling class is set", file=sys.stderr)
         background = False
-    model_size = MODEL_FILE.stat().st_size
+    memory_io = PINNED_EXPERTS_IO if expert_prefetch else profile["io"]
     memory_low, prewarm_bytes, scope_for_prewarm, messages = plan_memory(
-        args.protect_ram, args.prewarm, profile["io"], memory_budget, model_size, have_systemd,
+        args.protect_ram, args.prewarm, memory_io, memory_budget, model_size, have_systemd,
         scope_properties(memory_budget, background), args.dry_run)
     for message in messages:
         print(f"strata-launch: {message}", file=sys.stderr)
@@ -528,8 +579,7 @@ def main() -> int:
           f"priority {args.priority}, model {MODEL_FILE.name}, iq kernels {iq_kernel_state(kernel_env)}"
           + (f", overlap {args.overlap}" if args.overlap else "")
           + (f", iGPU experts {args.igpu_experts:g}" if args.igpu_experts else "")
-          + (f", experts per token {args.experts_used}" if args.experts_used is not None else "")
-          + (f", expert prefetch {args.expert_prefetch}" if args.expert_prefetch else "")
+          + f", experts per token {experts_used}" + (f", expert prefetch {expert_prefetch}" if expert_prefetch else "")
           + (f", cpu cap {cpu_max_mhz:g} MHz" if cpu_max_mhz else "") + (f", memory protection {memory_low / GIB:.1f} GiB" if memory_low else "")
           + (f", prewarm {prewarm_bytes / GIB:.1f} GiB" if prewarm_bytes else ""), file=sys.stderr)
     apply_turbo(args.turbo, args.dry_run)

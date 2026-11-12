@@ -536,8 +536,9 @@ data. Judge the file by the perplexity of the llama.cpp perplexity tool on the s
 
 The model routes every token to 8 of its 256 experts. Each expert costs the CPU a dequantizing dot product per layer, and the
 routed experts are 52 of the 75 ms of a decode step, so fewer experts per token make a step shorter and the package cooler.
-The price is quality: the model was trained with 8, and the answer changes. The default is the file's own count and changes
-nothing; the setting is for a measured trade, not for a default.
+The price is quality: the model was trained with 8, and the answer changes. The engine's own default is the file's count and changes
+nothing; the launcher (`bin/strata-serve`) passes 7 unless `--experts-used` says otherwise (`--experts-used 8` gives the model's
+count back).
 
 - On: `strata_launch.py --experts-used K`, or `STRATA_Q36_EXPERTS_USED=K` in the engine's environment. K is an integer from 1
   to the file's `expert_used_count` (8). A larger value or anything that is not an integer stops the engine with a message; it
@@ -597,7 +598,8 @@ context no expert sits in VRAM at all (0.27 GiB free, the reserve is 768 MiB). `
 - Needs: `--experts pinned` (a copy from the mapped GGUF pages blocks the calling thread for about 266 us per 1.5 MB, and
   `cudaHostRegister` on them is refused here), no overlap switch and no iGPU share. Pinned mode keeps all 14.66 GiB of the
   experts page-locked in RAM and takes about a minute to start. If a condition fails the engine says which and runs as before.
-  The launcher takes `--expert-prefetch P`, which implies `--experts pinned`; the lever matrix has it as lever 6.
+  The launcher takes `--expert-prefetch P`, which implies `--experts pinned`, and uses 3 by default on the `auto` profile when the memory
+  is free for the experts (`--expert-prefetch 0` turns it off, see "The default stack" in the README); the lever matrix has it as lever 6.
 - Measured (11 November, IQ4_XS with MTP, 2.2 GHz cap, `tools/lever_matrix.py` with `--budget none`, code and text prompts, baseline
   before and after, 65.0 ms a step, 34.7 tok/s): P=3 gave 39.1 tok/s (+12.8 percent) and 58.6 / 59.4 ms a step on the code / text
   prompt (-9.8 and -8.3 percent); an earlier build of the same code gave 38.4 tok/s with P=3 and 37.3 tok/s, 60.0 ms a step with P=2
