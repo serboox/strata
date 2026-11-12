@@ -87,9 +87,10 @@ Every switch is off by default. The code of the items below has not been compile
 | L8 n-gram drafts | `ngram_continuation`, an external draft list in `spec_step` | `--ngram MATCH[,MAX]` |
 | L10 attention | V-load depth 16 instead of 8 (same order of sums) | `--attn-ahead` |
 | L12 platform profile | `apply_platform_profile` (sudo -A fallback) | `--platform-profile NAME` |
+| L7 prefetch two layers ahead | guess for layer li+2 after layer li's router, three rings and three guess buffers, per-layer ready flags | `--prefetch-lead2` |
 | L13 warm guessed experts | prefetcht2 of the guessed experts' first bytes | `--warm-experts KIB` |
 | L1 hot experts | launcher part only | `--resident-experts` |
 | C1 strict mode | every expert on the CPU: no prefetch, no resident experts | `--strict` |
 | C2 speculative sampling | `target_distribution`, `judge_sampled`, a judge hook in `spec_step` | `--spec-sampling` |
 
-Not written: L1's elastic K/V tiers and slot dropping, L7 (guess two layers ahead needs a third ring), L9 (dense GPU kernels), L11 (shared arena for prompt buffers and slots), L14 (two-stage verify head: the cheap bound found for it was too loose to prune rows), C1's GPU-side bit-exactness (the strict flag is the CPU-only form), C3 (two interleaved streams).
+Not written: L1's elastic K/V tiers and slot dropping, L9 (dense GPU kernels), L11 (shared arena for prompt buffers and slots), L14 (two-stage verify head: the cheap bound found for it was too loose to prune rows), C1's GPU-side bit-exactness (the strict flag is the CPU-only form), C3 (two interleaved streams).
