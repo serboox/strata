@@ -514,6 +514,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--iq3s-4bit", action="store_true",
                         help="repack the IQ3_S gate/up matrices into 4-bit codes at start for the CPU kernel (same values, +2 GiB of RAM; mapped experts only, "
                              "so not with --expert-prefetch; off by default)")
+    parser.add_argument("--strict", action="store_true",
+                        help="bit-exact output: every expert on the CPU (no --expert-prefetch, no resident experts in VRAM), so the numbers are the CPU kernels' only")
     parser.add_argument("--mtp-adapt", action="store_true",
                         help="after a step whose first draft was rejected, verify one draft only in the next step (the text is unchanged; off by default)")
     parser.add_argument("--cpu-adaptive", action="store_true",
@@ -560,6 +562,12 @@ def main() -> int:
     if not (cpu_max_mhz == 0 or (math.isfinite(cpu_max_mhz) and MIN_MHZ <= cpu_max_mhz <= MAX_MHZ)):
         parser.error(f"--cpu-max-mhz must be 0 (off) or from {MIN_MHZ:g} to {MAX_MHZ:g} MHz, not {cpu_max_mhz:g}")
 
+    if args.strict:   # every expert on the CPU with the CPU's bits: no prefetch and no experts resident in VRAM
+        args.expert_prefetch = 0
+        args.resident_experts = False
+        args.warm_experts = 0
+        if args.vram_reserve is not None:
+            parser.error("--strict leaves the VRAM reserve alone (resident experts would round on the GPU)")
     if args.expert_prefetch is not None and not 0 <= args.expert_prefetch <= MAX_EXPERT_PREFETCH:
         parser.error(f"--expert-prefetch must be from 0 (off) to {MAX_EXPERT_PREFETCH}, not {args.expert_prefetch}")
     if args.vram_reserve is not None and args.vram_reserve < 0:
