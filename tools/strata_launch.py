@@ -79,6 +79,8 @@ IQ_KERNELS_OFF_ENV = {"STRATA_IQ_VBMI": "0"}
 # The setting measured on the author's laptop (i7-11370H, turbo off, 80 C limit): the highest CPU frequency, the pool workers
 # and the pool spin that held 30 tokens per second for minutes instead of 11 to 15; see "The frequency cap" in docs/TUNING.md.
 DEFAULT_CPU_MAX_MHZ = 2100.0
+RESIDENT_EXPERTS_CONTEXT = 16384   # tokens; the K/V cache takes 0.18 GiB instead of 0.73 GiB
+RESIDENT_EXPERTS_RESERVE_MIB = 300
 CAPPED_WORKERS = 6
 CAPPED_ENV = {"STRATA_POOL_SPIN_US": "0"}
 
@@ -459,6 +461,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="hold the highest CPU frequency at this many MHz while the server runs and put it back at exit "
                              f"(default {DEFAULT_CPU_MAX_MHZ:g} with the auto profile, with {CAPPED_WORKERS} workers and no pool spin; 0 turns the "
                              "cap off, and so do the other profiles); a lower cap lets the model run without pauses, see the frequency cap in docs/TUNING.md")
+    parser.add_argument("--resident-experts", action="store_true",
+                        help=f"a {RESIDENT_EXPERTS_CONTEXT}-token window and a {RESIDENT_EXPERTS_RESERVE_MIB} MiB VRAM reserve, so that about 9 experts per layer stay in VRAM "
+                             "(44.8 tok/s measured with --expert-prefetch 3 and 8 experts); an explicit --context or --vram-reserve wins")
     parser.add_argument("--mtp-adapt", action="store_true",
                         help="after a step whose first draft was rejected, verify one draft only in the next step (the text is unchanged; off by default)")
     parser.add_argument("--cpu-adaptive", action="store_true",
@@ -534,6 +539,9 @@ def main() -> int:
         profile["workers"] = CAPPED_WORKERS
     if args.workers:
         profile["workers"] = args.workers
+    if args.resident_experts:
+        profile["context"] = args.context or RESIDENT_EXPERTS_CONTEXT
+        profile["vram_reserve"] = RESIDENT_EXPERTS_RESERVE_MIB
     if args.vram_reserve is not None:
         profile["vram_reserve"] = args.vram_reserve
     for path in (ROOT / "build" / "strata-q36", MODEL_FILE):

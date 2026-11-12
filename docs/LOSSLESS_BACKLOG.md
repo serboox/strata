@@ -72,3 +72,13 @@ Prefetch + L1 + L3 + L2 + L4: 44.7 ms (50.8 tok/s) at the low ends, 42.5 ms (53.
   At 4 threads the repack reads 52.0 / 47.4 GB/s: the RAM ceiling (52-54 GB/s) is reached, so there the gain is memory-bound, and it matches the x0.69 estimate.
 - **Concluded.** GO. The IQ3_S gate/up cost drops by about 31% at the engine's 4 threads and 2-3 rows. Nothing else is needed on the CPU side: the existing 4-bit kernel does the work. What remains is the engine part: a one-time repack of IQ3_S gate/up into the 136-byte layout at load, +2.0 GiB RAM, and the GPU gate/up path for resident and guessed experts (they read the same arena).
 - **Incident.** The 4-thread run without a frequency cap took the package to 86 C for a few seconds, above the 80 C limit. Later runs of this kind use `tools/cpucap` at 2200 MHz.
+
+### Implementation status (12 November 2026; code only, nothing was run on the model)
+
+| Item | State |
+| --- | --- |
+| L2 | coded: `serve/capctl.py`, `CpuCap.set_mhz`, launcher `--cpu-adaptive` (off by default); unit tests written and passed |
+| L5 | coded in a simple form: `STRATA_Q36_MTP_ADAPT=1` / `--mtp-adapt` verifies one draft after a step whose first draft failed (no draft probabilities yet); not built, not run |
+| L1 | only the launcher part: `--resident-experts` (16K window, 300 MiB reserve); the elastic K/V tiers and slot dropping are not written |
+| L3 | the CPU kernel is proven (benchmark); the load-time repack and the GPU gate/up 4-bit path are not written |
+| L4, L6-L14, C1-C3 | not started |
