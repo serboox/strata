@@ -459,6 +459,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="hold the highest CPU frequency at this many MHz while the server runs and put it back at exit "
                              f"(default {DEFAULT_CPU_MAX_MHZ:g} with the auto profile, with {CAPPED_WORKERS} workers and no pool spin; 0 turns the "
                              "cap off, and so do the other profiles); a lower cap lets the model run without pauses, see the frequency cap in docs/TUNING.md")
+    parser.add_argument("--mtp-adapt", action="store_true",
+                        help="after a step whose first draft was rejected, verify one draft only in the next step (the text is unchanged; off by default)")
     parser.add_argument("--cpu-adaptive", action="store_true",
                         help="let a controller move the CPU frequency cap between 1800 and 2600 MHz so that the hottest sensor stays near 77 C "
                              "(the cap above is its starting value; off by default, the fixed cap stays), see the frequency cap in docs/TUNING.md")
@@ -556,7 +558,7 @@ def main() -> int:
     (ROOT / "logs").mkdir(exist_ok=True)
     config_path = RUN_DIR / "qwen36.json"
     kernel_env = iq_kernel_env(args.iq_kernels, MODEL_FILE)
-    lever_env = {**experts_used_env(experts_used), **(overlap_environment(args.overlap) or {})}
+    lever_env = {**experts_used_env(experts_used), **(overlap_environment(args.overlap) or {}), **({"STRATA_Q36_MTP_ADAPT": "1"} if args.mtp_adapt else {})}
     config = build_config(profile, args.port, args.sampling, args.max_temp,
                           with_igpu(engine_environment(kernel_env, cpu_max_mhz, lever_env), args.igpu_experts))
     config_path.write_text(json.dumps(config, indent=1) + "\n", encoding="utf-8")

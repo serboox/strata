@@ -1740,6 +1740,12 @@ struct Engine {
     __half* x16 = nullptr;
     bool use_graph = true;
     int mtp_d = 0;   // MTP drafts per speculative step (0: none; greedy requests only)
+    // STRATA_Q36_MTP_ADAPT=1: a step that follows one whose first draft was rejected verifies one draft only (a failed chain costs a
+    // verify row of 16 to 21 ms); the step after that goes back to mtp_d drafts. The verification is unchanged, so the text is too.
+    bool mtp_adapt = false;
+    int mtp_last_a = 1, mtp_last_d = 0;
+    int mtp_depth() const { return (mtp_adapt && mtp_d > 1 && mtp_last_a == 0 && mtp_last_d == mtp_d) ? 1 : mtp_d; }
+    void mtp_note(int accepted_drafts, int depth) { mtp_last_a = accepted_drafts; mtp_last_d = depth; }
 
     // ---- sessions: the conversation states.  One for a single-request engine; --batch N keeps N, each with its own
     // recurrent state and KV cache, so N requests run at once: their rows share one decode window (forward_rows).  The
@@ -5297,8 +5303,10 @@ struct Serve {
             if (!emit(nx)) break;
             if (n_active > 0) window();
             if (spec && n_active == 0 && E.pos + E.mtp_d + 1 <= E.ctx) {
-                const int a = E.spec_step(nx, fix, E.mtp_d, drafts, picks, &stop);
-                offered += E.mtp_d;
+                const int depth = E.mtp_depth();
+                const int a = E.spec_step(nx, fix, depth, drafts, picks, &stop);
+                E.mtp_note(a, depth);
+                offered += depth;
                 accepted += a;
                 // the state now holds x and every accepted draft, whether or not the answer ends inside them (an end of
                 // answer, max_new): the held tokens say so, so a later request that continues this conversation matches them
@@ -5619,6 +5627,8 @@ int strata::qwen35::run(int argc, char** argv) {
     if (const char* tr = std::getenv("STRATA_ROUTE_TRACE")) route_trace = std::fopen(tr, "wb");
     E.reset();
     E.mtp_d = m.has_mtp ? mtp_d : 0;
+    E.mtp_adapt = std::getenv("STRATA_Q36_MTP_ADAPT") != nullptr && std::string(std::getenv("STRATA_Q36_MTP_ADAPT")) != "0";
+    if (E.mtp_adapt && E.mtp_d > 1) std::fprintf(stderr, "strata-q36: adaptive draft depth: one draft after a step whose first draft failed\n");
     if (draft_vocab < 0 && std::getenv("STRATA_Q36_DRAFT_VOCAB") != nullptr) draft_vocab = std::atoi(std::getenv("STRATA_Q36_DRAFT_VOCAB"));
     E.draft_n = std::max(0, draft_vocab);
     E.bmtp = (batch_mtp || (std::getenv("STRATA_BATCH_MTP") != nullptr && std::string(std::getenv("STRATA_BATCH_MTP")) != "0")) && E.n_sess > 1 && E.mtp_d > 0;
@@ -5678,8 +5688,10 @@ int strata::qwen35::run(int argc, char** argv) {
         while ((int) gen.size() < n_gen) {
             gen.push_back(nx);
             if ((int) gen.size() >= n_gen) break;
-            const int a = E.spec_step(nx, fix, E.mtp_d, drafts, picks);
-            offered += E.mtp_d;
+            const int depth = E.mtp_depth();
+            const int a = E.spec_step(nx, fix, depth, drafts, picks);
+            E.mtp_note(a, depth);
+            offered += depth;
             accepted += a;
             fix.assign(drafts.begin(), drafts.begin() + a);
             for (int i = 0; i < a && (int) gen.size() < n_gen; ++i) gen.push_back(drafts[(size_t) i]);
