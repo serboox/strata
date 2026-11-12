@@ -3101,6 +3101,8 @@ struct Engine {
     /// the most frequent ones).  A draft only proposes: the verify window decides, so a token outside the subset is a
     /// rejected draft and nothing else - the answer is the plain greedy answer whatever draft_n is.  0 = the whole vocabulary.
     int draft_n = 0;
+    bool chain_device = false;   // STRATA_Q36_CHAIN_DEV
+    bool head_sub_off() const { return m->head_sub.d == nullptr; }
     int32_t draft_token(int32_t picked) const {
         return m->head_sub.d != nullptr && picked >= 0 && picked < (int32_t) m->draft_ids.size() ? m->draft_ids[(size_t) picked] : picked;
     }
@@ -4236,24 +4238,43 @@ struct Engine {
         CK(cudaMemcpyAsync(seeds + fix.size() * (size_t) N, hlast, (size_t) N * 4, cudaMemcpyDeviceToDevice, st));
         forward_mtp(T0, pos - (int64_t) fix.size(), seeds, D > 0, false);
         drafts.assign((size_t) D, 0);
+        // STRATA_Q36_CHAIN_DEV=1: the next draft's token goes from the device pick to the device input (no trip to the host between the
+        // drafts) and the picks come back once, before the verify window; not with a token list, whose picks are indices.
+        const bool chain_dev = chain_device && head_sub_off() && D > 1 && D <= 7;
         if (D > 0) {
-            CK(cudaMemcpyAsync(hpin + 2, pick_m, 4, cudaMemcpyDeviceToHost, st));
-            CK(cudaStreamSynchronize(st));
-            drafts[0] = draft_token(hpin[2]);
+            CK(cudaMemcpyAsync(chain_dev ? hpin + 52 : hpin + 2, pick_m, 4, cudaMemcpyDeviceToHost, st));
+            if (!chain_dev) {
+                CK(cudaStreamSynchronize(st));
+                drafts[0] = draft_token(hpin[2]);
+            }
         }
         int last_row = T0 - 1;   // the row of the previous MTP call whose output seeds the next draft
         for (int d = 1; d < D; ++d) {   // chained: (the block's own output, the last draft) at the next position
-            hpin[0] = drafts[(size_t) d - 1];
-            hpin[1] = (int32_t) (pos + d);
-            CK(cudaMemcpyAsync(tok_m, hpin, 4, cudaMemcpyHostToDevice, st));
-            CK(cudaMemcpyAsync(pos0_m, hpin + 1, 4, cudaMemcpyHostToDevice, st));
+            if (chain_dev) {
+                hpin[44 + d] = (int32_t) (pos + d);
+                CK(cudaMemcpyAsync(tok_m, pick_m, 4, cudaMemcpyDeviceToDevice, st));
+                CK(cudaMemcpyAsync(pos0_m, hpin + 44 + d, 4, cudaMemcpyHostToDevice, st));
+            } else {
+                hpin[0] = drafts[(size_t) d - 1];
+                hpin[1] = (int32_t) (pos + d);
+                CK(cudaMemcpyAsync(tok_m, hpin, 4, cudaMemcpyHostToDevice, st));
+                CK(cudaMemcpyAsync(pos0_m, hpin + 1, 4, cudaMemcpyHostToDevice, st));
+            }
             CK(cudaMemcpyAsync(seeds, hmtp + (size_t) last_row * N, (size_t) N * 4, cudaMemcpyDeviceToDevice, st));
             last_row = 0;
             if (mtp_graph) graph_run(gs().gm1, [&] { forward_mtp(1, pos + d, seeds, true, use_graph); });
             else forward_mtp(1, pos + d, seeds, true, false);
-            CK(cudaMemcpyAsync(hpin + 2, pick_m, 4, cudaMemcpyDeviceToHost, st));
+            if (chain_dev) {
+                CK(cudaMemcpyAsync(hpin + 52 + d, pick_m, 4, cudaMemcpyDeviceToHost, st));
+            } else {
+                CK(cudaMemcpyAsync(hpin + 2, pick_m, 4, cudaMemcpyDeviceToHost, st));
+                CK(cudaStreamSynchronize(st));
+                drafts[(size_t) d] = draft_token(hpin[2]);
+            }
+        }
+        if (chain_dev) {
             CK(cudaStreamSynchronize(st));
-            drafts[(size_t) d] = draft_token(hpin[2]);
+            for (int d = 0; d < D; ++d) drafts[(size_t) d] = hpin[52 + d];
         }
         // the verify window
         const int T = D + 1;
@@ -5705,6 +5726,7 @@ int strata::qwen35::run(int argc, char** argv) {
     E.reset();
     E.mtp_d = m.has_mtp ? mtp_d : 0;
     if (const char* w = std::getenv("STRATA_Q36_WARM")) E.warm_kib = (size_t) std::max(0, std::atoi(w));
+    E.chain_device = std::getenv("STRATA_Q36_CHAIN_DEV") != nullptr && std::string(std::getenv("STRATA_Q36_CHAIN_DEV")) != "0";
     E.mtp_adapt = std::getenv("STRATA_Q36_MTP_ADAPT") != nullptr && std::string(std::getenv("STRATA_Q36_MTP_ADAPT")) != "0";
     if (E.mtp_adapt && E.mtp_d > 1) std::fprintf(stderr, "strata-q36: adaptive draft depth: one draft after a step whose first draft failed\n");
     if (draft_vocab < 0 && std::getenv("STRATA_Q36_DRAFT_VOCAB") != nullptr) draft_vocab = std::atoi(std::getenv("STRATA_Q36_DRAFT_VOCAB"));
