@@ -1691,6 +1691,12 @@ struct VmmBuf {
         }
         return true;
     }
+    /// Gives the pages and the address range back.
+    void release() {
+        unmap_all();
+        if (base != 0) cuMemAddressFree(base, reserved);
+        base = 0;
+    }
     /// Gives every mapped page back to the driver (the address range stays reserved).
     void unmap_all() {
         for (size_t gi = 0; gi < mapped.size(); ++gi) {
@@ -2148,6 +2154,17 @@ struct Engine {
         field = reinterpret_cast<T*>(l->buf.base);
         lent.push_back(std::move(l));
     }
+    /// A lent buffer of another size in place of `field` (the prompt attention's score buffers change size with --att-scores).
+    template <class T> void lent_replace(T*& field, size_t bytes) {
+        for (auto it = lent.begin(); it != lent.end(); ++it)
+            if (reinterpret_cast<T*>((*it)->buf.base) == field) {
+                CK(cudaDeviceSynchronize());
+                (*it)->buf.release();
+                lent.erase(it);
+                break;
+            }
+        lent_alloc(field, bytes);
+    }
     void lend_map(bool on) {
         for (auto& l : lent) {
             if (!on) {
@@ -2295,9 +2312,11 @@ struct Engine {
             std::fprintf(stderr, "strata-q36: cuBLAS handle failed\n");
             std::exit(1);
         }
-        att_s = dalloc(kAttScoreFloats / g.n_head_kv);
+        if (lend) lent_alloc(att_s, kAttScoreFloats / g.n_head_kv * sizeof(float));
+        else att_s = dalloc(kAttScoreFloats / g.n_head_kv);
         sk_part = dalloc((size_t) kSplitK * T * (g.n_expert + 1));
-        att_p16 = dalloc_t<__half>(kAttScoreFloats / g.n_head_kv);
+        if (lend) lent_alloc(att_p16, kAttScoreFloats / g.n_head_kv * sizeof(__half));
+        else att_p16 = dalloc_t<__half>(kAttScoreFloats / g.n_head_kv);
         use_mmq = MMQ::built() && std::getenv("STRATA_Q36_NO_MMQ") == nullptr;
         auto mmq_ok = [&](const Layer& L) {
             return MMQ::supported(L.L.gu_type) && MMQ::supported(L.L.d_type) && MMQ::fits(L.L.gu_type, 2 * g.n_ff) &&
@@ -4182,11 +4201,17 @@ struct Engine {
 
     void shrink_att(size_t floats) {
         CK(cudaDeviceSynchronize());
-        CK(cudaFree(att_s));
-        CK(cudaFree(att_p16));
-        kAttScoreFloats = floats;
-        att_s = dalloc(kAttScoreFloats / m->g.n_head_kv);
-        att_p16 = dalloc_t<__half>(kAttScoreFloats / m->g.n_head_kv);
+        if (lend) {
+            kAttScoreFloats = floats;
+            lent_replace(att_s, kAttScoreFloats / m->g.n_head_kv * sizeof(float));
+            lent_replace(att_p16, kAttScoreFloats / m->g.n_head_kv * sizeof(__half));
+        } else {
+            CK(cudaFree(att_s));
+            CK(cudaFree(att_p16));
+            kAttScoreFloats = floats;
+            att_s = dalloc(kAttScoreFloats / m->g.n_head_kv);
+            att_p16 = dalloc_t<__half>(kAttScoreFloats / m->g.n_head_kv);
+        }
         CK(cudaDeviceSynchronize());
     }
     void reset_graphs() {
