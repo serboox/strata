@@ -37,6 +37,7 @@
 #endif
 
 #include <cublas_v2.h>
+#include <cuda.h>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
 
@@ -1637,6 +1638,59 @@ float* dalloc(size_t n) {
     CK(cudaMemset(p, 0, n * 4));
     return p;
 }
+/// STRATA_Q36_KV_LAZY=1: a K / V buffer is a reserved address range whose pages get physical memory only as the context grows (CUDA virtual
+/// memory), so the layout of the cache (a head's cells `ctx` apart) and every pointer stay as they are.
+struct VmmBuf {
+    CUdeviceptr base = 0;
+    size_t reserved = 0, gran = 0;
+    std::vector<CUmemGenericAllocationHandle> handles;
+    std::vector<char> mapped;
+    static CUmemAllocationProp prop() {
+        CUmemAllocationProp p = {};
+        p.type = CU_MEM_ALLOCATION_TYPE_PINNED;
+        p.location.type = CU_MEM_LOCATION_TYPE_DEVICE;
+        int dev = 0;
+        cudaGetDevice(&dev);
+        p.location.id = dev;
+        return p;
+    }
+    static size_t granule() {
+        static const size_t g = [] {
+            CUmemAllocationProp p = prop();
+            size_t v = 0;
+            if (cuMemGetAllocationGranularity(&v, &p, CU_MEM_ALLOC_GRANULARITY_MINIMUM) != CUDA_SUCCESS || v == 0) v = (size_t) 2 << 20;
+            return v;
+        }();
+        return g;
+    }
+    bool reserve(size_t bytes) {
+        gran = granule();
+        reserved = (bytes + gran - 1) / gran * gran;
+        if (cuMemAddressReserve(&base, reserved, 0, 0, 0) != CUDA_SUCCESS) return false;
+        handles.assign(reserved / gran, 0);
+        mapped.assign(reserved / gran, 0);
+        return true;
+    }
+    /// Maps the granules that cover bytes [lo, hi); false when the device has no memory left for one of them.
+    bool map(size_t lo, size_t hi) {
+        if (hi > reserved) hi = reserved;
+        for (size_t gi = lo / gran; gi * gran < hi; ++gi) {
+            if (mapped[gi]) continue;
+            CUmemAllocationProp p = prop();
+            CUmemGenericAllocationHandle h = 0;
+            if (cuMemCreate(&h, gran, &p, 0) != CUDA_SUCCESS) return false;
+            if (cuMemMap(base + gi * gran, gran, 0, h, 0) != CUDA_SUCCESS) { cuMemRelease(h); return false; }
+            CUmemAccessDesc desc = {};
+            desc.location = p.location;
+            desc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
+            if (cuMemSetAccess(base + gi * gran, gran, &desc, 1) != CUDA_SUCCESS) { cuMemUnmap(base + gi * gran, gran); cuMemRelease(h); return false; }
+            handles[gi] = h;
+            mapped[gi] = 1;
+        }
+        return true;
+    }
+};
+
 template <class T> T* dalloc_t(size_t n) {
     T* p = nullptr;
     CK(cudaMalloc(&p, n * sizeof(T)));
@@ -2065,6 +2119,68 @@ struct Engine {
 
     size_t kv_bytes() const { return (size_t) m->g.n_head_kv * ctx * kv_row_bytes(m->g.head_dim, kv_q8); }
 
+    // ---- lazy K / V (STRATA_Q36_KV_LAZY=1, one session): physical pages follow the position; when the card is full, whole layers' resident
+    // expert slots are given up (evict_one_layer_of_slots) to make room.  STRATA_Q36_KV_TIER=<cells> (default 8192) is the context the
+    // expert placement leaves room for.
+    bool kv_lazy = false;
+    int64_t kv_tier = 8192;
+    mutable std::map<const uint8_t*, std::unique_ptr<VmmBuf>> vmm;
+    uint8_t* kv_alloc() const {
+        if (!kv_lazy) return dalloc_t<uint8_t>(kv_bytes());
+        auto buf = std::make_unique<VmmBuf>();
+        if (!buf->reserve(kv_bytes())) {
+            std::fprintf(stderr, "strata-q36: STRATA_Q36_KV_LAZY: the address range for a K/V buffer could not be reserved\n");
+            std::exit(1);
+        }
+        uint8_t* ptr = reinterpret_cast<uint8_t*>(buf->base);
+        vmm[ptr] = std::move(buf);
+        return ptr;
+    }
+    /// The bytes of K / V the placement of the experts must leave free at the tier: every attention layer's K and V, tier cells each.
+    size_t kv_tier_bytes() const {
+        size_t layers = m->has_mtp ? 1 : 0;
+        for (const Layer& L : m->layers) layers += L.attn ? 1 : 0;
+        return layers * 2 * (size_t) m->g.n_head_kv * (size_t) std::min<int64_t>(kv_tier, ctx) * kv_row_bytes(m->g.head_dim, kv_q8);
+    }
+    bool evict_one_layer_of_slots() {
+        if (pf_n > 0) return false;   // the guess slots sit after the resident ones in the same blobs
+        for (size_t li = hy.size(); li-- > 0;) {
+            Layer& L = const_cast<Layer&>(layer_at((int) li));
+            if (L.n_slots <= 0 || L.blobs == nullptr) continue;
+            CK(cudaDeviceSynchronize());
+            Hy& H = hy[li];
+            std::fill(H.slot_of.begin(), H.slot_of.end(), -1);
+            CK(cudaMemcpy(H.slot_of_d, H.slot_of.data(), H.slot_of.size() * 4, cudaMemcpyHostToDevice));
+            H.exp_in_slot.clear();
+            CK(cudaFree(L.blobs));
+            L.blobs = nullptr;
+            L.n_slots = 0;
+            return true;
+        }
+        return false;
+    }
+    /// Gives the K / V buffers physical memory for `cells` cells of every head (of the selected session).
+    void kv_ensure(int64_t cells) {
+        if (!kv_lazy) return;
+        const size_t rowb = kv_row_bytes(m->g.head_dim, kv_q8);
+        const size_t used = (size_t) std::min<int64_t>(cells, ctx) * rowb;
+        for (int pass = 0; pass < 2; ++pass)
+            for (uint8_t* buf : (pass == 0 ? kc : vc)) {
+                if (buf == nullptr) continue;
+                auto it = vmm.find(buf);
+                if (it == vmm.end()) continue;
+                for (int h = 0; h < (int) m->g.n_head_kv; ++h) {
+                    const size_t lo = (size_t) h * (size_t) ctx * rowb;
+                    while (!it->second->map(lo, lo + used)) {
+                        if (!evict_one_layer_of_slots()) {
+                            std::fprintf(stderr, "strata-q36: STRATA_Q36_KV_LAZY: out of video memory at %lld cells and no expert slots left to give up\n", (long long) cells);
+                            std::exit(1);
+                        }
+                    }
+                }
+            }
+    }
+
     void alloc_session(Sess& ss) const {
         const auto& g = m->g;
         const size_t C = (size_t) g.ssm_conv_channels;
@@ -2072,8 +2188,8 @@ struct Engine {
             if (L.attn) {
                 ss.conv.push_back(nullptr);
                 ss.S.push_back(nullptr);
-                ss.kc.push_back(dalloc_t<uint8_t>(kv_bytes()));
-                ss.vc.push_back(dalloc_t<uint8_t>(kv_bytes()));
+                ss.kc.push_back(kv_alloc());
+                ss.vc.push_back(kv_alloc());
             } else {
                 ss.conv.push_back(dalloc(C * (g.ssm_d_conv - 1)));
                 ss.S.push_back(dalloc((size_t) g.ssm_v_heads * g.ssm_state_size * g.ssm_state_size));
@@ -2084,8 +2200,8 @@ struct Engine {
         if (m->has_mtp) {   // the MTP block's own K / V (an attention layer at index n_layers)
             ss.conv.push_back(nullptr);
             ss.S.push_back(nullptr);
-            ss.kc.push_back(dalloc_t<uint8_t>(kv_bytes()));
-            ss.vc.push_back(dalloc_t<uint8_t>(kv_bytes()));
+            ss.kc.push_back(kv_alloc());
+            ss.vc.push_back(kv_alloc());
         }
         ss.hlast = dalloc((size_t) g.n_embd);
     }
@@ -2366,6 +2482,7 @@ struct Engine {
     void ckpt_copy(uint8_t* blob, int64_t n, bool save) {
         const auto& g = m->g;
         join_commit();
+        if (!save) kv_ensure(n);
         const size_t row = kv_row_bytes(g.head_dim, kv_q8);
         const cudaMemcpyKind kind = save ? cudaMemcpyDeviceToHost : cudaMemcpyHostToDevice;
         auto flat = [&](void* dev, size_t bytes) {
@@ -4110,6 +4227,7 @@ struct Engine {
     template <class F> int64_t process(const int32_t* toks, int64_t n, F on_chunk_) {
         const int N = (int) m->g.n_embd;
         join_commit();
+        kv_ensure(pos + n + 8);
         auto on_chunk = [&](int64_t done) -> bool {   // a callback returning void never cancels
             if constexpr (std::is_void_v<decltype(on_chunk_(done))>) {
                 on_chunk_(done);
@@ -4380,6 +4498,7 @@ struct Engine {
         const int N = (int) m->g.n_embd;
         OvMark step_mark;
         if (ov.stats) step_mark = ov_mark();
+        kv_ensure(pos + 16);
         if (main_hybrid) D = std::min<int>(D, (int) (kRebalanceEvery - pos % kRebalanceEvery) - 1);
         const int T0 = (int) fix.size() + 1;   // the redo rows and the row of x
         CK(cudaStreamSynchronize(st));
@@ -4638,7 +4757,7 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
     const size_t stage_bytes = (size_t) std::max(1, std::min<int>(E.mmq_group, (int) ne)) * max_stride + kMmqTail;
     size_t fr = 0, tot = 0;
     CK(cudaMemGetInfo(&fr, &tot));
-    const size_t reserve = (size_t) E.vram_reserve_mib << 20;
+    const size_t reserve = ((size_t) E.vram_reserve_mib << 20) + (E.kv_lazy ? E.kv_tier_bytes() : 0);
     const size_t budget = vram_gib >= 0 ? (size_t) (vram_gib * (double) (1ull << 30))
                                         : (fr > reserve ? fr - reserve : 0);
     // every expert fits once the packed Q8_0 decode copies are given back (a file a few GiB larger than the card's
@@ -6015,6 +6134,11 @@ int strata::qwen35::run(int argc, char** argv) {
     }
     E.ckpt_token = ckpt_token_arg;
     if (mmq_group_arg > 0) E.mmq_group = mmq_group_arg;
+    if (const char* lazy = std::getenv("STRATA_Q36_KV_LAZY")) {
+        E.kv_lazy = lazy[0] != '0' && batch <= 1;
+        if (const char* tier = std::getenv("STRATA_Q36_KV_TIER")) E.kv_tier = std::max<long long>(256, std::atoll(tier));
+        if (E.kv_lazy) std::fprintf(stderr, "strata-q36: lazy K/V cache: pages follow the position, the experts' slots leave room for %lld cells\n", (long long) E.kv_tier);
+    }
     E.init(m, ctx, chunk, batch, vision);
     if (!place_experts(m, E, expert_vram, cpu_threads, hybrid_rows, expert_slots, err)) {
         std::fprintf(stderr, "strata-q36: %s\n", err.c_str());

@@ -175,7 +175,7 @@ add_library(strata_qwen35 STATIC src/qwen35/q36_engine.cu)
 target_include_directories(strata_qwen35 PUBLIC ${_strata_include} PRIVATE ${_ggml_include})
 target_compile_definitions(strata_qwen35 PRIVATE STRATA_HAVE_DFLASH2=1 STRATA_NATIVE_EXPERTS=1 STRATA_PREFILL_FUSED=1
                            STRATA_PREFILL_MMQ=1 STRATA_Q36_CPU_POOL=1)
-target_link_libraries(strata_qwen35 PRIVATE strata_prefill strata_cuda_kernels strata_kernels_cpu)
+target_link_libraries(strata_qwen35 PRIVATE strata_prefill strata_cuda_kernels strata_kernels_cpu CUDA::cuda_driver)
 if(STRATA_IGPU_VULKAN)
   target_link_libraries(strata_qwen35 PRIVATE strata_kernels_igpu)
 endif()
