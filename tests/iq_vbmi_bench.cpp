@@ -315,6 +315,44 @@ int check_gu4() {
     return failures;
 }
 
+// iq3s_repack_to_4bit: every row of an IQ3_S expert, repacked and run through the odd-table kernel, against ggml's IQ3_S dot.
+int check_repack() {
+    int failures = 0;
+    const auto dot = ggml_get_type_traits_cpu(GGML_TYPE_IQ3_S)->vec_dot;
+    for (int nt : {1, 3}) {
+        double worst = 0, scale = 0;
+        for (int round = 0; round < 3; ++round) {
+            Expert expert;
+            const size_t blocks = expert.blob.size() / sizeof(block_iq3_s);
+            std::vector<uint8_t> packed(blocks * 136);
+            iq3s_repack_to_4bit(expert.blob.data(), packed.data(), blocks);
+            const size_t row4 = (size_t) (kEmbd / QK_K) * 136;
+            std::vector<std::vector<block_q8_K>> act;
+            std::vector<const void*> act_ptr;
+            std::vector<std::vector<float>> got(nt, std::vector<float>(2 * kFf));
+            std::vector<float*> got_ptr;
+            for (int t = 0; t < nt; ++t) {
+                act.push_back(make_activation());
+                act_ptr.push_back(act.back().data());
+                got_ptr.push_back(got[t].data());
+            }
+            iq4xs_vnni_rows_odd(packed.data(), row4, kEmbd, act_ptr.data(), nt, got_ptr.data(), 0, 2 * kFf);
+            for (int t = 0; t < nt; ++t)
+                for (int r = 0; r < 2 * kFf; ++r) {
+                    float want = 0.f;
+                    dot(kEmbd, &want, 0, expert.blob.data() + (size_t) r * expert.row, 0, act[(size_t) t].data(), 0, 1);
+                    worst = std::max(worst, mismatch(want, got[(size_t) t][(size_t) r]));
+                    scale = std::max(scale, (double) std::fabs(want));
+                }
+        }
+        const double relative = worst / (scale + 1e-30);
+        const bool ok = relative < 1e-6;
+        std::printf("repack nt=%d  largest difference %.3g of %.3g (relative %.2g)  %s\n", nt, worst, scale, relative, ok ? "ok" : "FAIL");
+        failures += !ok;
+    }
+    return failures;
+}
+
 // Throughput of both gate/up forms. `sets` experts per thread: a large number streams from memory, 1 stays in the cache.
 void bench_gu(int threads, double seconds, int sets) {
     for (int nt : {1, 2, 3}) {
@@ -384,7 +422,7 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "this CPU has no AVX-512 VBMI and BITALG: nothing to test\n");
         return 77;
     }
-    const int failures = check() + check_down() + check_gu4();
+    const int failures = check() + check_down() + check_gu4() + check_repack();
     if (run_bench) {
         bench(std::max(1, std::min(threads, 8)), seconds);
         bench_down(std::max(1, std::min(threads, 8)), seconds);
