@@ -58,6 +58,8 @@ def engine_args(profile: dict) -> list:
         args += ["--expert-prefetch", str(profile["expert_prefetch"])]
     if profile.get("vram_reserve") is not None:
         args += ["--vram-reserve", str(profile["vram_reserve"])]
+    if profile.get("parallel", 0) > 1:
+        args += ["--batch", str(profile["parallel"]), "--batch-mtp"]
     if profile["cpu_experts"]:
         args += ["--cpu-experts", str(profile["cpu_experts"])]
     token = turn_start_token()
@@ -226,6 +228,23 @@ def apply_turbo(mode: str, dry_run: bool) -> None:
 
 PLATFORM_PROFILE_FILE = "/sys/firmware/acpi/platform_profile"
 PLATFORM_PROFILES_FILE = "/sys/firmware/acpi/platform_profile_choices"
+
+
+def apply_gpu_clocks(spec: str | None, dry_run: bool, run=subprocess.run) -> None:
+    """Lock the GPU's graphics clocks with nvidia-smi (a range 'MIN,MAX' in MHz), or release the lock with 'reset'. Needs root; failures are warnings."""
+    if not spec:
+        return
+    if spec != "reset" and not re.fullmatch(r"\d{3,4},\d{3,4}", spec):
+        print(f"strata-launch: --gpu-clocks wants MIN,MAX in MHz or 'reset', not {spec!r}", file=sys.stderr)
+        return
+    command = ["sudo", "-A", "nvidia-smi", "-rgc"] if spec == "reset" else ["sudo", "-A", "nvidia-smi", "-lgc", spec]
+    if dry_run:
+        print(f"strata-launch: {' '.join(command[2:])} (not applied in a dry run)", file=sys.stderr)
+        return
+    env = {**os.environ, "SUDO_PROMPT": "lock or release the GPU clocks for the model server"}
+    result = run(command, capture_output=True, text=True, check=False, env=env)
+    if result.returncode != 0:
+        print(f"strata-launch: could not set the GPU clocks: {(result.stderr or result.stdout).strip() or 'refused'}", file=sys.stderr)
 
 
 def apply_platform_profile(name: str | None, dry_run: bool, run=subprocess.run) -> None:
@@ -527,6 +546,12 @@ def build_parser() -> argparse.ArgumentParser:
                              "slots are given up layer by layer when the context outgrows the room; one session, not with --expert-prefetch (off by default)")
     parser.add_argument("--lend-buffers", action="store_true",
                         help="the expert staging buffers (about 70 MiB) hold video memory only while a prompt is read, the rest of the time it is free for the K/V cache (off by default)")
+    parser.add_argument("--parallel", type=int, default=1, metavar="N",
+                        help="N sessions decode together: their rows share one window, so one pass over the experts serves all of them and the GPU's mixers "
+                             "of one session fill the gaps of another (about 1.3 times the total tokens a second for two requests, nothing for one; more heat)")
+    parser.add_argument("--gpu-clocks", default=None, metavar="MIN,MAX",
+                        help="lock the GPU clocks (MHz) while the server runs so that the dense weights are read at full speed from the first step; needs root (sudo -A), "
+                             "put back by --gpu-clocks reset; the card heats the shared cooler more")
     parser.add_argument("--mtp-adapt", action="store_true",
                         help="after a step whose first draft was rejected, verify one draft only in the next step (the text is unchanged; off by default)")
     parser.add_argument("--cpu-adaptive", action="store_true",
@@ -608,6 +633,8 @@ def main() -> int:
         profile["workers"] = CAPPED_WORKERS
     if args.workers:
         profile["workers"] = args.workers
+    if args.parallel > 1:
+        profile["parallel"] = args.parallel
     if args.resident_experts:
         profile["context"] = args.context or RESIDENT_EXPERTS_CONTEXT
         profile["vram_reserve"] = RESIDENT_EXPERTS_RESERVE_MIB
@@ -670,6 +697,7 @@ def main() -> int:
           + (f", prewarm {prewarm_bytes / GIB:.1f} GiB" if prewarm_bytes else ""), file=sys.stderr)
     apply_turbo(args.turbo, args.dry_run)
     apply_platform_profile(args.platform_profile, args.dry_run)
+    apply_gpu_clocks(args.gpu_clocks, args.dry_run)
     apply_priority(args.priority, args.dry_run)
     if args.dry_run:
         print(" ".join(command))
