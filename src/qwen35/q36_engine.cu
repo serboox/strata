@@ -4218,7 +4218,7 @@ struct Engine {
     /// stopped mid-answer leaves the state at the tokens it has shown: a conversation that continues from them (the server's
     /// hand-over of a stopped request to a batch slot) reuses it instead of reading them again.
     int spec_step(int x_tok, const std::vector<int32_t>& fix, int D, std::vector<int32_t>& drafts, int32_t* picks,
-                  const std::atomic<bool>* cancel = nullptr) {
+                  const std::atomic<bool>* cancel = nullptr, const std::vector<int32_t>* ext = nullptr) {
         const int N = (int) m->g.n_embd;
         OvMark step_mark;
         if (ov.stats) step_mark = ov_mark();
@@ -4248,8 +4248,16 @@ struct Engine {
                 drafts[0] = draft_token(hpin[2]);
             }
         }
+        // STRATA_Q36_NGRAM: the context repeats an earlier stretch, so its continuation is the draft list (the first MTP call above has
+        // run: the block's K/V of the redone rows must be kept); the verify window decides, so the text is unchanged
+        const bool use_ext = ext != nullptr && !ext->empty() && D > 0 && (int) ext->size() <= kVerify - 1;
+        if (use_ext) {
+            if (chain_device && head_sub_off() && D > 1) CK(cudaStreamSynchronize(st));
+            D = (int) ext->size();
+            drafts = *ext;
+        }
         int last_row = T0 - 1;   // the row of the previous MTP call whose output seeds the next draft
-        for (int d = 1; d < D; ++d) {   // chained: (the block's own output, the last draft) at the next position
+        for (int d = 1; !use_ext && d < D; ++d) {   // chained: (the block's own output, the last draft) at the next position
             if (chain_dev) {
                 hpin[44 + d] = (int32_t) (pos + d);
                 CK(cudaMemcpyAsync(tok_m, pick_m, 4, cudaMemcpyDeviceToDevice, st));
@@ -4272,7 +4280,7 @@ struct Engine {
                 drafts[(size_t) d] = draft_token(hpin[2]);
             }
         }
-        if (chain_dev) {
+        if (chain_dev && !use_ext) {
             CK(cudaStreamSynchronize(st));
             for (int d = 0; d < D; ++d) drafts[(size_t) d] = hpin[52 + d];
         }
@@ -4787,6 +4795,25 @@ bool is_eos(int t) { return t == 248044 || t == 248046; }
 
 // ------------------------------------------------------------------------------------------------ pictures
 constexpr int32_t kImagePad = 248056;   // <|image_pad|>
+
+/// The continuation (at most `max_len` tokens) that followed the latest earlier occurrence of the last `min_match` tokens of `hist`, or
+/// nothing.  Only the last `kNgramWindow` tokens are searched, so a long context costs the same as a short one.
+constexpr size_t kNgramWindow = 8192;
+std::vector<int32_t> ngram_continuation(const std::vector<int32_t>& hist, int min_match, int max_len) {
+    std::vector<int32_t> out;
+    const size_t n = hist.size();
+    if (min_match <= 0 || n < (size_t) min_match + 1) return out;
+    const size_t lo = n > kNgramWindow ? n - kNgramWindow : 0;
+    const int32_t* tail = hist.data() + n - (size_t) min_match;
+    for (size_t at = n - (size_t) min_match; at-- > lo;) {   // `at` is where an earlier copy of the tail would start
+        if (hist[at] != tail[0]) continue;
+        if (std::memcmp(hist.data() + at, tail, (size_t) min_match * 4) != 0) continue;
+        const size_t next = at + (size_t) min_match;
+        for (size_t i = next; i < n && (int) out.size() < max_len; ++i) out.push_back(hist[i]);
+        break;
+    }
+    return out;
+}
 
 uint64_t fnv1a(const void* p, size_t n, uint64_t h = 1469598103934665603ull) {
     const uint8_t* b = (const uint8_t*) p;
@@ -5345,6 +5372,13 @@ struct Serve {
         const char* finish = "length";
         // greedy requests alone with the MTP block: speculative steps of mtp_d drafts (verified, so the text is the greedy
         // text); sampled ones, and requests beside others, one token at a time
+        // STRATA_Q36_NGRAM=<match length>[,<max drafts>]: drafts from an earlier copy of the context's last tokens (see ngram_continuation)
+        static const int ngram_min = [] { const char* e = std::getenv("STRATA_Q36_NGRAM"); return e != nullptr ? std::max(0, std::atoi(e)) : 0; }();
+        static const int ngram_max = [] {
+            const char* e = std::getenv("STRATA_Q36_NGRAM");
+            const char* comma = e != nullptr ? std::strchr(e, ',') : nullptr;
+            return comma != nullptr ? std::max(1, std::min(6, std::atoi(comma + 1))) : 4;
+        }();
         const bool spec = E.mtp_d > 0 && !smp.needs_logits() && !adm;
         std::vector<int32_t> fix, drafts;
         int32_t picks[16];
@@ -5402,7 +5436,14 @@ struct Serve {
             if (n_active > 0) window();
             if (spec && n_active == 0 && E.pos + E.mtp_d + 1 <= E.ctx) {
                 const int depth = E.mtp_depth();
-                const int a = E.spec_step(nx, fix, depth, drafts, picks, &stop);
+                std::vector<int32_t> ngram;
+                if (ngram_min > 0 && E.pos + 8 <= E.ctx) {
+                    std::vector<int32_t> hist(ss.live);
+                    hist.push_back(nx);
+                    ngram = ngram_continuation(hist, ngram_min, ngram_max);
+                    if ((int) ngram.size() <= depth) ngram.clear();   // not longer than the MTP drafts: they stay
+                }
+                const int a = E.spec_step(nx, fix, depth, drafts, picks, &stop, ngram.empty() ? nullptr : &ngram);
                 E.mtp_note(a, depth);
                 offered += depth;
                 accepted += a;

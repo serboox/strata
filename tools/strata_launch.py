@@ -507,6 +507,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="the MTP drafts pick among the token ids in this int32 file only (tools/draft_list.py makes it); the verify pass keeps the whole vocabulary")
     parser.add_argument("--chain-device", action="store_true",
                         help="chain the MTP drafts on the device without a trip to the host between them (off by default)")
+    parser.add_argument("--ngram", type=str, default="", metavar="MATCH[,MAX]",
+                        help="draft from an earlier copy of the last MATCH tokens of the context (for example 8,4) when it gives more drafts than the MTP block (off by default)")
     parser.add_argument("--mtp-adapt", action="store_true",
                         help="after a step whose first draft was rejected, verify one draft only in the next step (the text is unchanged; off by default)")
     parser.add_argument("--cpu-adaptive", action="store_true",
@@ -609,7 +611,7 @@ def main() -> int:
     (ROOT / "logs").mkdir(exist_ok=True)
     config_path = RUN_DIR / "qwen36.json"
     kernel_env = iq_kernel_env(args.iq_kernels, MODEL_FILE)
-    lever_env = {**experts_used_env(experts_used), **(overlap_environment(args.overlap) or {}), **({"STRATA_Q36_MTP_ADAPT": "1"} if args.mtp_adapt else {}), **({"STRATA_Q36_CHAIN_DEV": "1"} if args.chain_device else {}), **({"STRATA_Q36_WARM": str(args.warm_experts)} if args.warm_experts else {}), **({"STRATA_Q36_DRAFT_LIST": str(args.draft_list)} if args.draft_list else {})}
+    lever_env = {**experts_used_env(experts_used), **(overlap_environment(args.overlap) or {}), **({"STRATA_Q36_MTP_ADAPT": "1"} if args.mtp_adapt else {}), **({"STRATA_Q36_CHAIN_DEV": "1"} if args.chain_device else {}), **({"STRATA_Q36_NGRAM": str(args.ngram)} if args.ngram else {}), **({"STRATA_Q36_WARM": str(args.warm_experts)} if args.warm_experts else {}), **({"STRATA_Q36_DRAFT_LIST": str(args.draft_list)} if args.draft_list else {})}
     config = build_config(profile, args.port, args.sampling, args.max_temp,
                           with_igpu(engine_environment(kernel_env, cpu_max_mhz, lever_env), args.igpu_experts))
     config_path.write_text(json.dumps(config, indent=1) + "\n", encoding="utf-8")
