@@ -518,6 +518,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="bit-exact output: every expert on the CPU (no --expert-prefetch, no resident experts in VRAM), so the numbers are the CPU kernels' only")
     parser.add_argument("--attn-ahead", action="store_true",
                         help="the decode attention kernel loads 16 V cells together instead of 8 (same bits; off by default)")
+    parser.add_argument("--prefetch-lead2", action="store_true",
+                        help="with --expert-prefetch, guess the experts two layers ahead instead of one (three rings; off by default)")
     parser.add_argument("--mtp-adapt", action="store_true",
                         help="after a step whose first draft was rejected, verify one draft only in the next step (the text is unchanged; off by default)")
     parser.add_argument("--cpu-adaptive", action="store_true",
@@ -626,7 +628,7 @@ def main() -> int:
     (ROOT / "logs").mkdir(exist_ok=True)
     config_path = RUN_DIR / "qwen36.json"
     kernel_env = iq_kernel_env(args.iq_kernels, MODEL_FILE)
-    lever_env = {**experts_used_env(experts_used), **(overlap_environment(args.overlap) or {}), **({"STRATA_Q36_MTP_ADAPT": "1"} if args.mtp_adapt else {}), **({"STRATA_Q36_CHAIN_DEV": "1"} if args.chain_device else {}), **({"STRATA_Q36_ATTN_AHEAD": "16"} if args.attn_ahead else {}), **({"STRATA_IQ3S_4BIT": "1"} if args.iq3s_4bit else {}), **({"STRATA_Q36_SPEC_SAMPLING": "1"} if args.spec_sampling else {}), **({"STRATA_Q36_NGRAM": str(args.ngram)} if args.ngram else {}), **({"STRATA_Q36_WARM": str(args.warm_experts)} if args.warm_experts else {}), **({"STRATA_Q36_DRAFT_LIST": str(args.draft_list)} if args.draft_list else {})}
+    lever_env = {**experts_used_env(experts_used), **(overlap_environment(args.overlap) or {}), **({"STRATA_Q36_MTP_ADAPT": "1"} if args.mtp_adapt else {}), **({"STRATA_Q36_CHAIN_DEV": "1"} if args.chain_device else {}), **({"STRATA_Q36_PF_LEAD": "2"} if args.prefetch_lead2 else {}), **({"STRATA_Q36_ATTN_AHEAD": "16"} if args.attn_ahead else {}), **({"STRATA_IQ3S_4BIT": "1"} if args.iq3s_4bit else {}), **({"STRATA_Q36_SPEC_SAMPLING": "1"} if args.spec_sampling else {}), **({"STRATA_Q36_NGRAM": str(args.ngram)} if args.ngram else {}), **({"STRATA_Q36_WARM": str(args.warm_experts)} if args.warm_experts else {}), **({"STRATA_Q36_DRAFT_LIST": str(args.draft_list)} if args.draft_list else {})}
     config = build_config(profile, args.port, args.sampling, args.max_temp,
                           with_igpu(engine_environment(kernel_env, cpu_max_mhz, lever_env), args.igpu_experts))
     config_path.write_text(json.dumps(config, indent=1) + "\n", encoding="utf-8")
