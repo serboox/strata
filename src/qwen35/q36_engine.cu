@@ -3118,6 +3118,9 @@ struct Engine {
     /// rejected draft and nothing else - the answer is the plain greedy answer whatever draft_n is.  0 = the whole vocabulary.
     int draft_n = 0;
     bool chain_device = false;   // STRATA_Q36_CHAIN_DEV
+    // STRATA_Q36_STRICT=1: every routed expert is computed by the CPU kernels (no resident experts, no prefetch), so the output has only the
+    // CPU path's rounding; the VRAM the slots would take stays free
+    bool strict = false;
     int attn_ahead = 8;          // STRATA_Q36_ATTN_AHEAD: V cells loaded together by the decode attention kernel
     bool head_sub_off() const { return m->head_sub.d == nullptr; }
     int32_t draft_token(int32_t picked) const {
@@ -3842,7 +3845,7 @@ struct Engine {
     /// over all layers, between forwards (the copies are on the engine's stream).
     void rebalance(int max_swaps) {
         static const bool off = std::getenv("STRATA_Q36_FIXED_SLOTS") != nullptr;   // the slots as placed (tests)
-        if (!m->hybrid || off || warming) return;
+        if (!m->hybrid || off || warming || strict) return;
         const int64_t ne = m->g.n_expert;
         int left = max_swaps;
         for (size_t li = 0; li < hy.size() && left > 0; ++li) {
@@ -4689,6 +4692,7 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
             H.exp_in_slot[(size_t) s] = s;
         }
         H.score.assign((size_t) ne, 0.0);
+        if (E.strict) std::fill(H.slot_of.begin(), H.slot_of.end(), -1);   // STRATA_Q36_STRICT: no expert is resident, the CPU computes them all
         CK(cudaMalloc(&H.slot_of_d, (size_t) ne * 4));
         CK(cudaMemcpy(H.slot_of_d, H.slot_of.data(), (size_t) ne * 4, cudaMemcpyHostToDevice));
         if (!C::native_fmt(L.L.gu_type, L.L.d_type, g.n_embd, g.n_ff, H.fmt, err)) return false;
@@ -5870,7 +5874,8 @@ int strata::qwen35::run(int argc, char** argv) {
     E.cpu_experts = std::max(0, cpu_experts_arg);
     if (expert_prefetch_arg < 0)   // no flag: the environment decides; an explicit 0 stays off
         if (const char* pf_env = std::getenv("STRATA_Q36_EXPERT_PREFETCH")) expert_prefetch_arg = std::atoi(pf_env);
-    E.pf_n = std::max(0, std::min(expert_prefetch_arg, 8));
+    E.strict = std::getenv("STRATA_Q36_STRICT") != nullptr && std::string(std::getenv("STRATA_Q36_STRICT")) != "0";
+    E.pf_n = E.strict ? 0 : std::max(0, std::min(expert_prefetch_arg, 8));
     if (const char* lead = std::getenv("STRATA_Q36_PF_LEAD")) E.pf_lead = std::atoi(lead) == 2 ? 2 : 1;
     if (vram_reserve_arg >= 0) {
         E.vram_reserve_mib = vram_reserve_arg;
