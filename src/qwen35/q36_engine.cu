@@ -902,6 +902,48 @@ __global__ void k_argmax(const float* x, int n, int32_t* out, float* pv, int32_t
         else { pv[blockIdx.x] = bv[0]; pi[blockIdx.x] = bi[0]; }
     }
 }
+/// STRATA_Q36_HEAD2 kernels (see Engine::head_rows_pruned).  Row r of x [rows][n]: its maximum.
+__global__ void k_row_max(const float* x, int n, float* out) {
+    __shared__ float red[kThreads];
+    x += (size_t) blockIdx.x * n;
+    float v = -INFINITY;
+    for (int i = threadIdx.x; i < n; i += blockDim.x) v = fmaxf(v, x[i]);
+    red[threadIdx.x] = v;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if ((int) threadIdx.x < s) red[threadIdx.x] = fmaxf(red[threadIdx.x], red[threadIdx.x + s]);
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) out[blockIdx.x] = red[0];
+}
+/// The Euclidean norm of each of `rows` rows of h [rows][n].
+__global__ void k_row_norm(const float* h, int n, float* out) {
+    __shared__ float red[kThreads];
+    h += (size_t) blockIdx.x * n;
+    float v = 0.f;
+    for (int i = threadIdx.x; i < n; i += blockDim.x) v += h[i] * h[i];
+    red[threadIdx.x] = v;
+    __syncthreads();
+    for (int s = blockDim.x / 2; s > 0; s >>= 1) {
+        if ((int) threadIdx.x < s) red[threadIdx.x] += red[threadIdx.x + s];
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) out[blockIdx.x] = sqrtf(red[0]);
+}
+/// cnt[t] += the number of tokens outside the listed subset whose bound |w_i| |h_t| (with room for the q8 rounding of h) reaches mx[t]:
+/// those are the only tokens that could beat the subset's best logit.  grid (blocks over the vocabulary, rows).
+__global__ void k_prune_count(const float* wnorm, const uint8_t* in_subset, int vocab, const float* hnorm, const float* mx, int32_t* cnt) {
+    const int t = blockIdx.y;
+    int c = 0;
+    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < vocab; i += gridDim.x * blockDim.x)
+        if (!in_subset[i] && wnorm[i] * hnorm[t] * 1.05f >= mx[t]) ++c;
+    if (c > 0) atomicAdd(&cnt[t], c);
+}
+/// pick[r] (an index into the subset) -> its token id.
+__global__ void k_map_pick(int32_t* pick, const int32_t* ids, int rows) {
+    const int r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (r < rows) pick[r] = ids[pick[r]];
+}
 constexpr int kArgBlocks = 128;   // (the row stride of k_argmax's partials)
 
 unsigned grid1(int64_t n, int b = kThreads) { return (unsigned) ((n + b - 1) / b); }
@@ -1255,6 +1297,7 @@ struct Model {
     // them in VRAM).  A draft only proposes and the verify pass keeps the full matrix, so the text does not change.
     Mat head_sub;
     std::vector<int32_t> draft_ids;
+    std::vector<float> head_norm;   // STRATA_Q36_HEAD2: the Euclidean norm of every row of a Q6_K output matrix
     const uint8_t* embd = nullptr;
     int embd_type = -1;
     size_t embd_row = 0;
@@ -1519,6 +1562,41 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp) {
             std::fprintf(stderr, "strata-q36: the MTP drafts pick among %zu tokens (%.1f MiB of the output matrix)\n", m.draft_ids.size(),
                          (double) (m.draft_ids.size() * rb) / (1 << 20));
         }
+    }
+    if (std::getenv("STRATA_Q36_HEAD2") != nullptr && m.head.type == 14 && m.head_sub.d != nullptr) {   // Q6_K: 210 bytes per 256 weights
+        size_t hs = 0;
+        const strata::TensorInfo* ht = find("output.weight", hs);
+        const uint8_t* src = gm.shard(hs).tensor_data(*ht);
+        const size_t rb = row_bytes(14, m.head.n_in);
+        m.head_norm.assign((size_t) m.head.n_out, 0.f);
+        for (int r = 0; r < m.head.n_out; ++r) {
+            double sum = 0;
+            for (int b = 0; b < m.head.n_in / 256; ++b) {
+                const uint8_t* blk = src + (size_t) r * rb + (size_t) b * 210;
+                const uint8_t *ql = blk, *qh = blk + 128;
+                const int8_t* sc = reinterpret_cast<const int8_t*>(blk + 192);
+                uint16_t dh;
+                std::memcpy(&dh, blk + 208, 2);
+                const float d = f16_to_f32(dh);
+                for (int half = 0; half < 2; ++half) {
+                    for (int l = 0; l < 32; ++l) {
+                        const int is = l / 16;
+                        const int q1 = ((ql[l] & 0xF) | (((qh[l] >> 0) & 3) << 4)) - 32;
+                        const int q2 = ((ql[l + 32] & 0xF) | (((qh[l] >> 2) & 3) << 4)) - 32;
+                        const int q3 = ((ql[l] >> 4) | (((qh[l] >> 4) & 3) << 4)) - 32;
+                        const int q4 = ((ql[l + 32] >> 4) | (((qh[l] >> 6) & 3) << 4)) - 32;
+                        const double y1 = (double) d * sc[is] * q1, y2 = (double) d * sc[is + 2] * q2;
+                        const double y3 = (double) d * sc[is + 4] * q3, y4 = (double) d * sc[is + 6] * q4;
+                        sum += y1 * y1 + y2 * y2 + y3 * y3 + y4 * y4;
+                    }
+                    ql += 64;
+                    qh += 32;
+                    sc += 8;
+                }
+            }
+            m.head_norm[(size_t) r] = (float) std::sqrt(sum);
+        }
+        std::fprintf(stderr, "strata-q36: STRATA_Q36_HEAD2: row norms of the output matrix computed\n");
     }
     {
         size_t s = 0;
@@ -3118,6 +3196,58 @@ struct Engine {
     /// rejected draft and nothing else - the answer is the plain greedy answer whatever draft_n is.  0 = the whole vocabulary.
     int draft_n = 0;
     bool chain_device = false;   // STRATA_Q36_CHAIN_DEV
+    // STRATA_Q36_HEAD2=1 (needs STRATA_Q36_DRAFT_LIST and a Q6_K output matrix): the verify pass first computes the logits of the listed tokens only; when
+    // the row norms prove that no other token can beat their best, that best is the pick (no pass over the whole matrix), else the whole
+    // matrix runs as before.  The bound is |w| |h| x 1.05, so a pick is only taken when it is safe.
+    bool head2 = false;
+    float *h2_logits = nullptr, *h2_wnorm = nullptr, *h2_hnorm = nullptr, *h2_mx = nullptr;
+    uint8_t* h2_in_subset = nullptr;
+    int32_t *h2_cnt = nullptr, *h2_ids = nullptr, *h2_cnt_h = nullptr;
+    long long h2_hit = 0, h2_miss = 0;
+    void head2_init() {
+        if (std::getenv("STRATA_Q36_HEAD2") == nullptr) return;
+        if (m->head_sub.d == nullptr || m->head_norm.empty()) {
+            std::fprintf(stderr, "strata-q36: STRATA_Q36_HEAD2 needs STRATA_Q36_DRAFT_LIST and a Q6_K output matrix: off\n");
+            return;
+        }
+        const size_t ns = m->draft_ids.size(), V = (size_t) m->head.n_out;
+        h2_logits = dalloc((size_t) kVerify * ns);
+        h2_wnorm = dalloc(V);
+        CK(cudaMemcpy(h2_wnorm, m->head_norm.data(), V * 4, cudaMemcpyHostToDevice));
+        h2_hnorm = dalloc(kVerify);
+        h2_mx = dalloc(kVerify);
+        h2_cnt = dalloc_t<int32_t>(kVerify);
+        h2_ids = dalloc_t<int32_t>(ns);
+        CK(cudaMemcpy(h2_ids, m->draft_ids.data(), ns * 4, cudaMemcpyHostToDevice));
+        h2_in_subset = dalloc_t<uint8_t>(V);
+        std::vector<uint8_t> flags(V, 0);
+        for (int32_t id : m->draft_ids) flags[(size_t) id] = 1;
+        CK(cudaMemcpy(h2_in_subset, flags.data(), V, cudaMemcpyHostToDevice));
+        CK(cudaHostAlloc((void**) &h2_cnt_h, kVerify * 4, cudaHostAllocDefault));
+        head2 = true;
+    }
+    /// The picks of n rows (n <= kVerify) of normed hidden vectors: the listed subset first, the whole matrix when a pick is not proven.
+    void head_rows_pruned(const float* hn, int n, float* lg, int32_t* pk) {
+        const int ns = (int) m->draft_ids.size();
+        mm(m->head_sub, hn, h2_logits, n);
+        k_row_max<<<n, kThreads, 0, st>>>(h2_logits, ns, h2_mx);
+        k_row_norm<<<n, kThreads, 0, st>>>(hn, (int) m->g.n_embd, h2_hnorm);
+        CK(cudaMemsetAsync(h2_cnt, 0, (size_t) n * 4, st));
+        k_prune_count<<<dim3(64, n), kThreads, 0, st>>>(h2_wnorm, h2_in_subset, (int) m->head.n_out, h2_hnorm, h2_mx, h2_cnt);
+        CK(cudaMemcpyAsync(h2_cnt_h, h2_cnt, (size_t) n * 4, cudaMemcpyDeviceToHost, st));
+        CK(cudaStreamSynchronize(st));
+        bool proven = true;
+        for (int r = 0; r < n; ++r) proven = proven && h2_cnt_h[r] == 0;
+        if (!proven) {
+            ++h2_miss;
+            head_rows(hn, n, lg, pk);
+            return;
+        }
+        ++h2_hit;
+        k_argmax<<<dim3(kArgBlocks, n), kThreads, 0, st>>>(h2_logits, ns, pk, amv, ami, false);
+        k_argmax<<<dim3(1, n), kThreads, 0, st>>>(h2_logits, kArgBlocks, pk, amv, ami, true);
+        k_map_pick<<<1, 32, 0, st>>>(pk, h2_ids, n);
+    }
     // STRATA_Q36_STRICT=1: every routed expert is computed by the CPU kernels (no resident experts, no prefetch), so the output has only the
     // CPU path's rounding; the VRAM the slots would take stays free
     bool strict = false;
@@ -4321,8 +4451,10 @@ struct Engine {
         CK(cudaMemcpyAsync(pos0, hpin + 1, 4, cudaMemcpyHostToDevice, st));
         join_commit();
         rows_deferred = true;
-        graph_run(gs().gv[T], [&] { forward(T, pos, T, use_graph, true); });
+        const bool pruned = head2 && judge == nullptr && T <= kVerify;
+        graph_run(gs().gv[T], [&] { forward(T, pos, pruned ? 0 : T, use_graph, true); });
         rows_deferred = false;
+        if (pruned) head_rows_pruned(hmain, T, logits, pick);
         CK(cudaMemcpyAsync(hpin + 2, pick, (size_t) T * 4, cudaMemcpyDeviceToHost, st));
         CK(cudaStreamSynchronize(st));
         int a = 0;
@@ -5940,6 +6072,7 @@ int strata::qwen35::run(int argc, char** argv) {
     if (const char* w = std::getenv("STRATA_Q36_WARM")) E.warm_kib = (size_t) std::max(0, std::atoi(w));
     E.chain_device = std::getenv("STRATA_Q36_CHAIN_DEV") != nullptr && std::string(std::getenv("STRATA_Q36_CHAIN_DEV")) != "0";
     if (const char* a = std::getenv("STRATA_Q36_ATTN_AHEAD")) E.attn_ahead = std::atoi(a) == 16 ? 16 : 8;
+    E.head2_init();
     E.mtp_adapt = std::getenv("STRATA_Q36_MTP_ADAPT") != nullptr && std::string(std::getenv("STRATA_Q36_MTP_ADAPT")) != "0";
     if (E.mtp_adapt && E.mtp_d > 1) std::fprintf(stderr, "strata-q36: adaptive draft depth: one draft after a step whose first draft failed\n");
     if (draft_vocab < 0 && std::getenv("STRATA_Q36_DRAFT_VOCAB") != nullptr) draft_vocab = std::atoi(std::getenv("STRATA_Q36_DRAFT_VOCAB"));
