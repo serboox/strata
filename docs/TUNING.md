@@ -3,6 +3,9 @@
 Measured on one machine: i7-11370H (4 cores, 8 threads, 54 GB/s peak memory read), RTX 3050 Ti Laptop (4 GB), 31 GB RAM,
 NVMe at 3.5 GB/s, Qwen3.6-35B-A3B UD-Q4_K_XL (22.9 GB). Numbers are tokens per second.
 
+The speed experiments of November 2026 (fewer experts, a lighter dense part, the PCIe prefetch, long runs, tool-call accuracy and what
+was not worth repeating) are recorded in [TPS_REPORT.md](TPS_REPORT.md), with the numbers in [TPS_EXPERIMENTS.md](TPS_EXPERIMENTS.md).
+
 ## Memory budget against speed
 
 Decoding reads about 630 MB of routed experts per token. What is not in the page cache comes from the SSD, so the budget

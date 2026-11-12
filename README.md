@@ -39,7 +39,8 @@ The default window is 65,536 tokens, with about 0.15 GiB of VRAM left (0.49 GiB 
 128K needs the K/V cache out of VRAM or at lower precision (see "Long context and video memory" in
 [docs/TUNING.md](docs/TUNING.md)). If another program holds VRAM, start with `--context 32768`.
 
-The long-form explanation with charts, in Russian and English, is `docs/index.html`; `docs/TUNING.md` has the tables and `docs/PI.md` the agent setup.
+The long-form explanation with charts, in Russian and English, is `docs/index.html`; `docs/TUNING.md` has the tables, `docs/PI.md` the agent setup, and `docs/TPS_REPORT.md` the record of the November 2026 speed experiments (what
+was expected, done, measured and concluded; the numbers are in `docs/TPS_EXPERIMENTS.md`, the work items in `docs/TPS_BACKLOG.md`).
 
 ## Steady speed under a temperature limit
 

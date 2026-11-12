@@ -71,7 +71,9 @@ Process hygiene during all runs: one engine at a time under a systemd scope, `to
 each run, runs waited for a load average below 1.3, and a run that was disturbed by another job was repeated rather than used.
 The measurement scripts (chains that run the settings one after another) and the raw results are kept in
 `docs_private/experiments/tps_goal/scripts` and `.../results`; they contain absolute paths of this machine, so they are not
-part of the public tree.
+part of the public tree (the folder is ignored by git and exists only on the author's machine). Its `README.md` maps every
+experiment of this file to its scripts and results, and lists the inputs (the HumanEval problems, the text of the KLD test) and the
+paths that must be changed to run a script again.
 
 ## 4. The experiments
 
