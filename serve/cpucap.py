@@ -289,6 +289,35 @@ class CpuCap:
             self.log(f"[strata] cpu cap: the highest CPU frequency is held at {self.max_mhz:.0f} MHz on {len(self._held)} policies")
         return failures
 
+    def set_mhz(self, mhz: float) -> bool:
+        """Moves the held cap to another value. A limit that somebody else changed since the cap wrote it is left alone.
+        True when at least one limit was written. The record for the guard is rewritten with the new value."""
+        self.max_mhz = mhz
+        if not self._held:
+            return False
+        record = self.state or state_path()
+        changed = False
+        try:
+            with _locked(record):
+                for path, (original, written) in list(self._held.items()):
+                    target = int(mhz * KHZ_PER_MHZ)
+                    ceiling = hardware_max_khz(path)
+                    if ceiling is not None:
+                        target = min(target, ceiling)
+                    if str(target) == written:
+                        continue
+                    current = _read_text(path)
+                    if not os.path.exists(path) or (current is not None and current != written):
+                        del self._held[path]
+                        continue
+                    if _write_text(path, str(target)) is None:
+                        self._held[path] = (original, str(target))
+                        changed = True
+                self._write_record(record)
+        except OSError as error:
+            self.log(f"[strata] cpu cap: the cap could not be moved ({error})")
+        return changed
+
     def _put_back(self) -> None:
         for path, (original, written) in list(self._held.items()):
             current = _read_text(path)

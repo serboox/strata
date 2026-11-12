@@ -3838,6 +3838,7 @@ class Service:
         self.keep_awake = None                        # #1727 (opt-in): serve.keepawake.KeepAwake, the config's "prevent_sleep"
         self.thermal = None                           # serve.thermal.Governor, the config's "thermal": {"max_temp_c": N}
         self.cpu_cap = None                           # serve.cpucap.CpuCap, the config's "thermal": {"cpu_max_mhz": N}
+        self.cpu_controller = None                    # serve.capctl.CapController, the config's "thermal": {"cpu_adaptive": {...}}
         self.fifo = threading.Lock()
         self.slot_save_path = None                    # --slot-save-path: /slots/0?action=save|restore (off when None)
         self.embeddings = threading.local()           # the current request's image embeddings file (GENI)
@@ -8522,6 +8523,13 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         raise SystemExit(f"[strata] config {e}")
     if svc.cpu_cap is not None:
         svc.cpu_cap.start()
+    from serve import capctl
+    try:
+        svc.cpu_controller = capctl.create(cfg.get("thermal"), svc.cpu_cap, svc.thermal_readings)
+    except ValueError as e:
+        raise SystemExit(f"[strata] config {e}")
+    if svc.cpu_controller is not None:
+        svc.cpu_controller.start()
     if cfg.get("reasoning_effort") is not None:         # #1641: the thinking level of requests that name none
         try:
             svc.config_effort = clean_shared_defaults({"reasoning_effort": cfg["reasoning_effort"]}).get("reasoning_effort")
@@ -8713,6 +8721,8 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         notify_lifecycle("stopping", {"reason": termination, "instance_id": svc.instance_id})
         print("\n[strata] stopping (Ctrl+C again to end the engine at once) ...", flush=True)
     finally:
+        if svc.cpu_controller is not None:
+            svc.cpu_controller.stop()
         if svc.cpu_cap is not None:
             svc.cpu_cap.stop()                          # first: systemd kills a server that is still closing the engine after 45 s
         cancelled = 0

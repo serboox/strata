@@ -203,6 +203,8 @@ def build_config(profile: dict, port: int, sampling: str, max_temp: float = 0, e
         config["thermal"] = {"max_temp_c": max_temp}
     if profile.get("cpu_max_mhz"):
         config.setdefault("thermal", {})["cpu_max_mhz"] = profile["cpu_max_mhz"]
+    if profile.get("cpu_adaptive") and profile.get("cpu_max_mhz"):
+        config["thermal"]["cpu_adaptive"] = True
     if env:
         config["env"] = dict(env)
     return config
@@ -457,6 +459,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="hold the highest CPU frequency at this many MHz while the server runs and put it back at exit "
                              f"(default {DEFAULT_CPU_MAX_MHZ:g} with the auto profile, with {CAPPED_WORKERS} workers and no pool spin; 0 turns the "
                              "cap off, and so do the other profiles); a lower cap lets the model run without pauses, see the frequency cap in docs/TUNING.md")
+    parser.add_argument("--cpu-adaptive", action="store_true",
+                        help="let a controller move the CPU frequency cap between 1800 and 2600 MHz so that the hottest sensor stays near 77 C "
+                             "(the cap above is its starting value; off by default, the fixed cap stays), see the frequency cap in docs/TUNING.md")
     parser.add_argument("--experts-used", type=int, default=None, metavar="K",
                         help=f"route every token to K experts instead of the model's {MODEL_EXPERTS_USED} (1 to {MODEL_EXPERTS_USED}): fewer expert products per "
                              "token, so a faster and cooler decode at some cost in quality, which tools/kld_experts.py measures; "
@@ -522,6 +527,8 @@ def main() -> int:
         profile["mtp"] = args.mtp
     if cpu_max_mhz:
         profile["cpu_max_mhz"] = cpu_max_mhz
+    if args.cpu_adaptive and cpu_max_mhz:
+        profile["cpu_adaptive"] = True
         profile["workers"] = CAPPED_WORKERS
     if args.workers:
         profile["workers"] = args.workers
