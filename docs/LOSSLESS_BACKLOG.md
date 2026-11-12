@@ -88,9 +88,13 @@ Every switch is off by default. The code of the items below has not been compile
 | L10 attention | V-load depth 16 instead of 8 (same order of sums) | `--attn-ahead` |
 | L12 platform profile | `apply_platform_profile` (sudo -A fallback) | `--platform-profile NAME` |
 | L7 prefetch two layers ahead | guess for layer li+2 after layer li's router, three rings and three guess buffers, per-layer ready flags | `--prefetch-lead2` |
+| L1 hot experts, elastic | `--resident-experts` (16K window, 300 MiB reserve) and `--kv-lazy TIER`: K/V on CUDA virtual memory, pages mapped as the position grows (`VmmBuf`, `kv_ensure`), the experts' slots sized for the tier, whole layers of slots given up when the context outgrows it; one session, not with prefetch | `--resident-experts`, `--kv-lazy` |
+| L9 dense GPU | the software side only: GPU clock lock (`--gpu-clocks MIN,MAX`, release with `reset`); no kernel was rewritten (they need stall data from Nsight Compute first) | `--gpu-clocks` |
+| L11 shared arena | the expert staging pair (about 70 MiB) mapped only while a prompt is read (`lent_alloc`, `lend_map`); the mixer scratch region is not lent | `--lend-buffers` |
 | L13 warm guessed experts | prefetcht2 of the guessed experts' first bytes | `--warm-experts KIB` |
-| L1 hot experts | launcher part only | `--resident-experts` |
 | C1 strict mode | every expert on the CPU: no prefetch, no resident experts | `--strict` |
 | C2 speculative sampling | `target_distribution`, `judge_sampled`, a judge hook in `spec_step` | `--spec-sampling` |
+| L14 two-stage verify head | `head_rows_pruned`: the listed tokens first, row norms (`k_prune_count`) prove that no other token can beat their best, else the whole matrix; needs `--draft-list` and a Q6_K head; counts hits and misses | `--head2` |
+| C3 two streams | the engine's batch window (`--batch N --batch-mtp`): the rows of N sessions share one pass over the experts; a layer-by-layer interleave of two windows was not written | `--parallel N` |
 
-Not written: L1's elastic K/V tiers and slot dropping, L9 (dense GPU kernels), L11 (shared arena for prompt buffers and slots), L14 (two-stage verify head: the cheap bound found for it was too loose to prune rows), C1's GPU-side bit-exactness (the strict flag is the CPU-only form), C3 (two interleaved streams).
+C1 is the CPU-bit form only (`--strict`, also an engine mode): the GPU expert kernels were not rewritten to the CPU's rounding.
