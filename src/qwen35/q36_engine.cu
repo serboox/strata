@@ -41,6 +41,12 @@
 #include <cuda_runtime.h>
 
 #include <algorithm>
+#if defined(__x86_64__)
+#include <immintrin.h>
+#else
+#define _mm_prefetch(p, h) ((void) 0)
+#define _MM_HINT_T2 0
+#endif
 #include <filesystem>
 #include <future>
 #include <fstream>
@@ -1241,6 +1247,10 @@ struct Model {
     std::vector<Layer> layers;
     const float* out_norm = nullptr;
     Mat head;
+    // STRATA_Q36_DRAFT_LIST=<file of int32 token ids>: the MTP drafts pick among these rows of the output matrix only (a copy of
+    // them in VRAM).  A draft only proposes and the verify pass keeps the full matrix, so the text does not change.
+    Mat head_sub;
+    std::vector<int32_t> draft_ids;
     const uint8_t* embd = nullptr;
     int embd_type = -1;
     size_t embd_row = 0;
@@ -1477,6 +1487,35 @@ bool load(const std::string& path, Model& m, std::string& err, bool want_mtp) {
     }
     m.out_norm = f32("output_norm.weight");
     m.head = mat("output.weight");
+    if (const char* list_path = std::getenv("STRATA_Q36_DRAFT_LIST")) {
+        std::ifstream in(list_path, std::ios::binary);
+        std::vector<int32_t> ids;
+        int32_t v;
+        while (in.read(reinterpret_cast<char*>(&v), 4))
+            if (v >= 0 && v < m.head.n_out) ids.push_back(v);
+        std::sort(ids.begin(), ids.end());
+        ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+        size_t hs = 0;
+        const strata::TensorInfo* ht = find("output.weight", hs);
+        const size_t rb = row_bytes(m.head.type, m.head.n_in);
+        if (ids.empty() || rb == 0 || ht == nullptr) {
+            std::fprintf(stderr, "strata-q36: STRATA_Q36_DRAFT_LIST %s holds no usable token ids: the drafts use the whole vocabulary\n", list_path);
+        } else {
+            std::vector<uint8_t> rows(ids.size() * rb);
+            const uint8_t* src = gm.shard(hs).tensor_data(*ht);
+            for (size_t i = 0; i < ids.size(); ++i) std::memcpy(rows.data() + i * rb, src + (size_t) ids[i] * rb, rb);
+            uint8_t* d = nullptr;
+            CK(cudaMalloc(&d, rows.size()));
+            CK(cudaMemcpy(d, rows.data(), rows.size(), cudaMemcpyHostToDevice));
+            bytes += rows.size();
+            m.head_sub = m.head;
+            m.head_sub.d = d;
+            m.head_sub.n_out = (int) ids.size();
+            m.draft_ids = std::move(ids);
+            std::fprintf(stderr, "strata-q36: the MTP drafts pick among %zu tokens (%.1f MiB of the output matrix)\n", m.draft_ids.size(),
+                         (double) (m.draft_ids.size() * rb) / (1 << 20));
+        }
+    }
     {
         size_t s = 0;
         const strata::TensorInfo* t = find("token_embd.weight", s);
@@ -3062,9 +3101,18 @@ struct Engine {
     /// the most frequent ones).  A draft only proposes: the verify window decides, so a token outside the subset is a
     /// rejected draft and nothing else - the answer is the plain greedy answer whatever draft_n is.  0 = the whole vocabulary.
     int draft_n = 0;
+    int32_t draft_token(int32_t picked) const {
+        return m->head_sub.d != nullptr && picked >= 0 && picked < (int32_t) m->draft_ids.size() ? m->draft_ids[(size_t) picked] : picked;
+    }
     void head_draft(const float* hn) {
         const auto& g = m->g;
         const int N = (int) g.n_embd;
+        if (m->head_sub.d != nullptr) {   // the listed rows only; the pick is an index into the list (draft_token maps it)
+            mm(m->head_sub, hn, logits_m, 1);
+            k_argmax<<<dim3(kArgBlocks, 1), kThreads, 0, st>>>(logits_m, m->head_sub.n_out, pick_m, amv, ami, false);
+            k_argmax<<<dim3(1, 1), kThreads, 0, st>>>(logits_m, kArgBlocks, pick_m, amv, ami, true);
+            return;
+        }
         const Mat& hd = m->head;
         if (!fast_k || draft_n <= 0 || draft_n >= g.n_vocab || draft_n % 8 != 0 || hd.type != 8 || hd.n_in != N || N / 32 != 64) {
             head_rows(hn, 1, logits_m, pick_m);
@@ -3271,6 +3319,34 @@ struct Engine {
     /// Expert prefetch, host side: layer li's router result is here, so the guess for layer li+1 is too.  Its experts
     /// start crossing PCIe from the pinned arena (no host work: the copies are asynchronous) while layer li's CPU part
     /// runs, and the host slot table learns them.
+    /// STRATA_Q36_WARM=<KiB per matrix>: the guessed experts' first bytes are pulled into the shared cache (prefetcht2) while the
+    /// GPU still runs the next layer's mixer, so the pool's first reads of them hit the cache.  No effect on the output.
+    size_t warm_kib = 0;
+    void warm_guessed(const Layer& NL, const int32_t* ids, int n) {
+        if (warm_kib == 0) return;
+        const size_t bytes = warm_kib << 10;
+        for (int j = 0; j < n; ++j) {
+            const int id = ids[j];
+            if (id < 0 || id >= (int) m->g.n_expert) continue;
+            const uint8_t* part[3];
+            size_t size[3];
+            if (NL.hblobs != nullptr) {
+                part[0] = NL.hblobs + (size_t) id * NL.stride;
+                part[1] = part[2] = nullptr;
+                size[0] = std::min(bytes * 3, (size_t) NL.stride);
+                size[1] = size[2] = 0;
+            } else {
+                part[0] = NL.src_g + (size_t) id * NL.src_gsz;
+                part[1] = NL.src_u + (size_t) id * NL.src_gsz;
+                part[2] = NL.src_d + (size_t) id * NL.src_dsz;
+                size[0] = std::min(bytes, NL.src_gsz);
+                size[1] = std::min(bytes, NL.src_gsz);
+                size[2] = std::min(bytes, NL.src_dsz);
+            }
+            for (int r = 0; r < 3; ++r)
+                for (size_t o = 0; part[r] != nullptr && o < size[r]; o += 64) _mm_prefetch(reinterpret_cast<const char*>(part[r] + o), _MM_HINT_T2);
+        }
+    }
     void pf_issue(size_t li) {
         if (pf_n <= 0) return;
         pf_live = -1;   // layer li's own guesses are used up (the caller noted them before)
@@ -3284,6 +3360,7 @@ struct Engine {
         CK(cudaEventRecord(pf_rows_ev, st));   // the copies must not start before the CPU rows queued on `st` have gone to the card
         CK(cudaStreamWaitEvent(pf_st, pf_rows_ev, 0));
         pf_issued[(li + 1) & 1].assign(pf_ids_h, pf_ids_h + pf_n);
+        warm_guessed(NL, pf_ids_h, pf_n);
         for (int j = 0; j < pf_n; ++j) {
             const int id = pf_ids_h[j];
             if (id < 0 || id >= (int) m->g.n_expert) continue;
@@ -4162,7 +4239,7 @@ struct Engine {
         if (D > 0) {
             CK(cudaMemcpyAsync(hpin + 2, pick_m, 4, cudaMemcpyDeviceToHost, st));
             CK(cudaStreamSynchronize(st));
-            drafts[0] = hpin[2];
+            drafts[0] = draft_token(hpin[2]);
         }
         int last_row = T0 - 1;   // the row of the previous MTP call whose output seeds the next draft
         for (int d = 1; d < D; ++d) {   // chained: (the block's own output, the last draft) at the next position
@@ -4176,7 +4253,7 @@ struct Engine {
             else forward_mtp(1, pos + d, seeds, true, false);
             CK(cudaMemcpyAsync(hpin + 2, pick_m, 4, cudaMemcpyDeviceToHost, st));
             CK(cudaStreamSynchronize(st));
-            drafts[(size_t) d] = hpin[2];
+            drafts[(size_t) d] = draft_token(hpin[2]);
         }
         // the verify window
         const int T = D + 1;
@@ -5627,6 +5704,7 @@ int strata::qwen35::run(int argc, char** argv) {
     if (const char* tr = std::getenv("STRATA_ROUTE_TRACE")) route_trace = std::fopen(tr, "wb");
     E.reset();
     E.mtp_d = m.has_mtp ? mtp_d : 0;
+    if (const char* w = std::getenv("STRATA_Q36_WARM")) E.warm_kib = (size_t) std::max(0, std::atoi(w));
     E.mtp_adapt = std::getenv("STRATA_Q36_MTP_ADAPT") != nullptr && std::string(std::getenv("STRATA_Q36_MTP_ADAPT")) != "0";
     if (E.mtp_adapt && E.mtp_d > 1) std::fprintf(stderr, "strata-q36: adaptive draft depth: one draft after a step whose first draft failed\n");
     if (draft_vocab < 0 && std::getenv("STRATA_Q36_DRAFT_VOCAB") != nullptr) draft_vocab = std::atoi(std::getenv("STRATA_Q36_DRAFT_VOCAB"));

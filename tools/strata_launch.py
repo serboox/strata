@@ -224,6 +224,41 @@ def apply_turbo(mode: str, dry_run: bool) -> None:
         print(f"strata-launch: could not switch turbo {mode}: {result.stderr.strip() or 'see tools/turbo status'}", file=sys.stderr)
 
 
+PLATFORM_PROFILE_FILE = "/sys/firmware/acpi/platform_profile"
+PLATFORM_PROFILES_FILE = "/sys/firmware/acpi/platform_profile_choices"
+
+
+def apply_platform_profile(name: str | None, dry_run: bool, run=subprocess.run) -> None:
+    """Switch the firmware's cooling profile (balanced-performance and the like) once at start; the file belongs to root, so a
+    failed direct write falls back to sudo -A. A refusal (the firmware rejects `performance` here) is a warning only. The old
+    profile is not put back at exit: set it again with --platform-profile."""
+    if not name:
+        return
+    try:
+        choices = Path(PLATFORM_PROFILES_FILE).read_text(encoding="ascii").split()
+        current = Path(PLATFORM_PROFILE_FILE).read_text(encoding="ascii").strip()
+    except OSError as error:
+        print(f"strata-launch: no platform profile on this machine ({error})", file=sys.stderr)
+        return
+    if name not in choices:
+        print(f"strata-launch: platform profile {name!r} is not offered by the firmware (choices: {', '.join(choices)})", file=sys.stderr)
+        return
+    if name == current:
+        return
+    if dry_run:
+        print(f"strata-launch: platform profile {current} -> {name} (not applied in a dry run)", file=sys.stderr)
+        return
+    try:
+        Path(PLATFORM_PROFILE_FILE).write_text(name, encoding="ascii")
+        return
+    except OSError:
+        pass
+    env = {**os.environ, "SUDO_PROMPT": "switch the cooling profile of the laptop for the model server"}
+    result = run(["sudo", "-A", "tee", PLATFORM_PROFILE_FILE], input=name, text=True, capture_output=True, check=False, env=env)
+    if result.returncode != 0:
+        print(f"strata-launch: could not switch the platform profile to {name}: {result.stderr.strip() or 'refused'}", file=sys.stderr)
+
+
 # The lowest weight and the idle I/O weight: when another program wants the CPU or the disk, this one gets about a percent
 BACKGROUND_PROPERTIES = ["CPUWeight=idle", "IOWeight=1"]
 
@@ -464,6 +499,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--resident-experts", action="store_true",
                         help=f"a {RESIDENT_EXPERTS_CONTEXT}-token window and a {RESIDENT_EXPERTS_RESERVE_MIB} MiB VRAM reserve, so that about 9 experts per layer stay in VRAM "
                              "(44.8 tok/s measured with --expert-prefetch 3 and 8 experts); an explicit --context or --vram-reserve wins")
+    parser.add_argument("--warm-experts", type=int, default=0, metavar="KIB",
+                        help="with --expert-prefetch, pull the first KIB KiB of every matrix of the guessed experts into the CPU cache while the GPU runs the mixer (0 = off)")
+    parser.add_argument("--platform-profile", default=None, metavar="NAME",
+                        help="switch the firmware's cooling profile at start (for example balanced-performance; the file belongs to root, so a password dialog may appear); not put back at exit")
+    parser.add_argument("--draft-list", type=Path, default=None, metavar="FILE",
+                        help="the MTP drafts pick among the token ids in this int32 file only (tools/draft_list.py makes it); the verify pass keeps the whole vocabulary")
     parser.add_argument("--mtp-adapt", action="store_true",
                         help="after a step whose first draft was rejected, verify one draft only in the next step (the text is unchanged; off by default)")
     parser.add_argument("--cpu-adaptive", action="store_true",
@@ -566,7 +607,7 @@ def main() -> int:
     (ROOT / "logs").mkdir(exist_ok=True)
     config_path = RUN_DIR / "qwen36.json"
     kernel_env = iq_kernel_env(args.iq_kernels, MODEL_FILE)
-    lever_env = {**experts_used_env(experts_used), **(overlap_environment(args.overlap) or {}), **({"STRATA_Q36_MTP_ADAPT": "1"} if args.mtp_adapt else {})}
+    lever_env = {**experts_used_env(experts_used), **(overlap_environment(args.overlap) or {}), **({"STRATA_Q36_MTP_ADAPT": "1"} if args.mtp_adapt else {}), **({"STRATA_Q36_WARM": str(args.warm_experts)} if args.warm_experts else {}), **({"STRATA_Q36_DRAFT_LIST": str(args.draft_list)} if args.draft_list else {})}
     config = build_config(profile, args.port, args.sampling, args.max_temp,
                           with_igpu(engine_environment(kernel_env, cpu_max_mhz, lever_env), args.igpu_experts))
     config_path.write_text(json.dumps(config, indent=1) + "\n", encoding="utf-8")
@@ -600,6 +641,7 @@ def main() -> int:
           + (f", cpu cap {cpu_max_mhz:g} MHz" if cpu_max_mhz else "") + (f", memory protection {memory_low / GIB:.1f} GiB" if memory_low else "")
           + (f", prewarm {prewarm_bytes / GIB:.1f} GiB" if prewarm_bytes else ""), file=sys.stderr)
     apply_turbo(args.turbo, args.dry_run)
+    apply_platform_profile(args.platform_profile, args.dry_run)
     apply_priority(args.priority, args.dry_run)
     if args.dry_run:
         print(" ".join(command))
