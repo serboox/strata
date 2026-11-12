@@ -1225,6 +1225,10 @@ struct Layer {
     std::string src_path[3];    // the files the gate / up / down tensors are in, and where their data starts in them
     uint64_t src_off[3] = {};
     uint8_t* hblobs = nullptr;  // hybrid mode: every expert's blob in host memory, `stride` apart
+    // STRATA_IQ3S_4BIT=1: the gate and up matrices of every expert repacked into 4-bit codes (iq3s_repack_to_4bit), `rp_gsz` bytes per
+    // expert each; the CPU jobs of the mapped path read these, the GPU paths keep the GGUF's own bytes
+    uint8_t *rp_g = nullptr, *rp_u = nullptr;
+    size_t rp_gsz = 0;
     int n_slots = 0;            // hybrid mode: the experts resident in VRAM
     int pf_base = -1;           // expert prefetch: the slot index where this layer's guessed experts go (-1: none)
 };
@@ -3577,10 +3581,12 @@ struct Engine {
                 if (L.hblobs != nullptr) {
                     j.blob = L.hblobs + (size_t) x * L.stride;
                 } else {   // the GGUF in place: the gate rows are the blob, up and down at their distance in the mapping
-                    const uint8_t* gate = L.src_g + (size_t) x * L.src_gsz;
+                    const uint8_t* gate = L.rp_g != nullptr ? L.rp_g + (size_t) x * L.rp_gsz : L.src_g + (size_t) x * L.src_gsz;
+                    const uint8_t* up = L.rp_g != nullptr ? L.rp_u + (size_t) x * L.rp_gsz : L.src_u + (size_t) x * L.src_gsz;
                     C::NativeFmt& f = out_fmt.emplace_back(H.fmt);
-                    f.up_off = (size_t) ((uintptr_t) (L.src_u + (size_t) x * L.src_gsz) - (uintptr_t) gate);   // modular: the
+                    f.up_off = (size_t) ((uintptr_t) up - (uintptr_t) gate);   // modular: the
                     f.down_off = (size_t) ((uintptr_t) (L.src_d + (size_t) x * L.src_dsz) - (uintptr_t) gate); // file's tensor order does not matter
+                    if (L.rp_g != nullptr) { f.gu_odd4 = true; f.gu_row = L.rp_gsz / (size_t) f.n_ff; }
                     j.blob = gate;
                     j.fmt = &f;
                 }
@@ -3637,10 +3643,12 @@ struct Engine {
                 if (L.hblobs != nullptr) {
                     j.blob = L.hblobs + (size_t) x * L.stride;
                 } else {
-                    const uint8_t* gate = L.src_g + (size_t) x * L.src_gsz;
+                    const uint8_t* gate = L.rp_g != nullptr ? L.rp_g + (size_t) x * L.rp_gsz : L.src_g + (size_t) x * L.src_gsz;
+                    const uint8_t* up = L.rp_g != nullptr ? L.rp_u + (size_t) x * L.rp_gsz : L.src_u + (size_t) x * L.src_gsz;
                     C::NativeFmt& f = job_fmt.emplace_back(H.fmt);
-                    f.up_off = (size_t) ((uintptr_t) (L.src_u + (size_t) x * L.src_gsz) - (uintptr_t) gate);
+                    f.up_off = (size_t) ((uintptr_t) up - (uintptr_t) gate);
                     f.down_off = (size_t) ((uintptr_t) (L.src_d + (size_t) x * L.src_dsz) - (uintptr_t) gate);
+                    if (L.rp_g != nullptr) { f.gu_odd4 = true; f.gu_row = L.rp_gsz / (size_t) f.n_ff; }
                     j.blob = gate;
                     j.fmt = &f;
                 }
@@ -3782,7 +3790,7 @@ struct Engine {
             return;
         }
         if (igpu) igpu->submit(li, igpu_entries.data(), (int) igpu_entries.size());
-        if (L.hblobs == nullptr)
+        if (L.hblobs == nullptr && L.rp_g == nullptr)
             for (const C::ExpertJobMulti& j : jobs) {   // the experts' three ranges, read in parallel while the pool starts
                 const size_t x = (size_t) (j.blob - L.src_g) / L.src_gsz;
                 willneed(L.src_g + x * L.src_gsz, L.src_gsz);
@@ -4410,6 +4418,52 @@ void attach_igpu(Engine& E, const std::vector<Layer*>& all, int rows) {
     std::fprintf(stderr, "strata-q36: iGPU experts: %d of %lld per layer (%.0f%%), %.2f GiB, on %s, ready in %.1f s\n",
                  E.igpu->experts_per_layer(), (long long) g.n_expert, 100.0 * E.igpu->experts_per_layer() / (double) g.n_expert,
                  (double) E.igpu->resident_bytes() / (1 << 30), E.igpu->device_name().c_str(), ms_since(t0) / 1000.0);
+}
+
+/// STRATA_IQ3S_4BIT=1: repacks the IQ3_S gate and up matrices of every layer into 4-bit codes for the CPU kernel (about 2.0 GiB more than the
+/// GGUF's own bytes, in anonymous memory); the GGUF's bytes stay for the GPU.  Only the mapped-experts path reads the copies.
+void repack_iq3s_gate_up(Model& m) {
+    const char* want = std::getenv("STRATA_IQ3S_4BIT");
+    if (want == nullptr || want[0] != '1') return;
+    namespace C = strata::kernels::cpu;
+    if (!C::cpu_avx512_ok()) {
+        std::fprintf(stderr, "strata-q36: STRATA_IQ3S_4BIT needs AVX-512; the gate/up matrices stay IQ3_S\n");
+        return;
+    }
+    const auto t0 = Clock::now();
+    std::vector<Layer*> all;
+    for (Layer& L : m.layers) all.push_back(&L);
+    if (m.has_mtp) all.push_back(&m.mtp);
+    constexpr size_t kIq3sBlock = 110, k4BitBlock = 136;
+    std::atomic<size_t> next{0};
+    std::atomic<size_t> done_layers{0};
+    const size_t ne = (size_t) m.g.n_expert;
+    auto worker = [&] {
+        for (size_t i = next++; i < all.size(); i = next++) {
+            Layer& L = *all[i];
+            if (L.L.gu_type != 21 || L.src_g == nullptr || L.src_u == nullptr || L.src_gsz % kIq3sBlock != 0) continue;
+            const size_t blocks = L.src_gsz / kIq3sBlock;
+            const size_t bytes = blocks * k4BitBlock;
+            auto grab = [&](size_t n) { return static_cast<uint8_t*>(std::aligned_alloc(64, (n + 63) / 64 * 64)); };
+            uint8_t* g = grab(bytes * ne);
+            uint8_t* u = grab(bytes * ne);
+            if (g == nullptr || u == nullptr) { std::free(g); std::free(u); continue; }
+            for (size_t e = 0; e < ne; ++e) {
+                C::iq3s_repack_to_4bit(L.src_g + e * L.src_gsz, g + e * bytes, blocks);
+                C::iq3s_repack_to_4bit(L.src_u + e * L.src_gsz, u + e * bytes, blocks);
+            }
+            L.rp_g = g;
+            L.rp_u = u;
+            L.rp_gsz = bytes;
+            ++done_layers;
+        }
+    };
+    std::vector<std::thread> pool;
+    for (unsigned t = 0; t < 3; ++t) pool.emplace_back(worker);
+    worker();
+    for (auto& t : pool) t.join();
+    std::fprintf(stderr, "strata-q36: %zu layers' gate/up repacked from IQ3_S into 4-bit codes in %.1f s (the CPU path of the mapped experts uses them)\n",
+                 done_layers.load(), ms_since(t0) / 1000.0);
 }
 
 /// The routed experts after the engine's buffers: all in VRAM when they fit in `vram_gib` (< 0: the free VRAM less a
@@ -5810,6 +5864,7 @@ int strata::qwen35::run(int argc, char** argv) {
         std::fprintf(stderr, "strata-q36: %s\n", err.c_str());
         return 1;
     }
+    repack_iq3s_gate_up(m);
     E.ckpt_dir = ckpt_dir_arg;
     {
         // the model file and the engine build and cache format

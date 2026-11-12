@@ -329,6 +329,26 @@ void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* 
         iq256_gu_rows_exact_one(f.gu_type, blob, f.gu_row, f.up_off, (int) f.n_embd, act[0], ff[0], r0, r1);
         return;
     }
+    if (f.gu_odd4) {   // repacked gate/up: the 4-bit kernel for gate and up rows, then SwiGLU as the IQ3_S kernel does
+        thread_local std::vector<float> gate_rows, up_rows;
+        const size_t per_token = (size_t) f.n_ff;
+        gate_rows.assign((size_t) nt * per_token, 0.f);
+        up_rows.assign((size_t) nt * per_token, 0.f);
+        float* gate_out[16];
+        float* up_out[16];
+        for (int t = 0; t < nt && t < 16; ++t) {
+            gate_out[t] = gate_rows.data() + (size_t) t * per_token;
+            up_out[t] = up_rows.data() + (size_t) t * per_token;
+        }
+        iq4xs_vnni_rows_odd(blob, f.gu_row, (int) f.n_embd, act, nt, gate_out, r0, r1);
+        iq4xs_vnni_rows_odd(blob + f.up_off, f.gu_row, (int) f.n_embd, act, nt, up_out, r0, r1);
+        for (int t = 0; t < nt; ++t)
+            for (int r = r0; r < r1; ++r) {
+                const float gate = gate_out[t][r];
+                ff[t][r] = (gate / (1.f + std::exp(-gate))) * up_out[t][r];
+            }
+        return;
+    }
     if (f.gu_type == 21 && iq3s_vbmi_enabled()) {   // every group size: a token's rows do not depend on the drafting
         iq3s_vbmi_gu_rows(blob, f.gu_row, f.up_off, (int) f.n_embd, act, nt, ff, r0, r1);
         return;

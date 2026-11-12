@@ -46,10 +46,11 @@ struct Constants {
     __m512i row_group_of_lane[kPairBlocks][2];
 };
 
-inline Constants make_constants() {
+inline Constants make_constants(bool odd_table) {
     Constants c;
     alignas(16) uint8_t offset_values[16];
-    for (int i = 0; i < 16; ++i) offset_values[i] = (uint8_t) (kvalues_iq4nl[i] + 127);
+    // odd_table: the code c stands for 2c - 15 (the odd values -15 .. 15 of a repacked IQ3_S weight), not for ggml's non-linear table
+    for (int i = 0; i < 16; ++i) offset_values[i] = (uint8_t) ((odd_table ? 2 * i - 15 : kvalues_iq4nl[i]) + 127);
     // Four copies of the table: vpermb reads six index bits, so the upper two bits of an index byte must not matter.
     c.lookup = _mm512_broadcast_i32x4(_mm_load_si128((const __m128i*) offset_values));
     // vpmultishiftqb: result byte i is bits 8i+4..8i+11, i.e. the high nibble of byte i (its upper four bits are the next byte's low nibble).
@@ -67,9 +68,12 @@ inline Constants make_constants() {
     return c;
 }
 
+thread_local bool use_odd_table = false;
+
 const Constants& constants() {
-    static const Constants value = make_constants();
-    return value;
+    static const Constants plain = make_constants(false);
+    static const Constants odd = make_constants(true);
+    return use_odd_table ? odd : plain;
 }
 
 inline void prepare(const block_q8_K& y, const Constants& c, BlockActivation& out) {
@@ -210,7 +214,23 @@ void rows(const uint8_t* base, size_t row_bytes, int blocks, const PreparedActiv
 
 }  // namespace
 
+namespace {
+void rows_any(const uint8_t* base, size_t row_bytes, int n, const void* const* act, int nt, float* const* out, int r0, int r1);
+}
+
 void iq4xs_vnni_rows(const uint8_t* base, size_t row_bytes, int n, const void* const* act, int nt, float* const* out, int r0, int r1) {
+    use_odd_table = false;
+    rows_any(base, row_bytes, n, act, nt, out, r0, r1);
+}
+
+void iq4xs_vnni_rows_odd(const uint8_t* base, size_t row_bytes, int n, const void* const* act, int nt, float* const* out, int r0, int r1) {
+    use_odd_table = true;
+    rows_any(base, row_bytes, n, act, nt, out, r0, r1);
+    use_odd_table = false;
+}
+
+namespace {
+void rows_any(const uint8_t* base, size_t row_bytes, int n, const void* const* act, int nt, float* const* out, int r0, int r1) {
     const int blocks = n / QK_K;
     thread_local std::vector<BlockActivation> prepared;
     thread_local std::vector<float> act_scale;
@@ -237,6 +257,41 @@ void iq4xs_vnni_rows(const uint8_t* base, size_t row_bytes, int n, const void* c
             case 7: rows<7>(base, row_bytes, blocks, activations, group_out, r0, r1); break;
             default: rows<8>(base, row_bytes, blocks, activations, group_out, r0, r1); break;
         }
+    }
+}
+
+}  // namespace
+
+void iq3s_repack_to_4bit(const uint8_t* src, uint8_t* dst, size_t blocks) {
+    for (size_t b = 0; b < blocks; ++b) {
+        const block_iq3_s* x = reinterpret_cast<const block_iq3_s*>(src) + b;
+        uint8_t* out = dst + b * kBlockBytes;
+        std::memcpy(out, &x->d, 2);
+        uint16_t scales_h = 0;
+        uint8_t* scales_l = out + 4;
+        uint8_t* codes = out + 8;
+        std::memset(scales_l, 0, 4);
+        for (int ib32 = 0; ib32 < QK_K / 32; ++ib32) {
+            const uint8_t* qs = x->qs + 8 * ib32;
+            const uint8_t* signs = x->signs + 4 * ib32;
+            const int qh = x->qh[ib32];
+            int8_t w[32];
+            for (int l = 0; l < 4; ++l) {
+                const uint8_t* g1 = reinterpret_cast<const uint8_t*>(iq3s_grid + (qs[2 * l + 0] | ((qh << (8 - 2 * l)) & 256)));
+                const uint8_t* g2 = reinterpret_cast<const uint8_t*>(iq3s_grid + (qs[2 * l + 1] | ((qh << (7 - 2 * l)) & 256)));
+                for (int j = 0; j < 4; ++j) {
+                    w[8 * l + j] = (int8_t) ((signs[l] & kmask_iq2xs[j + 0]) ? -(int) g1[j] : (int) g1[j]);
+                    w[8 * l + 4 + j] = (int8_t) ((signs[l] & kmask_iq2xs[j + 4]) ? -(int) g2[j] : (int) g2[j]);
+                }
+            }
+            const int s = (x->scales[ib32 / 2] >> (4 * (ib32 & 1))) & 0xf;
+            const int ls = 33 + 2 * s;   // (ls - 32) = 1 + 2s, the IQ3_S sub-block scale
+            scales_l[ib32 / 2] |= (uint8_t) ((ls & 0xf) << (4 * (ib32 & 1)));
+            scales_h |= (uint16_t) ((ls >> 4) << (2 * ib32));
+            for (int j = 0; j < 16; ++j)
+                codes[16 * ib32 + j] = (uint8_t) (((w[j] + 15) / 2) | (((w[j + 16] + 15) / 2) << 4));
+        }
+        std::memcpy(out + 2, &scales_h, 2);
     }
 }
 

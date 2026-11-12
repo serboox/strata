@@ -36,6 +36,7 @@ struct NativeFmt {
     /// native_quant_act / native_quant_h apply y = H_block (signs * x) before quantizing.  had_block 0 = none.
     int had_block = 0;
     bool had_gu = false, had_d = false;
+    bool gu_odd4 = false;               ///< gate/up were repacked from IQ3_S into 4-bit codes of the odd values (iq3s_repack_to_4bit); gu_row is then 136 bytes per block
     int layer = -1;                     ///< the layer this format belongs to (set by expert_layout_load; STRATA_ACT_DUMP only)
     const float* gu_signs = nullptr;    ///< n_embd signs for x (nullptr: identity)
     const float* d_signs = nullptr;     ///< n_ff signs for h (nullptr: identity)
