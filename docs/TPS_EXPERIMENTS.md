@@ -2,7 +2,8 @@
 
 A ledger of the speed experiments of November 2026 (software and weight changes only; no cooling, overclocking or core pinning).
 Every row says what was measured, the number, and whether the idea is worth another run. Details of the engine switches are in
-`docs/TUNING.md`; the open work items are in `docs/BACKLOG.md`.
+`docs/TUNING.md`; the open work items are in `docs/BACKLOG.md`. The reasoning (what was expected, what was done, what was
+concluded) is in `docs/TPS_REPORT.md`; the list of the follow-up checks T1 to T9 is `docs/TPS_BACKLOG.md`.
 
 ## Setup of the measurements
 
@@ -20,8 +21,8 @@ Every row says what was measured, the number, and whether the idea is worth anot
 Decode speed can be raised in software. The large levers change the output: fewer routed experts per token, and a lighter dense
 part (Q5_K or Q4_K instead of Q8_0). Letting the GPU compute a few guessed experts (`--expert-prefetch`) gives about 10 percent
 per step for a small change in the output (a mean KLD of about 0.005). A good compromise among the measured combinations is the
-dense part in Q5_K with 7 experts and a prefetch of 3: a step in 52.1 ms against 64.5 (46.2 against 35.2 tok/s) for a mean KLD of
-about 0.025; the fastest measured, with the dense part in Q4_K, takes 50.3 ms for about 0.04 (see "Settings that stack"). The decode step is a strict chain GPU, then CPU experts, then GPU, so the GPU is idle for much of it; the
+dense part in Q5_K with 7 experts and a prefetch of 3: a step in 52.1 ms against 64.5 (46.2 against 35.2 tok/s in the first run, 44.1 and 43.7 in two repeats, see "Repeats") for a mean KLD of
+about 0.025; the fastest with 7 experts, with the dense part in Q4_K, takes 50.3 ms for about 0.04, and with 5 experts and the dense part in Q4_K 44.3 ms for about 0.08 (see "Settings that stack"). The decode step is a strict chain GPU, then CPU experts, then GPU, so the GPU is idle for much of it; the
 options to change that are listed at the end.
 
 ## Fewer experts per token (K, run-time setting `--experts-used`)
@@ -35,8 +36,8 @@ options to change that are listed at the end.
 | 4 | not run | - | 142 (86.6 %) | - | - | - |
 | 3 | not run | - | 114 (69.5 %) | - | - | - |
 
-The pass rate holds down to K=5 (one run differs by 1 to 2 problems) and breaks at K=4. Not measured: tool calls and agent runs
-at a lower K. Overlap on top of K: 6 experts +23.1 % against +20.9 % alone (4 November).
+The pass rate holds down to K=5 (one run differs by 1 to 2 problems) and breaks at K=4. Tool calls at a lower K: see "Tool-call
+accuracy" below (K=6 and K=7 hold, K=5 starts to lose cases, K=4 breaks). Overlap on top of K: 6 experts +23.1 % against +20.9 % alone (4 November).
 
 Variants of the same idea that do not beat the plain setting:
 
@@ -72,17 +73,99 @@ the maximum single-position values are 0.2 to 1.1, and the KLDs do not add up ex
 | 6 experts | 41.8 | 55.3 | -14 % | 0.0376 | 91.6 % |
 | 6 experts + prefetch 3 | 44.9 | 51.3 | -20 % | 0.0384 | 90.8 % |
 | dense Q4_K + prefetch 3 | 44.6 (accepted 0.59) | 53.4 | -17 % | 0.0355 | 91.6 % |
-| dense Q5_K + 7 experts + prefetch 3 | 46.2 (accepted 0.71) | 52.1 | -19 % | 0.0253 | 91.6 % |
+| dense Q5_K + 7 experts + prefetch 3 | 46.2 (accepted 0.71; repeats 44.1 and 43.7 at 0.67) | 52.1 (repeats 53.1 and 53.4) | -19 % | 0.0253 | 91.6 % |
 | dense Q4_K + 7 experts + prefetch 3 | 48.3 (accepted 0.75) | 50.3 | -22 % | 0.0407 | 91.6 % |
+| dense Q5_K + 6 experts + prefetch 3 (T6) | 47.4 (accepted 0.687) | 50.0 | -23 % | 0.0482 | 90.4 % |
+| dense Q5_K + 5 experts + prefetch 3 (T6) | 50.1 (accepted 0.671) | 46.8 | -28 % | 0.0907 | 86.6 % |
+| dense Q4_K + 6 experts + prefetch 3 | 50.7 (accepted 0.697) | 47.2 | -27 % | 0.0659 | 90.0 % |
+| dense Q4_K + 5 experts + prefetch 3 | 52.1 (accepted 0.653) | 44.3 | -32 % | 0.0834 | 86.2 % |
+| dense Q4_K + 5 experts + prefetch 3, `--max-context 16384 --vram-reserve 300` | 55.4 (accepted 0.659) | 41.8 | -36 % | not measured | - |
 
 The tok/s of the rows with a high draft acceptance flatter them; the step time is the fair figure. Dense Q5_K with 7 experts and a
 prefetch of 3 is 0.8 ms a step slower than 6 experts with a prefetch of 3 and has a KLD about a third lower (0.0253 against
-0.0384); dense Q4_K with 7 experts and a prefetch of 3 is the fastest measured. On both prompts (12 November, final runs, baseline 34.4 and 34.6 tok/s on the code prompt, 34.2 and 34.3 on the text prompt): dense
+0.0384); dense Q4_K with 7 experts and a prefetch of 3 is the fastest of this table (the 6- and 5-expert stacks below are faster, at a higher KLD). On both prompts (12 November, final runs, baseline 34.4 and 34.6 tok/s on the code prompt, 34.2 and 34.3 on the text prompt): dense
 Q5_K with prefetch 3 ran 42.5 and 44.0 tok/s on the code prompt and 36.6 and 40.1 on the text prompt (two runs, the draft
 acceptance differing between them); dense Q5_K with 7 experts and a prefetch of 3 ran 43.7 on the code prompt and 41.8 on the
 text prompt. HumanEval on the engine (164 problems): baseline 153, prefetch 3 alone 153, dense Q5_K + 7 experts + prefetch 3 150,
 dense Q4_K + 7 experts + prefetch 3 152; compared problem by problem the differences are balanced (2 lost and 2 gained, 5 and 2,
-4 and 3) and inside noise (exact two-sided p 1.0, 0.45, 1.0). Quality on tool calls and agent runs was not measured for any of these.
+4 and 3) and inside noise (exact two-sided p 1.0, 0.45, 1.0). The T6 stacks (dense Q5_K, prefetch 3): 6 experts 152 (lost 5, gained 4, p 1.0) and 5 experts 150 (lost 6, gained 3, p 0.51). The step times of the T6 rows are derived as (1 + 2 x accepted share) / tok/s. Tool-call accuracy of these settings: see "Tool-call accuracy" below.
+
+## Dense groups in Q4_K, one group at a time (12 November)
+
+Code prompt, MTP 2, 2.2 GHz cap; made with `tools/requant_dense.py --groups G --to q4_K` from the IQ4_XS file with the MTP block. The
+step is derived as (1 + 2 x accepted share) / tok/s; baselines 34.92 and 34.80 tok/s, 65.0 and 65.2 ms.
+
+| Q4_K for | Q8_0 bytes | tok/s | drafts accepted | step, ms | step saved | mean KLD | same best token |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| nothing (baseline) | - | 34.92 | 0.635 | 65.0 | - | - | - |
+| recurrent blocks (ssm) | 1.07 GB | 38.18 | 0.695 | 62.6 | 2.4 ms (-3.7 %) | 0.0273 | 92.3 % |
+| attention (attn) | 0.32 GB | 38.19 | 0.738 | 64.8 | 0.2 ms | 0.0161 | 92.3 % |
+| shared expert (shexp) | 0.14 GB | 35.48 | 0.647 | 64.7 | 0.3 ms | 0.0087 | 95.8 % |
+| embeddings (embd) | 0.54 GB | 37.60 | 0.710 | 64.4 | 0.6 ms (-1 %) | 0.0086 | 93.5 % |
+| MTP projection (mtp) | 0.009 GB | 35.13 | 0.629 | 64.3 | 0.7 ms (inside the noise) | 0 (it acts on the drafts only) | 100 % |
+| ssm + attn + shexp | 1.53 GB | 42.82 | 0.747 | 58.2 | 6.8 ms (-10.5 %) | 0.0362 | 91.6 % |
+| all groups (the d4 file of E4) | 2.07 GB | 42.58 | 0.684 | 55.6 | 9.4 ms (-14.5 %) | 0.0369 | 92.0 % |
+
+The step is derived as (1 + 2 x accepted share) / tok/s. The second baseline of this chain was aborted by the bench's guard (other
+programs stalling on memory), so the two baselines of the T6 chain serve: 34.92 and 34.80 tok/s, 65.0 and 65.2 ms. The KLD of the
+last row is from the stack chain of E7; the others are from the teacher-forced engine test of E7's method.
+
+## Long runs, long context, resident slots, MTP depth (12 November)
+
+Code prompt, MTP 2, 2.2 GHz cap, 80 C limit unless noted.
+
+| Test | Setting | Result |
+| --- | --- | --- |
+| Six requests of 2250 tokens without a pause (tok/s per request) | baseline | 34.7, then 28.1 to 31.8 once the package reaches 79 C; average 31.6 |
+| | dense Q5_K, 7 experts, prefetch 3 | 47.1 / 47.8 / 41.0 / 32.2 / 37.9 / 45.6; average 41.9 (+33 %); package peak 82 C |
+| Memory over the long run | baseline / stack | RSS grows only while loading (6.7 to 17.7 GiB / 13 to 23.6 GiB with the page-locked experts), flat afterwards; VRAM flat |
+| Decode after a 16,384-token prompt (tok/s) | baseline / prefetch 3 / stack | 30.0 / 32.2 / 37.4 (+25 %) |
+| Decode after a 32,768-token prompt (tok/s) | baseline / prefetch 3 / stack | 29.8 / 31.6 / 33.5 (+12 %); a first 32K prefetch run gave 21.9 and was not repeated |
+| Prefill (tok/s) at 16K / 32K | baseline / prefetch 3 / stack | 118 / 103, 124 / 108, 145 / 117 |
+| Share of expert entries from the ring at 16K and 32K | prefetch 3 | 21 to 22 % |
+| Resident VRAM slots at `--max-context 16384` | default reserve (1 resident expert per layer) | 36.2 tok/s; with prefetch 3 40.4 |
+| | `--vram-reserve 300` (9 resident per layer) | 43.0 tok/s, step 55.7 ms against 66.9 |
+| | `--vram-reserve 300` with prefetch 3 (6 resident, 3 guess) | 44.8 tok/s, step 53.3 ms |
+| MTP depth on the dense Q5_K stack | depth 1 / 2 / 3 | 44.6 (0.815 accepted per draft) / 43.7 (0.666) / 42.4 (0.599) tok/s; spread inside a run about 2 |
+| n-gram draft statistics on 600,000 generated tokens of three agent sessions (a proxy) | extra row 21 ms (measured) | at best +2.4 % (match 12, up to 4 tokens, 28.7 % of tokens by n-gram, 3.45 accepted per n-gram step) |
+| | extra row 12 ms (hypothetical) | +14 % (match 6, up to 4 tokens) |
+
+## Tool-call accuracy (12 November)
+
+A generated, seeded (20261112) set sent to the engine's chat endpoint with nine tools, `temperature 0`, thinking off; a call counts
+only if the tool name and every required argument match. The main set has 89 cases (32 select, 10 edit, 12 precision, 10 no-tool,
+20 chain, 5 chain-answer), the hard set 36 (10 code written into a file and run against assertions, 8 parallel calls, 10 fix chains
+scored by applying the edit and running a test, 8 value extractions from a JSON blob; a read of the target file before the edit
+counts). Details of the design are in `docs/TPS_REPORT.md`, E15.
+
+| Setting | main set (of 89) | hard set (of 36) |
+| --- | --- | --- |
+| baseline | 88 | 36 |
+| prefetch 3 | 88 | 36 |
+| dense Q5_K + 7 experts + prefetch 3 | 89 | 36 |
+| dense Q4_K + 7 experts + prefetch 3 | 88 | 36 |
+| dense Q5_K + 6 experts + prefetch 3 | 89 | 36 |
+| dense Q5_K + 5 experts + prefetch 3 | 88 | 36 |
+| 7 experts | 88 | 36 |
+| 6 experts | 89 | 35 |
+| 5 experts | 85 | 35 |
+| 4 experts | 78 | 23 |
+
+The case that fails in most settings (a `search_code` call with path `.` where the request named the folder `web`) is ambiguous.
+At 4 experts 8 of the 11 misses of the main set are no tool call at all. A difference of 1 to 3 cases is noise.
+
+## Repeats (12 November)
+
+Two runs of the T6 chain were aborted by the bench's own guard (other programs stalling on memory, then a load average of 4.5) and were
+run again at the end. Same conditions as above, code prompt.
+
+| Setting | first measurement | repeat |
+| --- | --- | --- |
+| baseline | 34.92 tok/s, accepted 0.635, step 65.0 ms (start of the T6 chain) | 34.80, 0.635, 65.2 ms (second baseline of the chain) |
+| dense Q5_K + 7 experts + prefetch 3 | 46.2 tok/s, accepted 0.71, step 52.1 ms (stack chain) | 44.14, 0.671, 53.1 ms; the final two-prompt run gave 43.69, 0.666, 53.4 ms |
+
+The repeats confirm the step time of the Q5_K stack (52.1 to 53.4 ms, -18 to -19 %) but not its tok/s: the first run was a draw with a
+higher draft acceptance, so the honest figure is 44 to 46 tok/s. The other stack rows are single runs.
 
 ## Lossless and system-level ideas that gave nothing (or little)
 
@@ -133,7 +216,6 @@ the chain GPU, CPU, GPU is a data dependency. What can change the balance:
 
 ## What was not covered
 
-- Tool-call accuracy and multi-step agent quality at K below 8, with a Q5_K or Q4_K dense part and with the prefetch (HumanEval only
-  covers code, and only K was run on it).
-- HumanEval or another task benchmark of the stacked settings.
-- n-gram drafting inside the engine and `nsys` of a step with MTP.
+- A long multi-turn agent session on a stack (the tool-call test is a generated single-step and short-chain set).
+- `nsys` of a step with MTP, and n-gram drafting inside the engine (the statistics say it does not pay at today's row cost).
+- Two interleaved streams, a share of the MTP block for the GPU, a guess two layers ahead for the prefetch, faster dense kernels.

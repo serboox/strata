@@ -498,6 +498,14 @@ of the code prompt is mostly a higher draft acceptance on that text. Not worth u
 `ssm_a`/`alpha`/`beta`/`dt`/`conv` tensors and all expert tensors are never touched. The switch is a different model file, so there
 is nothing to turn on in the engine and the Q8_0 file keeps working unchanged.
 
+**Q5_K and Q4_K (12 November, branch `requant_dense_kquants`).** `--to q5_K` and `--to q4_K` make the dense part Q5_K or Q4_K
+instead (`--to q6_K` is the default). Code prompt, MTP, baseline 35.2 tok/s and 64.5 ms a step: Q5_K 42.1 tok/s and 58.8 ms (-9 percent
+per step), Q4_K 42.6 tok/s and 55.5 ms (-14 percent), more than the Q6_K figures above; the mean KLD against the IQ4_XS file is 0.022 and
+0.043 in llama.cpp (0.024 and 0.037 in the engine's own test). The files stack with `--experts-used` and `--expert-prefetch`: dense Q5_K
+with 7 experts and a prefetch of 3 takes 52.1 ms a step (-19 percent) for a KLD of 0.025, with Q4_K 50.3 ms (-22 percent) for 0.04.
+HumanEval and the tool-call tests of these stacks stay inside the noise; see `docs/TPS_REPORT.md`. The quantiser is checked in
+`--selftest` against ggml's `quantize_row_*_ref` with a tolerance of 0.05 / 0.08 / 0.16 for Q6_K / Q5_K / Q4_K.
+
 ```sh
 python3 tools/requant_dense.py SRC.gguf DST.gguf --dry-run                    # which tensors change, the new size, the disk space
 python3 tools/requant_dense.py SRC.gguf DST.gguf --groups attn,ssm,shexp      # the default groups
@@ -617,9 +625,17 @@ context no expert sits in VRAM at all (0.27 GiB free, the reserve is 768 MiB). `
   late layers, U of P guesses in use` every 8192 layers (and at a normal exit of the benchmark mode). P=3 had 0.4 percent late layers.
 - `--vram-reserve MiB` (default 768) sets the VRAM the expert placement leaves free; a smaller value gives resident slots (and
   so room for guess slots) at a long context, at the cost of the margin for the driver and other programs.
+- Long context (12 November, a prompt of 16,384 and of 32,768 tokens, 300 tokens decoded): decode 30.0 and 29.8 tok/s for the
+  baseline, 32.2 and 31.6 with P=3 (about +6 to +7 percent), 21 to 22 percent of the expert entries from the ring at both lengths.
+- With resident slots (`--max-context 16384`, code prompt): the default reserve leaves 1 resident expert per layer (36.2 tok/s, 40.4
+  with P=3); `--vram-reserve 300` leaves 9 (43.0 tok/s, step 55.7 ms against 66.9); reserve 300 with P=3 (6 resident, 3 guess slots)
+  gives 44.8 tok/s and 53.3 ms. The price is the shorter context and a VRAM margin of 300 MiB.
+- Over 2250-token requests in a row the speed does not drift beyond the thermal sag and nothing leaks (RSS flat after loading, VRAM
+  flat).
 - Not done or not measured: a guess made two layers ahead (the copy rate, about 2.8 experts per layer through PCIe, limits P more
-  than the lead time does), a share for the MTP block, a guess from more than the current residual stream, the combination with
-  resident slots, and the effect on long contexts.
+  than the lead time does), a share for the MTP block, and a guess from more than the current residual stream.
+- The measured combinations with a lighter dense part and fewer experts, the tool-call and HumanEval checks of them, and the
+  whole reasoning are in `docs/TPS_REPORT.md`.
 - Reading the VRAM: the engine prints where the card went (K/V caches, recurrent states); the K/V caches cost about 0.011 GiB
   per 1024 cells per session.
 
