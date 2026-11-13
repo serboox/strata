@@ -3528,6 +3528,8 @@ struct Engine {
     bool strict = false;
     bool strict_gpu_wanted = false;
     bool strict_gpu = false;
+    std::vector<char> strict_cpu_layer;   // per state index: the layer's formats have no strict GPU kernel, the CPU computes its experts
+    bool strict_on_gpu(size_t li) const { return strict_gpu && !(li < strict_cpu_layer.size() && strict_cpu_layer[li]); }
     /// The CPU computes this layer's gate/up rows with the 4-bit kernel on repacked rows (build_jobs_glue sets gu_odd4 the same way)
     static bool layer_odd4(const Layer& L) { return L.hblobs == nullptr && L.rp_g != nullptr; }
     int attn_ahead = 8;          // STRATA_Q36_ATTN_AHEAD: V cells loaded together by the decode attention kernel
@@ -3980,7 +3982,7 @@ struct Engine {
         if (!xq_post) quant(h, N, T, xq);   // the experts' and the shared expert's input
         const bool pf_here = !win_no_prefetch && pf_is_ready(li);   // this layer's guessed experts are in the ring (or on their way)
         if (pf_here) CK(cudaStreamWaitEvent(st, pf_done[pfi(li)], 0));
-        if (strict_gpu) expert_grouped_strict(L, li, T);
+        if (strict_on_gpu(li)) expert_grouped_strict(L, li, T);
         else K::native_expert_grouped(L.L, grp_ptr, grp_start, n_groups, ent_dst, ent_tok,
                                       std::min<int64_t>(n_ent, g.n_expert), n_ent, xq, escr, eparts, st);
         if (pf_here) k_pf_clear<<<1, 32, 0, st>>>(hy[li].slot_of_d, pf_ids_d[pfi(li)], pf_n, L.pf_base);   // the guesses' slots -1 again
@@ -4294,6 +4296,7 @@ struct Engine {
             const Layer& L = layer_at((int) li);
             const int S = L.n_slots;
             if (S <= 0 || S >= ne) continue;
+            if (strict && !strict_on_gpu(li)) continue;   // the layer keeps every expert on the CPU
             std::vector<int> order((size_t) ne);
             for (int x = 0; x < ne; ++x) order[(size_t) x] = x;
             std::sort(order.begin(), order.end(), [&](int a, int b) { return H.score[(size_t) a] > H.score[(size_t) b]; });
@@ -5071,6 +5074,8 @@ void setup_strict(Model& m, Engine& E) {
     if (!E.strict || !m.hybrid) return;
     namespace C = strata::kernels::cpu;
     const char* why = nullptr;
+    size_t n_gpu = 0, n_cpu = 0;
+    E.strict_cpu_layer.assign(E.hy.size(), 0);
 #if defined(STRATA_Q36_CPU_POOL)
     if (!E.strict_gpu_wanted) why = "STRATA_Q36_STRICT=cpu";
     else if (E.igpu) why = "the integrated GPU computes experts with its own arithmetic";
@@ -5078,30 +5083,37 @@ void setup_strict(Model& m, Engine& E) {
         if (!E.lhy(li)) continue;
         const Layer& L = E.layer_at((int) li);
         const C::NativeFmt& f = E.hy[li].fmt;
-        if (!K::native_expert_strict_supported(L.L) || !C::native_strict_supported(f, Engine::layer_odd4(L)))
-            why = "a layer's expert formats, or the CPU kernels in use for them, have no strict GPU kernel (IQ3_S gate/up and IQ4_XS down "
-                  "with STRATA_IQ_VBMI=1 do)";
-        else if (!E.probe_dev_quant(f) || !E.probe_dev_quant(f, true))
-            why = "the device quantizer does not write the host quantizer's bytes";
+        // a layer with other formats (the file keeps a few layers' down matrices in Q6_K) stays on the CPU alone
+        const bool gpu = K::native_expert_strict_supported(L.L) && C::native_strict_supported(f, Engine::layer_odd4(L)) &&
+                         E.probe_dev_quant(f) && E.probe_dev_quant(f, true);
+        E.strict_cpu_layer[li] = !gpu;
+        ++(gpu ? n_gpu : n_cpu);
     }
+    if (why == nullptr && n_gpu == 0) why = "no layer has IQ3_S gate/up and IQ4_XS down on the AVX-512 kernels (STRATA_IQ_VBMI=1)";
 #else
     why = "this build has no CPU expert pool";
 #endif
+    const auto empty_slots = [&](size_t li) {
+        Engine::Hy& H = E.hy[li];
+        if (H.slot_of_d == nullptr) return;
+        std::fill(H.slot_of.begin(), H.slot_of.end(), -1);
+        CK(cudaMemcpy(H.slot_of_d, H.slot_of.data(), H.slot_of.size() * sizeof(int32_t), cudaMemcpyHostToDevice));
+        (li < m.layers.size() ? m.layers[li] : m.mtp).pf_base = -1;   // and no prefetch guess for it
+    };
     if (why == nullptr) {
         if (E.d_acts == nullptr) CK(cudaMalloc(&E.d_acts, (size_t) E.tmax * C::kNativeActBytes));
+        for (size_t li = 0; li < E.hy.size(); ++li)
+            if (E.strict_cpu_layer[li]) empty_slots(li);
         C::set_strict_swiglu(true);
         E.strict_gpu = true;
-        std::fprintf(stderr, "strata-q36: strict mode: the experts in VRAM slots and the guessed experts use the CPU kernels' arithmetic, "
-                     "so an expert gives the same bits wherever it is computed\n");
+        std::fprintf(stderr, "strata-q36: strict mode: in %zu layers the experts in VRAM slots and the guessed experts use the CPU kernels' "
+                     "arithmetic, so an expert gives the same bits wherever it is computed; %zu layers with other formats keep every "
+                     "expert on the CPU\n", n_gpu, n_cpu);
         return;
     }
     E.pf_n = 0;
-    for (size_t li = 0; li < E.hy.size(); ++li) {
-        Engine::Hy& H = E.hy[li];
-        if (H.slot_of_d == nullptr) continue;
-        std::fill(H.slot_of.begin(), H.slot_of.end(), -1);
-        CK(cudaMemcpy(H.slot_of_d, H.slot_of.data(), H.slot_of.size() * sizeof(int32_t), cudaMemcpyHostToDevice));
-    }
+    std::fill(E.strict_cpu_layer.begin(), E.strict_cpu_layer.end(), 1);
+    for (size_t li = 0; li < E.hy.size(); ++li) empty_slots(li);
     std::fprintf(stderr, "strata-q36: strict mode: every routed expert on the CPU, no resident experts and no prefetch (%s)\n", why);
 }
 

@@ -292,15 +292,30 @@ one pass of the output matrix for the rows of both windows
   | unchanged engine, IQ4_XS file, 8 experts | 36.6 | not measured | 153 | 0 (noise floor 0.006) |
   | dense Q5_K, 8 experts, switches | 51.4 | not measured | not measured | not measured for Q5_K |
   | dense Q5_K, 7 experts, switches | 54.9 | not measured | 150 without the switches | 0.025 for 7 experts |
-  | dense Q4_K, 8 experts, switches | 55.2 | running | running | 0.0125 for dense Q4_K |
+  | dense Q4_K, 8 experts, switches | 55.2 | mean 50.6, median 52.5, lowest 43.1, peak 77 C | not measured (the run was stopped) | 0.0125 for dense Q4_K |
   | dense Q4_K, 7 experts, switches (the middle variant) | 57.3 | mean 54.3, median 55.4, lowest 48.2, peak 77 C | 149 (152 without the switches) | 0.0125 and 0.025 |
-  | dense Q4_K, 6 experts, switches (`--fast50` today) | 58.2 | mean 51.4 without the token list | 146 | 0.0125 and 0.048 |
+  | dense Q4_K, 6 experts, switches (`--fast50` until this record) | 58.2 | mean 51.4 without the token list | 146 | 0.0125 and 0.048 |
 
-- **Concluded.** The middle variant holds 50 tok/s on average in a sustained run (one request of eight fell to 48.2) and loses 4 HumanEval problems against the unchanged engine, 3 fewer than the 6-expert set; the HumanEval noise between runs of one setting is about 3 problems. The token list is what gives the reserve: the 6-expert set without it held 51.4. Zero loss at 50 tok/s is not reached by any setting: every one above the first row uses the dense Q4_K or Q5_K file. The least-loss candidate is dense Q4_K with all 8 experts (only the dense matrices change, KLD 0.0125, twice the noise floor); its sustained run and HumanEval were started and are not in this record yet.
+- **Concluded.** The middle variant holds 50 tok/s on average in a sustained run (one request of eight fell to 48.2) and loses 4 HumanEval problems against the unchanged engine, 3 fewer than the 6-expert set; the HumanEval noise between runs of one setting is about 3 problems. The token list is what gives the reserve: the 6-expert set without it held 51.4. Zero loss at 50 tok/s is not reached by any setting: every one above the first row uses the dense Q4_K or Q5_K file. The least-loss candidate, dense Q4_K with all 8 experts (only the dense matrices change, KLD 0.0125, twice the noise floor), averages 50.6 tok/s in the sustained run, but three of its eight requests fell below 50 (49.2, 47.9, 43.1): it reaches 50 on average and does not hold it. Its HumanEval was not measured: the background run was stopped with the session. **Decision: `--fast50` now uses 7 experts** (54.3 on average, HumanEval 149); `--fast50 --experts-used 8` is the gentler setting at about 50 on average, `--fast50 --experts-used 6` the fastest one.
 
 ### First checks of C1 (13 November 2026)
 
 - **Expected.** The strict GPU kernels give the bits of the CPU kernels.
 - **Done.** `tests/strict_expert_parity.cu` (`ninja strict_expert_parity && ./strict_expert_parity`, no model needed): random IQ3_S and IQ4_XS experts of the model's size, 8 tokens, groups of 1 to 11 entries, three activation scales, both lane layouts (IQ3_S and repacked 4-bit). The CPU side runs the pool's order (`native_gu_rows`, `native_quant_h`, `native_down_rows`), the GPU side the device quantiser and the two strict kernels. It also compares the strict SwiGLU with the C library's.
 - **Got.** 30 of 30 cases: no hidden value and no output value differs. The strict SwiGLU differs from the C library's in 466 of 1,634,311 values, by at most 3 units in the last place.
-- **Concluded.** The kernels are right at the unit level on the first run. The engine checks (the same text with `--strict` for three placements of the experts) and the C3 check (`--parallel 2` with and without `--interleave`) were queued behind the 8-expert runs; their results are not in this record yet.
+- **Concluded.** The kernels are right at the unit level on the first run.
+
+### Engine checks of C1 and C3 (13 November 2026)
+
+- **Expected.** C1: `--strict` writes the same text wherever the experts are computed. C3: `--parallel 2 --interleave` writes the same text per session as `--parallel 2` (in strict mode, where the placement of experts cannot change it) and gives more tokens a second in total.
+- **Done.** The engine's own server on the default file (dense Q5_K, 7 experts), one request of 400 tokens at temperature 0. C1: three starts with `--strict`: slots and prefetch 3, slots only, no slots (a VRAM reserve of 3400 MiB). C3: two different requests at once, context 16384, prefetch 3, without and with `--interleave`, once plain and once with `--strict`.
+- **Got.** C1: the first start fell back to the CPU for every layer, because the file keeps the down matrices of 4 layers in Q6_K (found with a new log line that names the layer and its formats). The decision is now made per layer: 37 layers use the strict GPU kernels, the 4 others keep every expert on the CPU and get no prefetch guess. After that the three starts wrote the same text (400 tokens) with 18.8%, 7.8% and 0% of the expert entries computed on the GPU. The same text also came from session a of the two-session start. C3: the interleaved windows ran (the engine's line "interleaved batch windows" appeared, no failure), but:
+
+  | Two requests of 400 tokens | Wall time | Total tok/s | Text against the plain window (strict mode) |
+  | --- | --- | --- | --- |
+  | `--parallel 2` | 14.5 s | 55.0 | the reference |
+  | `--parallel 2 --interleave` | 17.9 s | 44.7 | one session the same, the other different |
+  | `--parallel 2 --strict` | 14.9 s | 53.6 | the reference |
+  | `--parallel 2 --strict --interleave` | 18.3 s | 43.7 | one session the same, the other different |
+
+- **Concluded.** C1 works in the engine: the strict mode keeps the slots and the prefetch and its text does not depend on the placement; it costs about 3% of the two-session speed here. C3 does not pay and is not correct yet. It is 19% slower than the plain batch window: two windows of 2 rows double the kernel launches of the GPU side and the jobs of the CPU pool, the second window has no prefetch, and the plain window already shares one pass. And in strict mode one of the two sessions gets a different text, so a fault remains in one window's path (not found: the review of the shared buffers and of the prefetch slots did not show it). `--interleave` stays off by default and should not be used; the next step, if this is taken up again, is to find which window differs with two sessions of the same prompt.

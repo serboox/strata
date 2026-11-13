@@ -22,7 +22,7 @@ class Fast50Tests(unittest.TestCase):
 
     def test_the_fast50_constants_are_the_measured_set(self):
         self.assertEqual((strata_launch.FAST50_EXPERTS, strata_launch.FAST50_PREFETCH, strata_launch.FAST50_KV_TIER,
-                          strata_launch.FAST50_WARM_KIB, strata_launch.FAST50_NGRAM), (6, 3, 8192, 64, "8,4"))
+                          strata_launch.FAST50_WARM_KIB, strata_launch.FAST50_NGRAM), (7, 3, 8192, 64, "8,4"))
 
     def test_the_fast50_token_list_is_in_the_repo_and_is_a_list_of_int32_ids(self):
         path = strata_launch.FAST50_DRAFT_LIST
