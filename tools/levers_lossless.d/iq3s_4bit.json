@@ -12,6 +12,18 @@
       "launcher_args": [
         "--iq3s-4bit"
       ]
+    },
+    {
+      "name": "drop",
+      "env": {
+        "STRATA_IQ3S_4BIT": "1",
+        "STRATA_IQ3S_4BIT_DROP": "1"
+      },
+      "engine_args": [],
+      "launcher_args": [
+        "--iq3s-4bit",
+        "--iq3s-4bit-drop"
+      ]
     }
   ],
   "needs": {

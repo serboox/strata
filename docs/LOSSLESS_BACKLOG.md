@@ -139,3 +139,17 @@ C1 is the CPU-bit form only (`--strict`, also an engine mode): the GPU expert ke
   - **L7 does not pay** (38.3 against 40.3 for prefetch 3 alone): the guess made a layer earlier is no better (22% of the entries from the ring, as before) and the third ring costs a layer of copies. Leave `--prefetch-lead2` off.
   - **The 4-bit repack costs memory, not 2 GiB:** the engine keeps the GGUF's gate/up bytes (the GPU and prompt paths read them) and adds an anonymous copy of the repacked gate/up, about 10.6 GiB. With the 17 GiB model in the page cache and the desktop, the runner saw memory stalls in the combined session. The first session (+17%) passed. The family needs either that memory free or the original gate/up pages dropped after the repack (not written), and its combination was not measured.
   - Not compared yet: the best set with the 4-bit family's gain, the quality (KLD) of the 4-bit repack and of the prefetch family, a long-context run for `--attn-ahead` and `--ngram`, the final set on both prompts.
+
+### The 4-bit family with the original pages dropped (13 November 2026)
+
+- **Expected.** Dropping the original gate/up pages from the page cache after the repack (`--iq3s-4bit-drop`) removes the memory stalls that aborted the combined session, and the draft switches add a little on top of the repack.
+- **Done.** `STRATA_IQ3S_4BIT_DROP` (`posix_fadvise(DONTNEED)` on the gate/up ranges of every layer after its repack), launcher flag `--iq3s-4bit-drop`, lever variant `iq3s_4bit:drop`; the same matrix settings as before.
+- **Got.** Baselines 36.5 to 36.7 tok/s, package 63-64 C, no memory stalls.
+
+  | Setting | tok/s | against the baseline | Text |
+  | --- | --- | --- | --- |
+  | `--iq3s-4bit --iq3s-4bit-drop` | 42.6 | +16.7% | differs |
+  | the same + `--mtp-adapt` + `--chain-device` + `--attn-ahead` + `--ngram 8,4` | 42.8 | +16.8% | differs |
+
+- **Concluded.** The drop works: the session that stalled before ran clean. The draft switches add nothing on top of the repack (42.8 against 42.6), so for this family `--iq3s-4bit --iq3s-4bit-drop` is the whole setting. The memory price: about 10.6 GiB of anonymous memory for the repacked copy, with the 10 GiB of original gate/up pages dropped from the cache (a prompt chunk then reads them from the SSD again; prompt speed was not measured).
+- **Overall.** The prefetch family is the best measured: `--expert-prefetch 3 --kv-lazy 8192 --warm-experts 64 --mtp-adapt --chain-device --ngram 8,4` at 44.9 tok/s (+22.9%), against 42.8 (+16.8%) for the 4-bit family. They exclude each other (the repack is written for the mapped experts only; the pinned arena keeps IQ3_S). A repack for the pinned arena (CPU jobs reading repacked copies next to the GPU's IQ3_S slots) is the open step that could add the two gains, at a memory cost the machine cannot pay without dropping something else.

@@ -4829,6 +4829,7 @@ void repack_iq3s_gate_up(Model& m) {
     std::atomic<size_t> next{0};
     std::atomic<size_t> done_layers{0};
     const size_t ne = (size_t) m.g.n_expert;
+    const bool drop_pages = std::getenv("STRATA_IQ3S_4BIT_DROP") != nullptr && std::string(std::getenv("STRATA_IQ3S_4BIT_DROP")) != "0";
     auto worker = [&] {
         for (size_t i = next++; i < all.size(); i = next++) {
             Layer& L = *all[i];
@@ -4847,6 +4848,14 @@ void repack_iq3s_gate_up(Model& m) {
             L.rp_u = u;
             L.rp_gsz = bytes;
             ++done_layers;
+            if (drop_pages) {   // the CPU path no longer reads the original gate/up pages: let the page cache go (a prompt chunk reads them again from the disk)
+                for (int r = 0; r < 2; ++r) {
+                    const int fd = ::open(L.src_path[r].c_str(), O_RDONLY);
+                    if (fd < 0) continue;
+                    ::posix_fadvise(fd, (off_t) L.src_off[r], (off_t) (L.src_gsz * ne), POSIX_FADV_DONTNEED);
+                    ::close(fd);
+                }
+            }
         }
     };
     std::vector<std::thread> pool;
