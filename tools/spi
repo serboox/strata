@@ -170,6 +170,25 @@ if [ -n "${SPI_RO:-}" ]; then
     IFS=: read -ra extra <<< "$SPI_RO"
     for dir in "${extra[@]}"; do ARGS+=(--ro-bind "$dir" "$dir"); done
 fi
+# Files or folders outside the project that the sandbox may write: SPI_RW=/path/a:/path/b for one run, and one path per line in
+# $AGENT_DIR/rw-paths for every run ("~/" is the home folder, "#" starts a comment). Each path must exist: a missing file is not
+# created, so a typing error cannot open a new place. A file is bound as it is: a program that replaces it by renaming a new file
+# over it gets an error, writing into it works.
+RW_PATHS=()
+[ -n "${SPI_RW:-}" ] && IFS=: read -ra RW_PATHS <<< "$SPI_RW"
+if [ -f "$AGENT_DIR/rw-paths" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+        line=${line%%#*}
+        line=${line#"${line%%[![:space:]]*}"}
+        line=${line%"${line##*[![:space:]]}"}
+        [ -n "$line" ] && RW_PATHS+=("${line/#\~\//$HOME/}")
+    done < "$AGENT_DIR/rw-paths"
+fi
+for path in "${RW_PATHS[@]}"; do
+    case "$path" in /*) ;; *) echo "spi: a writable path must be absolute, not $path" >&2; exit 1 ;; esac
+    [ -e "$path" ] || { echo "spi: the writable path $path does not exist (create it first)" >&2; exit 1; }
+    ARGS+=(--bind "$path" "$path")
+done
 
 # a git hook or the repository config written by the model would run later on the host, outside the sandbox
 if [ -d "$CWD/.git" ]; then
