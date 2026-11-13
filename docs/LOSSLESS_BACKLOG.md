@@ -280,3 +280,27 @@ one pass of the output matrix for the rows of both windows
 - Expected: the batch window already shares the GPU pass, so the interleave adds the GPU time of a layer that the CPU waited for, about gpu / (gpu + 2 cpu) of a window; with 0.4 ms of GPU and 1.2 ms of CPU a layer that is about +14% on two sessions. Not measured.
 
 **What the first runs must check** (in this order): (1) `tests/iq_vbmi_bench` style check of `strict_swiglu` against the C library on a sweep of inputs (the largest difference in ulps); (2) `--strict` must write the same text for the same prompt with no resident expert (a VRAM reserve that leaves no slot) and with 21 of them, and with the prefetch on and off; (3) `--parallel 2 --interleave` must write the same text per session as `--parallel 2`, then the total tokens a second of both.
+
+### The middle variant and the search for 50 tok/s with a small loss (13 November 2026)
+
+- **Expected.** Dense Q4_K with 7 experts scored 88 of 89 and 36 of 36 on the tool-call sets and 152 of 164 on HumanEval before the new switches. With them it should come close to the 6-expert set in speed and lose less code quality.
+- **Done.** Code prompt, 2200 MHz cap, the switches of the final set (prefetch 3, lazy K/V, warm-up, adaptive and chained drafts, n-gram drafts, the token list). Short runs are 3 requests of 700 tokens with a cool-down; the sustained run is 8 requests of 900 tokens back to back. HumanEval: 164 problems, greedy, thinking off, the engine's own server.
+- **Got.**
+
+  | Setting | Short, tok/s | Sustained, tok/s | HumanEval | Mean KLD of the setting's parts (`TPS_REPORT.md`) |
+  | --- | --- | --- | --- | --- |
+  | unchanged engine, IQ4_XS file, 8 experts | 36.6 | not measured | 153 | 0 (noise floor 0.006) |
+  | dense Q5_K, 8 experts, switches | 51.4 | not measured | not measured | not measured for Q5_K |
+  | dense Q5_K, 7 experts, switches | 54.9 | not measured | 150 without the switches | 0.025 for 7 experts |
+  | dense Q4_K, 8 experts, switches | 55.2 | running | running | 0.0125 for dense Q4_K |
+  | dense Q4_K, 7 experts, switches (the middle variant) | 57.3 | mean 54.3, median 55.4, lowest 48.2, peak 77 C | 149 (152 without the switches) | 0.0125 and 0.025 |
+  | dense Q4_K, 6 experts, switches (`--fast50` today) | 58.2 | mean 51.4 without the token list | 146 | 0.0125 and 0.048 |
+
+- **Concluded.** The middle variant holds 50 tok/s on average in a sustained run (one request of eight fell to 48.2) and loses 4 HumanEval problems against the unchanged engine, 3 fewer than the 6-expert set; the HumanEval noise between runs of one setting is about 3 problems. The token list is what gives the reserve: the 6-expert set without it held 51.4. Zero loss at 50 tok/s is not reached by any setting: every one above the first row uses the dense Q4_K or Q5_K file. The least-loss candidate is dense Q4_K with all 8 experts (only the dense matrices change, KLD 0.0125, twice the noise floor); its sustained run and HumanEval were started and are not in this record yet.
+
+### First checks of C1 (13 November 2026)
+
+- **Expected.** The strict GPU kernels give the bits of the CPU kernels.
+- **Done.** `tests/strict_expert_parity.cu` (`ninja strict_expert_parity && ./strict_expert_parity`, no model needed): random IQ3_S and IQ4_XS experts of the model's size, 8 tokens, groups of 1 to 11 entries, three activation scales, both lane layouts (IQ3_S and repacked 4-bit). The CPU side runs the pool's order (`native_gu_rows`, `native_quant_h`, `native_down_rows`), the GPU side the device quantiser and the two strict kernels. It also compares the strict SwiGLU with the C library's.
+- **Got.** 30 of 30 cases: no hidden value and no output value differs. The strict SwiGLU differs from the C library's in 466 of 1,634,311 values, by at most 3 units in the last place.
+- **Concluded.** The kernels are right at the unit level on the first run. The engine checks (the same text with `--strict` for three placements of the experts) and the C3 check (`--parallel 2` with and without `--interleave`) were queued behind the 8-expert runs; their results are not in this record yet.

@@ -121,6 +121,12 @@ add_executable(q36_act_quant_parity EXCLUDE_FROM_ALL tests/q36_act_quant_parity.
 target_include_directories(q36_act_quant_parity PRIVATE ${_strata_include} ${_ggml_include} src/qwen35)
 target_link_libraries(q36_act_quant_parity PRIVATE strata_kernels_cpu CUDA::cudart)
 
+# Strict mode: the GPU expert kernels against the CPU kernels on random IQ3_S / IQ4_XS experts, bit for bit (no model needed):
+# `ninja strict_expert_parity && ./strict_expert_parity`
+add_executable(strict_expert_parity EXCLUDE_FROM_ALL tests/strict_expert_parity.cu)
+target_include_directories(strict_expert_parity PRIVATE ${_strata_include} ${_ggml_include} src/qwen35)
+target_link_libraries(strict_expert_parity PRIVATE strata_cuda_kernels strata_kernels_cpu CUDA::cudart)
+
 if(STRATA_IGPU_VULKAN)
   add_library(strata_kernels_igpu STATIC src/kernels/igpu/igpu_experts.cpp)
   target_include_directories(strata_kernels_igpu PUBLIC ${_strata_include} PRIVATE ${_ggml_include})
