@@ -211,3 +211,29 @@ C1 is the CPU-bit form only (`--strict`, also an engine mode): the GPU expert ke
 **The launcher preset and two launcher faults found on the way (13 November 2026).** `bin/strata-serve --fast50` starts the measured 50 tok/s set (dense Q4_K file, 6 experts, prefetch 3, lazy K/V of 8192 cells, 64 KiB warm-up, adaptive draft depth, chained drafts, n-gram drafts 8,4); every flag given explicitly wins. Two faults of the earlier launcher edits were found while checking its dry-run output and fixed: (1) the `--cpu-adaptive` edit (L2) had moved the line that sets the 6 pool workers of the capped start into the adaptive branch, so a plain start used 3 workers from that commit until now; (2) the new long flags made the old short forms `--ch`, `--d`, `--dr`, `--mt`, `--r`, `--s` and `--w` ambiguous; they map back to the old options in `OLD_ABBREVIATIONS`. The speed runs went through `lever_matrix.py`, which passes its own `--workers 6`, so the measured numbers are not affected. `serve/test_launch_fast50.py` and the existing launcher tests pass (136 tests).
 
 **Live check of `--fast50` (13 November 2026).** `bin/strata-serve --fast50 --port 18090`, one chat request (a Python Fibonacci function, 117 tokens) and one request with a tool list: the chat answer is correct and runs at **58.4 tok/s**; the tool request returns `get_weather` with `{"city":"Paris"}` at 57.2 tok/s. The first attempt found a real fault of the lazy K/V cache: the tool prompt (272 tokens) makes the server save a checkpoint at the turn boundary, and `ckpt_copy` read the K/V cells with one 2D copy whose range spans the pages that the lazy cache has not mapped, so the engine stopped with `cudaMemcpy2DAsync ... invalid argument` and the server ended it after 90 seconds of silence. Fixed by copying head by head when the cache is lazy (`ckpt_copy`, the restore path also maps its pages first); the rerun passed. The other 2D copies of the K/V cache are in the session copy of the batch mode, which the lazy cache does not run with (one session only). The tests of the earlier speed runs never saved a checkpoint, which is why the fault was not seen before.
+
+### L9: where the GPU time goes, the draft list and the faster guess kernel (13 November 2026)
+
+- **Expected.** A profile should show which GPU kernels matter at a decode step before any kernel is rewritten; the output matrix (Q6_K, read three times a step) looked like the first target, the guess kernel of the prefetch (`k_pf_logits`) the second.
+- **Done.** Nsight Systems (`nsys profile --trace=cuda`, benchmark mode, the final set on the dense Q4_K file, 6 experts): kernel time by kernel. Then three changes: a list of 22,768 frequent tokens for the draft head (`tools/draft_lists/code_ru.i32`, made by `tools/draft_list.py` from the tokens of this project's code and docs, English and Russian: 151 files, 1.57 million tokens), the pruned verify head (`--head2`, norm bound) and a rewritten `k_pf_logits` (grid of 32 by T blocks, a warp per expert, the same order of sums as before, so the same bits).
+- **Got.** The profile (benchmark mode, so prompt and decode together):
+
+  | Kernel | Share of GPU time | Calls | Per call |
+  | --- | --- | --- | --- |
+  | dense Q4_K matvec (`native_q4_k_mmvq`) | 27.1% | 63,224 | 25.5 us |
+  | prefetch guess (`k_pf_logits`, before the rewrite) | 14.5% | 11,778 | 73.6 us |
+  | output matrix, Q6_K (`native_q6_k_mmvq`) | 12.7% | 308 | 2,464 us |
+  | IQ4_XS down on resident experts | 6.6% | 11,359 | 34.5 us |
+  | IQ3_S gate/up on resident experts | 6.3% | 12,280 | 30.5 us |
+  | GDN recurrence (`k_gdn_seq`) | 3.9% | 9,090 | 25.5 us |
+
+  The output matrix reads at 170 GB/s (the card's 172): at its roofline, so only fewer passes help. Speed of the final set on the dense Q4_K file, code prompt, baseline 42.1 to 42.4 tok/s:
+
+  | Setting (6 experts, prefetch 3, lazy K/V, warm, draft switches) | tok/s | against the baseline |
+  | --- | --- | --- |
+  | without a token list | 54.8 | +29.2% |
+  | with the token list | 58.1 | +36.8% |
+  | with the token list, faster guess kernel | 58.2 | +37.3% |
+  | with the token list, faster guess kernel, `--head2` | 58.9 | +40.0% |
+
+- **Concluded.** The token list pays: +6% (the draft head reads 5 to 10% of the output matrix twice a step; the verify pass keeps the whole vocabulary, so the text is the one the engine would write without the list; only the drafts change). It is now a default of `--fast50` when the file exists. Two limits: the list comes from English code, English and Russian docs, so an answer in another language loses drafts (it costs speed, not correctness); and `--draft-list FILE` takes any other list. The faster guess kernel gave +0.2% only: the guess runs while the CPU computes, so it was never on the critical path, the 14.5% of GPU time is idle time that the kernel filled; the rewrite stays (same bits, less GPU busy time, so a little less heat). `--head2` adds 0.7 tok/s (+1.2%): small, and its hit rate is not printed, so it stays opt-in. The next GPU target by this profile is the dense Q4_K matvec (27%), which at 25 us a call is already near the bandwidth of its 1.9 GiB read per step: not rewritten.

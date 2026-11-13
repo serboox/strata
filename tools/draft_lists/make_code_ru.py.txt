@@ -1,0 +1,20 @@
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path("/home/sergei/clang/github.com/serboox/strata")
+sys.path.insert(0, str(ROOT / "tools"))
+from strata_tokenizer import Tokenizer
+
+OUT = Path("/home/sergei/.claude/jobs/87011b45/tmp/draft_list")
+OUT.mkdir(exist_ok=True)
+tok = Tokenizer.from_gguf(str(ROOT / "models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS.gguf"))
+files = [p for pattern in ("docs/*.md", "docs/*.html", "README.md", "tools/*.py", "serve/*.py", "src/**/*.cu", "src/**/*.cpp", "src/**/*.cuh", "include/**/*.hpp")
+         for p in ROOT.glob(pattern) if p.is_file() and p.stat().st_size < 900000 and "test_" not in p.name]
+ids = []
+for path in sorted(files):
+    ids.extend(tok.encode(path.read_text(encoding="utf-8", errors="ignore") + "\n"))
+(OUT / "corpus_ids.txt").write_text(" ".join(map(str, ids)), encoding="ascii")
+print("files", len(files), "tokens", len(ids), "distinct", len(set(ids)))
+subprocess.run([sys.executable, str(ROOT / "tools" / "draft_list.py"), str(OUT / "corpus_ids.txt"), "--top", "40000", "--out", str(OUT / "draft24k.i32"),
+                "--report"], check=True)

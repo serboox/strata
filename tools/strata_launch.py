@@ -82,6 +82,7 @@ IQ_KERNELS_OFF_ENV = {"STRATA_IQ_VBMI": "0"}
 # The setting measured on the author's laptop (i7-11370H, turbo off, 80 C limit): the highest CPU frequency, the pool workers
 # and the pool spin that held 30 tokens per second for minutes instead of 11 to 15; see "The frequency cap" in docs/TUNING.md.
 DEFAULT_CPU_MAX_MHZ = 2100.0
+FAST50_DRAFT_LIST = ROOT / "tools" / "draft_lists" / "code_ru.i32"   # frequent tokens of this project's code and docs, English and Russian (+6% measured)
 FAST50_EXPERTS, FAST50_PREFETCH, FAST50_KV_TIER, FAST50_WARM_KIB, FAST50_NGRAM = 6, 3, 8192, 64, "8,4"
 RESIDENT_EXPERTS_CONTEXT = 16384   # tokens; the K/V cache takes 0.18 GiB instead of 0.73 GiB
 RESIDENT_EXPERTS_RESERVE_MIB = 300
@@ -613,6 +614,8 @@ def main() -> int:
         args.mtp_adapt = True
         args.chain_device = True
         args.ngram = args.ngram or FAST50_NGRAM
+        if args.draft_list is None and FAST50_DRAFT_LIST.exists():
+            args.draft_list = FAST50_DRAFT_LIST
     if not (args.max_temp == 0 or (math.isfinite(args.max_temp) and MIN_LIMIT_C <= args.max_temp <= MAX_LIMIT_C)):
         parser.error(f"--max-temp must be 0 (off) or from {MIN_LIMIT_C:g} to {MAX_LIMIT_C:g} degrees Celsius, not {args.max_temp:g}")
 

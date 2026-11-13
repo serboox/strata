@@ -670,10 +670,12 @@ __device__ __forceinline__ float pf_warp_sum(float v) {
 /// Expert prefetch: the next layer's router logits guessed from this layer's residual stream.  Row t of x is
 /// rms-normalised with the next layer's MoE norm weights `w`, then multiplied with that layer's router rows.
 /// grid (T), block 256, n floats of dynamic shared memory.
+/// grid (ceil(ne / 8), T): a block normalises its row again (2048 floats, cheap) and takes 8 experts, one per warp, so that T rows fill the card
+/// instead of T blocks reading the whole router matrix each; every expert's dot product runs in the same order as before.
 __global__ void k_pf_logits(const float* x, const float* w, const float* router, int n, int ne, float eps, float* logits) {
     extern __shared__ float hn[];
     __shared__ float red[8];
-    const int t = blockIdx.x;
+    const int t = blockIdx.y;
     const float* xr = x + (size_t) t * n;
     float s = 0.f;
     for (int i = threadIdx.x; i < n; i += 256) s += xr[i] * xr[i];
@@ -686,7 +688,8 @@ __global__ void k_pf_logits(const float* x, const float* w, const float* router,
     for (int i = threadIdx.x; i < n; i += 256) hn[i] = xr[i] * r * w[i];
     __syncthreads();
     const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-    for (int e = warp; e < ne; e += 8) {
+    const int e = blockIdx.x * 8 + warp;
+    if (e < ne) {
         const float* row = router + (size_t) e * n;
         float acc = 0.f;
         for (int i = lane; i < n; i += 32) acc += row[i] * hn[i];
@@ -3694,7 +3697,7 @@ struct Engine {
         if (!lhy(tl) || NL.pf_base < 0) return;
         const int N = (int) m->g.n_embd, ne = (int) m->g.n_expert;
         int32_t* const ids_d = pf_ids_d[pfi(tl)];
-        k_pf_logits<<<T, 256, (size_t) N * 4, st>>>(x, NL.post_norm, NL.router, N, ne, m->eps, pf_logits);
+        k_pf_logits<<<dim3((unsigned) ((ne + 7) / 8), (unsigned) T), 256, (size_t) N * 4, st>>>(x, NL.post_norm, NL.router, N, ne, m->eps, pf_logits);
         k_pf_select<<<1, 256, 0, st>>>(pf_logits, T, ne, std::max(1, std::min(pf_use, pf_n)), pf_n, NL.pf_base, ids_d,
                                        hy[tl].slot_of_d);
         CK(cudaMemcpyAsync(pf_ids_h, ids_d, (size_t) pf_n * 4, cudaMemcpyDeviceToHost, st));

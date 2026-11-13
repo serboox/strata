@@ -24,6 +24,13 @@ class Fast50Tests(unittest.TestCase):
         self.assertEqual((strata_launch.FAST50_EXPERTS, strata_launch.FAST50_PREFETCH, strata_launch.FAST50_KV_TIER,
                           strata_launch.FAST50_WARM_KIB, strata_launch.FAST50_NGRAM), (6, 3, 8192, 64, "8,4"))
 
+    def test_the_fast50_token_list_is_in_the_repo_and_is_a_list_of_int32_ids(self):
+        path = strata_launch.FAST50_DRAFT_LIST
+        self.assertTrue(path.exists())
+        data = path.read_bytes()
+        self.assertEqual(len(data) % 4, 0)
+        self.assertGreater(len(data) // 4, 10000)
+
     def test_the_capped_default_start_uses_the_capped_worker_count(self):
         self.assertEqual(strata_launch.CAPPED_WORKERS, 6)
 

@@ -1,0 +1,39 @@
+{
+  "name": "draft_list",
+  "lever": 3,
+  "title": "MTP drafts pick among 22.8 thousand frequent tokens of the project's code and docs (English and Russian) instead of 248 thousand (L4, L14)",
+  "variants": [
+    {
+      "name": "list",
+      "env": {
+        "STRATA_Q36_DRAFT_LIST": "tools/draft_lists/code_ru.i32"
+      },
+      "engine_args": [],
+      "launcher_args": [
+        "--draft-list",
+        "tools/draft_lists/code_ru.i32"
+      ]
+    },
+    {
+      "name": "head2",
+      "env": {
+        "STRATA_Q36_DRAFT_LIST": "tools/draft_lists/code_ru.i32",
+        "STRATA_Q36_HEAD2": "1"
+      },
+      "engine_args": [],
+      "launcher_args": [
+        "--draft-list",
+        "tools/draft_lists/code_ru.i32",
+        "--head2"
+      ]
+    }
+  ],
+  "needs": {
+    "build_option": "",
+    "model_file": "the served GGUF with a Q6_K output matrix",
+    "root": false
+  },
+  "quality_check": "",
+  "parity_check": "Greedy text identical: a draft only proposes, the verify pass keeps the whole vocabulary.",
+  "notes": "Read the draft acceptance ('drafts accepted') against the unchanged run: a draft outside the list is a lost draft. The Nsight Systems profile of 13 November put the output matrix (Q6_K, 2.46 ms a pass, three passes a step) at about 12.7% of the GPU time."
+}
