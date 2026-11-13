@@ -169,3 +169,18 @@ C1 is the CPU-bit form only (`--strict`, also an engine mode): the GPU expert ke
   | prefetch 3 + lazy K/V + warm experts | 0.0042 | 0.0016 | 96.9% | 0.069 |
 
 - **Concluded.** The 4-bit repack sits at the noise floor of this test: a change of nothing but the order of float sums (the control) already gives 0.0042, and the repack gives 0.0044. So the repack is as faithful as the IQ3_S kernel is to ggml; no weight changes. The prefetch family is at 0.0042, below the 0.0057 of the November prefetch test and a sixth of what 7 experts cost (0.025). Dropping the original pages changes nothing in the numbers (identical rows). Limits: 261 positions, one text, no task-level check (HumanEval or tool calls) of the final set. The draft switches (`--mtp-adapt`, `--chain-device`, `--ngram`) and `--attn-ahead` do not change the logits of a window (their text was identical in the speed runs).
+
+### Long context (13 November 2026)
+
+- **Expected.** The lazy K/V cache gives resident slots only while the context is short, and gives them up as it grows (the eviction code); `--attn-ahead` should help the decode attention a little. So the gain should shrink with the prompt length, as the prefetch gain did in November (+25% at 16K and +12% at 32K for the old stack).
+- **Done.** `lc_bench.py` (a prompt of about 16K and of 32K tokens, 300 tokens decoded, MTP 2): the unchanged engine against the best set (`--expert-prefetch 3 --kv-lazy 8192 --warm-experts 64 --mtp-adapt --chain-device --attn-ahead`), one run each, 2200 MHz cap, package 70-73 C at the prompt peak.
+- **Got.**
+
+  | Prompt | Setting | decode tok/s | drafts accepted | prefill tok/s |
+  | --- | --- | --- | --- | --- |
+  | 16K | unchanged | 31.8 | 0.645 | 128.8 |
+  | 16K | best set | 36.9 (+16%) | 0.678 | 126.2 |
+  | 32K | unchanged | 27.6 | 0.568 | 106.4 |
+  | 32K | best set | 27.9 (+1%) | 0.612 | 108.2 |
+
+- **Concluded.** The eviction code ran without an error at both lengths (no out-of-memory message): the slots were given up as the context grew. The gain falls from +22.9% at a short prompt to +16% at 16K and to nothing at 32K, where every resident slot is gone and the attention takes a larger share of the step; the part of the 32K difference that is not noise is the higher draft acceptance (0.612 against 0.568). Prefill is unchanged at both lengths, so the lent buffers cost nothing there. One run per cell, so differences of a few percent are inside the noise. The set is for contexts up to about 16K; beyond that it is neutral.
