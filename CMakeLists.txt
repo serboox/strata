@@ -79,7 +79,8 @@ add_library(strata_kernels_cpu STATIC
   src/kernels/cpu/iq_avx512.cpp src/kernels/cpu/iq3s_vbmi.cpp src/kernels/cpu/iq4xs_vnni.cpp src/kernels/cpu/iq_avx2.cpp src/kernels/cpu/iq_avx1.cpp
   src/kernels/cpu/kq_avx2.cpp src/kernels/cpu/kq_avx512.cpp
   src/kernels/cpu/nvfp4_avx512.cpp src/kernels/cpu/nvfp4_avx2.cpp
-  src/kernels/cpu/tq_cpu.cpp src/kernels/cpu/tq_avx2.cpp src/kernels/cpu/tq_avx512.cpp)
+  src/kernels/cpu/tq_cpu.cpp src/kernels/cpu/tq_avx2.cpp src/kernels/cpu/tq_avx512.cpp
+  src/kernels/cpu/strict_math.cpp)
 target_include_directories(strata_kernels_cpu PUBLIC ${_strata_include} PRIVATE third_party/ggml ${_ggml_include})
 target_compile_definitions(strata_kernels_cpu PUBLIC STRATA_NATIVE_EXPERTS=1)
 target_link_libraries(strata_kernels_cpu PUBLIC ggml-cpu ggml-base Threads::Threads)
@@ -90,6 +91,8 @@ set_source_files_properties(src/kernels/cpu/iq_avx512.cpp src/kernels/cpu/nvfp4_
   "-mavx512f;-mavx512bw;-mavx512vl;-mavx512dq;-mavx512vnni;-mavx512vbmi;-mavx512vpopcntdq;-mbmi2;-mf16c;-mfma")
 set_source_files_properties(src/kernels/cpu/iq3s_vbmi.cpp PROPERTIES COMPILE_OPTIONS
   "-mavx512f;-mavx512bw;-mavx512vl;-mavx512vnni;-mavx512vbmi;-mavx512bitalg;-mbmi2;-mf16c;-mfma")
+# -ffp-contract=off: the strict SwiGLU must run the operations as written, the GPU kernels run the same sequence
+set_source_files_properties(src/kernels/cpu/strict_math.cpp PROPERTIES COMPILE_OPTIONS "-mfma;-ffp-contract=off;-fno-fast-math")
 set_source_files_properties(src/kernels/cpu/iq4xs_vnni.cpp PROPERTIES COMPILE_OPTIONS
   "-mavx512f;-mavx512bw;-mavx512vl;-mavx512vnni;-mavx512vbmi;-mbmi2;-mf16c;-mfma")
 set_source_files_properties(src/kernels/cpu/iq_avx2.cpp src/kernels/cpu/kq_avx2.cpp src/kernels/cpu/nvfp4_avx2.cpp

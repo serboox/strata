@@ -54,6 +54,10 @@ void native_quant_act(const NativeFmt& f, const float* x, void* dst);
 /// h (n_ff floats) -> the down activation (h_bytes), rotated first when the layer is Hadamard-folded.
 void native_quant_h(const NativeFmt& f, const float* h, void* dst);
 
+/// Whether the CPU computes this layer with the kernels that the GPU strict kernels reproduce bit for bit: IQ3_S gate/up on the
+/// AVX-512 VBMI kernel (or, with `gu_odd4`, repacked to 4 bits), IQ4_XS down on the VNNI kernel, Q8_K activations, no rotation.
+bool native_strict_supported(const NativeFmt& f, bool gu_odd4);
+
 /// From how many tokens native_gu_rows gives this gate/up type to a multi-token kernel (#152; ggml-cpu's per-token dot
 /// below that).  1: a token's rows are the same alone and in any group.
 int native_gu_mt_min(int gu_type);

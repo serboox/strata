@@ -10,6 +10,7 @@
 #include "strata/kernels/gfx_arch.hpp"
 #include "strata/kernels/dp4a.hpp"
 #include "strata/kernels/q8_1_finite.hpp"
+#include "strata/kernels/strict_math_impl.hpp"
 #include "s26_tsum.cuh"
 
 #include <cuda_fp16.h>
@@ -4169,6 +4170,146 @@ void launch_down(dim3 grid, cudaStream_t s, const unsigned long long* grp_ptr, c
     else native_down_multi_kernel<TD, true><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, L, out);
 }
 
+// Strict mode: an expert in a VRAM slot gives the bits of the CPU kernels (iq3s_vbmi.cpp for IQ3_S gate/up, iq4xs_vnni.cpp for
+// IQ4_XS down and for gate/up repacked to 4 bits). Those kernels keep 16 float lanes per row. For every weight block of 256 a
+// lane adds factor * (an exact integer sum of weight * activation products times the sub-block scales), with
+// factor = fl(d * the activation block's Q8_K scale), as one FMA; the lanes are then added as _mm512_reduce_add_ps adds them.
+// Here a warp is one row: lane `column` (0..15) is the CPU lane, and the two threads of a column each take half of its products.
+constexpr int kStrictQ8KBytes = 292, kStrictQ8KQs = 4;
+constexpr int kStrictIq3sBlock = 110, kStrictIq3sQs = 2, kStrictIq3sQh = 66, kStrictIq3sSigns = 74, kStrictIq3sScales = 106;
+constexpr int kStrictIq4xsBlock = 136, kStrictIq4xsScalesH = 2, kStrictIq4xsScalesL = 4, kStrictIq4xsQs = 8;
+constexpr int kStrictChunk = 4;   // entries of a group that share one decode of a weight block
+constexpr int kStrictRowsPerBlock = 8;
+
+__device__ __forceinline__ uint32_t strict_u16(const uint8_t* p) { return (uint32_t) p[0] | ((uint32_t) p[1] << 8); }
+__device__ __forceinline__ uint32_t strict_u32(const uint8_t* p) { return strict_u16(p) | (strict_u16(p + 2) << 16); }
+__device__ __forceinline__ float strict_half(const uint8_t* p) { return __half2float(__ushort_as_half((unsigned short) strict_u16(p))); }
+
+/// The lanes of one row summed in the order of _mm512_reduce_add_ps: lane i + lane i+8, then i + i+4, i + i+2, i + i+1.
+__device__ __forceinline__ float strict_reduce16(float v) {
+    for (int o = 8; o > 0; o >>= 1) v = __fadd_rn(__shfl_xor_sync(0xffffffffu, v, o), v);
+    return v;
+}
+
+/// Grid words pa and pb of an IQ3_S block as eight signed weights, and the scale 2 s + 1 of their sub-block of 32 weights.
+__device__ __forceinline__ void strict_iq3s_weights(const uint8_t* blk, int pa, int pb, int* w, int& scale) {
+    for (int i = 0; i < 2; ++i) {
+        const int p = i == 0 ? pa : pb;
+        const uint32_t high = (blk[kStrictIq3sQh + (p >> 3)] >> (p & 7)) & 1u;
+        const uint32_t grid = iq3s_grid[blk[kStrictIq3sQs + p] | (high << 8)];
+        const uint32_t signs = (uint32_t) blk[kStrictIq3sSigns + (p >> 1)] >> (4 * (p & 1));
+        for (int q = 0; q < 4; ++q) {
+            const int magnitude = (int) ((grid >> (8 * q)) & 0xFF);
+            w[4 * i + q] = ((signs >> q) & 1u) ? -magnitude : magnitude;
+        }
+    }
+    const int sub = pa >> 3;
+    scale = 2 * (int) ((blk[kStrictIq3sScales + (sub >> 1)] >> (4 * (sub & 1))) & 0xF) + 1;
+}
+
+/// gate and up rows of the resident entries, then SwiGLU: h[e][r] for entry e (its position in the grouped order).
+/// ODD4: the CPU computes gate/up with the 4-bit kernel on repacked rows, so a lane holds that kernel's products. The weights
+/// are the same integers; the slot keeps the IQ3_S rows.
+template<bool ODD4>
+__global__ void __launch_bounds__(256) strict_gu_kernel(const unsigned long long* __restrict__ grp_ptr, const int32_t* __restrict__ grp_start,
+                                                        const int32_t* __restrict__ n_groups, const int32_t* __restrict__ ent_tok,
+                                                        const uint8_t* __restrict__ acts, size_t act_stride, NativeExpertLayout L,
+                                                        float* __restrict__ h) {
+    const int ng = *n_groups;
+    if ((int) blockIdx.y >= ng) return;
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, column = lane & 15, part = lane >> 4;
+    const int r = (int) blockIdx.x * kStrictRowsPerBlock + warp;
+    if (r >= L.n_ff) return;
+    const int blocks = (int) (L.n_embd / 256);
+    // the two grid words of this thread: an IQ3_S lane is words 4 column .. 4 column + 3 of the block; a 4-bit lane is, in each
+    // half of the block, the words holding weights 4 m .. 4 m + 3 and 16 + 4 m .. 16 + 4 m + 3 of sub-block column / 4
+    const int pa = ODD4 ? 32 * part + 8 * (column >> 2) + (column & 3) : 4 * column + 2 * part;
+    const int pb = ODD4 ? pa + 4 : pa + 1;
+    for (int g = (int) blockIdx.y; g < ng; g += (int) gridDim.y) {
+        const uint8_t* blob = (const uint8_t*) grp_ptr[g];
+        const int e0 = grp_start[g], e1 = grp_start[g + 1];
+        for (int e = e0; e < e1; e += kStrictChunk) {
+            const int n = min(kStrictChunk, e1 - e);
+            float value[2][kStrictChunk];
+            for (int side = 0; side < 2; ++side) {
+                const uint8_t* row = blob + (side ? L.up_off : 0) + (size_t) r * L.gu_row;
+                float acc[kStrictChunk] = {0.f, 0.f, 0.f, 0.f};
+                for (int k = 0; k < blocks; ++k) {
+                    const uint8_t* blk = row + (size_t) k * kStrictIq3sBlock;
+                    int w[8], scale;
+                    strict_iq3s_weights(blk, pa, pb, w, scale);
+                    const float d = strict_half(blk);
+                    for (int c = 0; c < n; ++c) {
+                        const uint8_t* act = acts + (size_t) ent_tok[e + c] * act_stride + (size_t) k * kStrictQ8KBytes;
+                        const int8_t* ya = reinterpret_cast<const int8_t*>(act + kStrictQ8KQs + 4 * pa);
+                        const int8_t* yb = reinterpret_cast<const int8_t*>(act + kStrictQ8KQs + 4 * pb);
+                        int partial = 0;
+                        for (int q = 0; q < 4; ++q) partial += w[q] * (int) ya[q] + w[4 + q] * (int) yb[q];
+                        partial *= scale;
+                        partial += __shfl_xor_sync(0xffffffffu, partial, 16);
+                        const float factor = __fmul_rn(d, *reinterpret_cast<const float*>(act));
+                        acc[c] = __fmaf_rn(factor, (float) partial, acc[c]);
+                    }
+                }
+                for (int c = 0; c < n; ++c) value[side][c] = strict_reduce16(acc[c]);
+            }
+            if (lane == 0)
+                for (int c = 0; c < n; ++c) h[(size_t) (e + c) * (size_t) L.n_ff + r] = strict_swiglu(value[0][c], value[1][c]);
+        }
+    }
+}
+
+/// down rows of the resident entries: row ent_dst[e] of `out` from entry e's Q8_K hidden row in `hq`.
+__global__ void __launch_bounds__(256) strict_down_kernel(const unsigned long long* __restrict__ grp_ptr, const int32_t* __restrict__ grp_start,
+                                                          const int32_t* __restrict__ n_groups, const int32_t* __restrict__ ent_dst,
+                                                          const uint8_t* __restrict__ hq, size_t hq_stride, NativeExpertLayout L,
+                                                          float* __restrict__ out) {
+    const int ng = *n_groups;
+    if ((int) blockIdx.y >= ng) return;
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, column = lane & 15, part = lane >> 4;
+    const int r = (int) blockIdx.x * kStrictRowsPerBlock + warp;
+    if (r >= L.n_embd) return;
+    const int blocks = (int) (L.n_ff / 256);
+    // this thread: sub-block `sub` of the block (half `part`), the weights 4 m .. 4 m + 3 (low nibbles) and 16 + 4 m .. (high nibbles)
+    const int sub = 4 * part + (column >> 2), first = 4 * (column & 3);
+    for (int g = (int) blockIdx.y; g < ng; g += (int) gridDim.y) {
+        const uint8_t* row = (const uint8_t*) grp_ptr[g] + L.down_off + (size_t) r * L.d_row;
+        const int e0 = grp_start[g], e1 = grp_start[g + 1];
+        for (int e = e0; e < e1; e += kStrictChunk) {
+            const int n = min(kStrictChunk, e1 - e);
+            float acc[kStrictChunk] = {0.f, 0.f, 0.f, 0.f};
+            for (int k = 0; k < blocks; ++k) {
+                const uint8_t* blk = row + (size_t) k * kStrictIq4xsBlock;
+                const uint32_t packed = strict_u32(blk + kStrictIq4xsQs + 16 * sub + first);
+                int low[4], high[4];
+                for (int j = 0; j < 4; ++j) {
+                    const uint32_t code = (packed >> (8 * j)) & 0xFF;
+                    low[j] = kvalues_iq4nl[code & 0xF];
+                    high[j] = kvalues_iq4nl[code >> 4];
+                }
+                const int scale_low = (blk[kStrictIq4xsScalesL + (sub >> 1)] >> (4 * (sub & 1))) & 0xF;
+                const int scale_high = (int) ((strict_u16(blk + kStrictIq4xsScalesH) >> (2 * sub)) & 3u);
+                const int scale = (scale_low | (scale_high << 4)) - 32;
+                const float d = strict_half(blk);
+                for (int c = 0; c < n; ++c) {
+                    const uint8_t* act = hq + (size_t) (e + c) * hq_stride + (size_t) k * kStrictQ8KBytes;
+                    const int8_t* y = reinterpret_cast<const int8_t*>(act + kStrictQ8KQs + 32 * sub + first);
+                    int partial = 0;
+                    for (int j = 0; j < 4; ++j) partial += low[j] * (int) y[j] + high[j] * (int) y[16 + j];
+                    partial *= scale;
+                    partial += __shfl_xor_sync(0xffffffffu, partial, 16);
+                    const float factor = __fmul_rn(d, *reinterpret_cast<const float*>(act));
+                    acc[c] = __fmaf_rn(factor, (float) partial, acc[c]);
+                }
+            }
+            for (int c = 0; c < n; ++c) {
+                const float value = strict_reduce16(acc[c]);
+                if (lane == 0) out[(size_t) ent_dst[e + c] * (size_t) L.n_embd + r] = value;
+            }
+        }
+    }
+}
+
 }  // namespace
 
 void iq_set_old_kernels(bool old) { g_old_kernels = old; }
@@ -5036,6 +5177,35 @@ void native_expert_set_mode(int mode, int phase) {
 namespace {
 bool g_grouped_v1 = env_on("STRATA_GROUPED_V1");
 }  // namespace
+
+bool native_expert_strict_supported(const NativeExpertLayout& L) noexcept {
+    constexpr int kIq3S = 21, kIq4Xs = 23;
+    return L.gu_type == kIq3S && L.d_type == kIq4Xs && L.tail_off == 0 && L.had_block == 0 && L.n_embd > 0 && L.n_ff > 0 &&
+           L.n_embd % 256 == 0 && L.n_ff % 256 == 0 && L.gu_row == (size_t) (L.n_embd / 256) * kStrictIq3sBlock &&
+           L.d_row == (size_t) (L.n_ff / 256) * kStrictIq4xsBlock;
+}
+
+size_t native_expert_strict_hq_stride(int64_t n_ff) { return (size_t) (n_ff / 256) * kStrictQ8KBytes; }
+
+void native_expert_strict_gu(const NativeExpertLayout& L, const unsigned long long* grp_ptr, const int32_t* grp_start, const int32_t* n_groups,
+                             const int32_t* ent_tok, int64_t cap_groups, const uint8_t* acts, size_t act_stride, bool gu_odd4, float* h,
+                             void* stream) {
+    if (cap_groups <= 0) return;
+    cudaStream_t s = (cudaStream_t) stream;
+    const dim3 grid((unsigned) ((L.n_ff + kStrictRowsPerBlock - 1) / kStrictRowsPerBlock), (unsigned) cap_groups);
+    if (gu_odd4) strict_gu_kernel<true><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, acts, act_stride, L, h);
+    else strict_gu_kernel<false><<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_tok, acts, act_stride, L, h);
+    check("native_expert_strict_gu");
+}
+
+void native_expert_strict_down(const NativeExpertLayout& L, const unsigned long long* grp_ptr, const int32_t* grp_start, const int32_t* n_groups,
+                               const int32_t* ent_dst, int64_t cap_groups, const uint8_t* hq, size_t hq_stride, float* out, void* stream) {
+    if (cap_groups <= 0) return;
+    cudaStream_t s = (cudaStream_t) stream;
+    const dim3 grid((unsigned) ((L.n_embd + kStrictRowsPerBlock - 1) / kStrictRowsPerBlock), (unsigned) cap_groups);
+    strict_down_kernel<<<grid, 256, 0, s>>>(grp_ptr, grp_start, n_groups, ent_dst, hq, hq_stride, L, out);
+    check("native_expert_strict_down");
+}
 
 void native_grouped_set_v1(bool v1) { g_grouped_v1 = v1; }
 

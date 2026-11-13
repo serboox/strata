@@ -14,7 +14,7 @@ class Fast50Tests(unittest.TestCase):
 
     def test_the_new_switches_are_off_by_default(self):
         args = self.parse()
-        self.assertFalse(any([args.fast50, args.strict, args.mtp_adapt, args.chain_device, args.spec_sampling, args.iq3s_4bit,
+        self.assertFalse(any([args.fast50, args.strict, args.strict_cpu, args.interleave, args.mtp_adapt, args.chain_device, args.spec_sampling, args.iq3s_4bit,
                               args.lend_buffers, args.attn_ahead, args.prefetch_lead2, args.head2, args.resident_experts]))
         self.assertEqual((args.kv_lazy, args.warm_experts, args.ngram, args.parallel), (0, 0, "", 1))
         self.assertIsNone(args.platform_profile)

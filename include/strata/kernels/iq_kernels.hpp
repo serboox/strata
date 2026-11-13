@@ -79,6 +79,20 @@ void native_expert_grouped(const NativeExpertLayout& L, const unsigned long long
                            const int32_t* n_groups, const int32_t* ent_dst, const int32_t* ent_tok, int64_t cap_groups,
                            int64_t cap_entries, const void* x_q8_1, void* scratch, float* out, void* stream,
                            int64_t grid_groups = 0);
+/// Strict mode: the resident experts with the bits of the CPU kernels (IQ3_S gate/up on iq3s_vbmi or, with `gu_odd4`, on the
+/// 4-bit kernel; IQ4_XS down on iq4xs_vnni), so a token's output does not depend on where an expert was computed.
+/// Three steps, the middle one is the caller's: native_expert_strict_gu writes h[e][n_ff] (floats, entry e in grouped order)
+/// from the tokens' Q8_K activations (`acts`, rows `act_stride` bytes apart); the caller quantises h to Q8_K rows
+/// `native_expert_strict_hq_stride(n_ff)` bytes apart with the bytes of the host quantiser; native_expert_strict_down writes row
+/// ent_dst[e] of `out`.
+bool native_expert_strict_supported(const NativeExpertLayout& L) noexcept;
+size_t native_expert_strict_hq_stride(int64_t n_ff);
+void native_expert_strict_gu(const NativeExpertLayout& L, const unsigned long long* grp_ptr, const int32_t* grp_start, const int32_t* n_groups,
+                             const int32_t* ent_tok, int64_t cap_groups, const uint8_t* acts, size_t act_stride, bool gu_odd4, float* h,
+                             void* stream);
+void native_expert_strict_down(const NativeExpertLayout& L, const unsigned long long* grp_ptr, const int32_t* grp_start, const int32_t* n_groups,
+                               const int32_t* ent_dst, int64_t cap_groups, const uint8_t* hq, size_t hq_stride, float* out, void* stream);
+
 /// true: `native_expert_grouped`'s launches before the group stride (STRATA_GROUPED_V1=1 at startup) - a block row
 /// per possible group, SwiGLU and the q8_1 quantization as two kernels over all cap_entries.  Bitwise the same results
 /// (native_grouped_parity checks it); kept for A/B timing.  Set before graph capture; captured graphs keep theirs.

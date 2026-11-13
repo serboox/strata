@@ -8,6 +8,7 @@
 #include "strata/kernels/cpu/iq_avx1.hpp"
 #include "strata/kernels/cpu/iq3s_vbmi.hpp"
 #include "strata/kernels/cpu/iq4xs_vnni.hpp"
+#include "strata/kernels/cpu/strict_math.hpp"
 #include "strata/kernels/cpu/kq_avx2.hpp"
 #include "strata/kernels/cpu/kq_avx512.hpp"
 #include "strata/kernels/cpu/nvfp4_avx2.hpp"
@@ -270,6 +271,13 @@ bool iq4xs_vnni_enabled() {
     return on;
 }
 
+bool native_strict_supported(const NativeFmt& f, bool gu_odd4) {
+    constexpr int kQ8K = 15, kIq3S = 21, kIq4Xs = 23;
+    if (f.had_gu || f.had_d || f.tail_off != 0 || f.gu_act != kQ8K || f.d_act != kQ8K) return false;
+    if (f.d_type != kIq4Xs || !iq4xs_vnni_enabled()) return false;
+    return gu_odd4 ? f.gu_type == kIq3S : f.gu_type == kIq3S && iq3s_vbmi_enabled();
+}
+
 int native_gu_mt_min(int gu_type) {
     // #152: from how many tokens the multi-token kernels run (ggml's vec_dot below that).  The default 2 is the
     // measured-fastest rule, but a token's expert rows then round differently alone than in a group, so greedy output
@@ -342,10 +350,11 @@ void native_gu_rows(const NativeFmt& f, const uint8_t* blob, const void* const* 
         }
         iq4xs_vnni_rows_odd(blob, f.gu_row, (int) f.n_embd, act, nt, gate_out, r0, r1);
         iq4xs_vnni_rows_odd(blob + f.up_off, f.gu_row, (int) f.n_embd, act, nt, up_out, r0, r1);
+        const bool strict = strict_swiglu_on();
         for (int t = 0; t < nt; ++t)
             for (int r = r0; r < r1; ++r) {
                 const float gate = gate_out[t][r];
-                ff[t][r] = (gate / (1.f + std::exp(-gate))) * up_out[t][r];
+                ff[t][r] = strict ? strict_swiglu(gate, up_out[t][r]) : (gate / (1.f + std::exp(-gate))) * up_out[t][r];
             }
         return;
     }

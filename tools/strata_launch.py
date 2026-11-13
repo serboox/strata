@@ -539,7 +539,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="repack the IQ3_S gate/up matrices into 4-bit codes at start for the CPU kernel (same values, +2 GiB of RAM; mapped experts only, "
                              "so not with --expert-prefetch; off by default)")
     parser.add_argument("--strict", action="store_true",
-                        help="bit-exact output: every expert on the CPU (no --expert-prefetch, no resident experts in VRAM), so the numbers are the CPU kernels' only")
+                        help="an expert gives the same bits on the CPU and in VRAM, so the output does not depend on the slots or the prefetch guesses: "
+                             "the GPU runs kernels with the CPU's arithmetic (IQ3_S gate/up, IQ4_XS down, iq kernels on); for other formats the engine "
+                             "falls back to --strict-cpu by itself")
+    parser.add_argument("--strict-cpu", action="store_true",
+                        help="every expert on the CPU (no --expert-prefetch, no resident experts in VRAM), so the numbers are the CPU kernels' only")
     parser.add_argument("--attn-ahead", action="store_true",
                         help="the decode attention kernel loads 16 V cells together instead of 8 (same bits; off by default)")
     parser.add_argument("--prefetch-lead2", action="store_true",
@@ -554,6 +558,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--parallel", type=int, default=1, metavar="N",
                         help="N sessions decode together: their rows share one window, so one pass over the experts serves all of them and the GPU's mixers "
                              "of one session fill the gaps of another (about 1.3 times the total tokens a second for two requests, nothing for one; more heat)")
+    parser.add_argument("--interleave", action="store_true",
+                        help="with --parallel N: a window of two or more sessions runs as two windows that alternate layer by layer, so the GPU computes "
+                             "one window's mixer while the CPU computes the other window's experts (the prefetch guesses serve the first window only; "
+                             "off by default)")
     parser.add_argument("--gpu-clocks", default=None, metavar="MIN,MAX",
                         help="lock the GPU clocks (MHz) while the server runs so that the dense weights are read at full speed from the first step; needs root (sudo -A), "
                              "put back by --gpu-clocks reset; the card heats the shared cooler more")
@@ -623,12 +631,12 @@ def main() -> int:
     if not (cpu_max_mhz == 0 or (math.isfinite(cpu_max_mhz) and MIN_MHZ <= cpu_max_mhz <= MAX_MHZ)):
         parser.error(f"--cpu-max-mhz must be 0 (off) or from {MIN_MHZ:g} to {MAX_MHZ:g} MHz, not {cpu_max_mhz:g}")
 
-    if args.strict:   # every expert on the CPU with the CPU's bits: no prefetch and no experts resident in VRAM
+    if args.strict_cpu:   # every expert on the CPU with the CPU's bits: no prefetch and no experts resident in VRAM
         args.expert_prefetch = 0
         args.resident_experts = False
         args.warm_experts = 0
         if args.vram_reserve is not None:
-            parser.error("--strict leaves the VRAM reserve alone (resident experts would round on the GPU)")
+            parser.error("--strict-cpu leaves the VRAM reserve alone (it keeps no experts in VRAM)")
     if args.expert_prefetch is not None and not 0 <= args.expert_prefetch <= MAX_EXPERT_PREFETCH:
         parser.error(f"--expert-prefetch must be from 0 (off) to {MAX_EXPERT_PREFETCH}, not {args.expert_prefetch}")
     if args.vram_reserve is not None and args.vram_reserve < 0:
@@ -658,6 +666,8 @@ def main() -> int:
         profile["cpu_adaptive"] = True
     if args.workers:
         profile["workers"] = args.workers
+    if args.interleave and args.parallel < 2:
+        parser.error("--interleave alternates the windows of two or more sessions: give --parallel N (2 or more)")
     if args.parallel > 1:
         profile["parallel"] = args.parallel
     if args.resident_experts:
@@ -687,7 +697,7 @@ def main() -> int:
     (ROOT / "logs").mkdir(exist_ok=True)
     config_path = RUN_DIR / "qwen36.json"
     kernel_env = iq_kernel_env(args.iq_kernels, MODEL_FILE)
-    lever_env = {**experts_used_env(experts_used), **(overlap_environment(args.overlap) or {}), **({"STRATA_Q36_MTP_ADAPT": "1"} if args.mtp_adapt else {}), **({"STRATA_Q36_CHAIN_DEV": "1"} if args.chain_device else {}), **({"STRATA_Q36_LEND": "1"} if args.lend_buffers else {}), **({"STRATA_Q36_KV_LAZY": "1", "STRATA_Q36_KV_TIER": str(args.kv_lazy)} if args.kv_lazy else {}), **({"STRATA_Q36_HEAD2": "1"} if args.head2 else {}), **({"STRATA_Q36_STRICT": "1"} if args.strict else {}), **({"STRATA_Q36_PF_LEAD": "2"} if args.prefetch_lead2 else {}), **({"STRATA_Q36_ATTN_AHEAD": "16"} if args.attn_ahead else {}), **({"STRATA_IQ3S_4BIT": "1"} if args.iq3s_4bit else {}), **({"STRATA_IQ3S_4BIT_DROP": "1"} if args.iq3s_4bit_drop else {}), **({"STRATA_Q36_SPEC_SAMPLING": "1"} if args.spec_sampling else {}), **({"STRATA_Q36_NGRAM": str(args.ngram)} if args.ngram else {}), **({"STRATA_Q36_WARM": str(args.warm_experts)} if args.warm_experts else {}), **({"STRATA_Q36_DRAFT_LIST": str(args.draft_list)} if args.draft_list else {})}
+    lever_env = {**experts_used_env(experts_used), **(overlap_environment(args.overlap) or {}), **({"STRATA_Q36_MTP_ADAPT": "1"} if args.mtp_adapt else {}), **({"STRATA_Q36_CHAIN_DEV": "1"} if args.chain_device else {}), **({"STRATA_Q36_LEND": "1"} if args.lend_buffers else {}), **({"STRATA_Q36_KV_LAZY": "1", "STRATA_Q36_KV_TIER": str(args.kv_lazy)} if args.kv_lazy else {}), **({"STRATA_Q36_HEAD2": "1"} if args.head2 else {}), **({"STRATA_Q36_INTERLEAVE": "1"} if args.interleave else {}), **({"STRATA_Q36_STRICT": "cpu"} if args.strict_cpu else {"STRATA_Q36_STRICT": "1"} if args.strict else {}), **({"STRATA_Q36_PF_LEAD": "2"} if args.prefetch_lead2 else {}), **({"STRATA_Q36_ATTN_AHEAD": "16"} if args.attn_ahead else {}), **({"STRATA_IQ3S_4BIT": "1"} if args.iq3s_4bit else {}), **({"STRATA_IQ3S_4BIT_DROP": "1"} if args.iq3s_4bit_drop else {}), **({"STRATA_Q36_SPEC_SAMPLING": "1"} if args.spec_sampling else {}), **({"STRATA_Q36_NGRAM": str(args.ngram)} if args.ngram else {}), **({"STRATA_Q36_WARM": str(args.warm_experts)} if args.warm_experts else {}), **({"STRATA_Q36_DRAFT_LIST": str(args.draft_list)} if args.draft_list else {})}
     config = build_config(profile, args.port, args.sampling, args.max_temp,
                           with_igpu(engine_environment(kernel_env, cpu_max_mhz, lever_env), args.igpu_experts))
     config_path.write_text(json.dumps(config, indent=1) + "\n", encoding="utf-8")

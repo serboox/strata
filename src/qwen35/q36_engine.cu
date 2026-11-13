@@ -35,6 +35,7 @@
 #include "strata/kernels/cpu/native_expert.hpp"
 #include "strata/kernels/cpu/expert_layout.hpp"
 #include "strata/kernels/cpu/iq4xs_vnni.hpp"
+#include "strata/kernels/cpu/strict_math.hpp"
 #include "strata/kernels/cpu/pool.hpp"
 #endif
 
@@ -1994,6 +1995,25 @@ struct Engine {
     bool rows_mode = false;                                                 // layer(): the rows are sessions' (not consecutive cells)
     bool bmtp = false;                                                      // --batch-mtp: batch windows verify MTP proposals
     int64_t rows_pmax = 0;                                                  // (eager) the highest cell of the rows
+    // STRATA_Q36_INTERLEAVE=1: a batch window of two or more sessions runs as two windows that alternate layer by layer, so the GPU
+    // computes one window's mixer, router and resident experts while the CPU pool computes the other window's experts (run_rows,
+    // forward_pair). The second window's rows follow the first one's in every buffer, so the callers see one window.
+    bool interleave = false;
+    int win_row0 = 0;                // the first row of the window being run inside the combined window (0, or the first window's rows)
+    bool win_no_prefetch = false;    // the second window makes no prefetch guess: the guess slots hold the first window's
+    /// One of two interleaved windows: the buffers whose contents must survive while the other window uses the GPU or the host.
+    struct WinView {
+        float *x, *h, *eparts, *sy, *sgate, *logits_r, *ewts, *hmain, *logits, *cpu_out, *h_h;
+        int32_t *ids, *pick, *tok, *d_rcell, *d_rslot, *d_rdelta, *d_gslot, *d_grow0, *d_gcnt, *h_ids, *h_miss;
+        cudaEvent_t ev_route;
+        int rows_G, row0;
+        bool no_prefetch;
+    };
+    // the second window's row tables on the device, their pinned staging and its routing event (made at the first such window)
+    int32_t *tok_w2 = nullptr, *d_rcell_w2 = nullptr, *d_rslot_w2 = nullptr, *d_rdelta_w2 = nullptr;
+    int32_t *d_gslot_w2 = nullptr, *d_grow0_w2 = nullptr, *d_gcnt_w2 = nullptr, *hrow_w2 = nullptr;
+    cudaEvent_t ev_route_w2 = nullptr;
+    long long interleaved_windows = 0;
     // pictures (--vision): the request's rows replace the embeddings of its <|image_pad|> cells; M-RoPE
     bool vision = false;
     int32_t* d_mtab = nullptr;          // [ctx][3] t, h, w of the current request's prompt cells (vision)
@@ -3083,16 +3103,29 @@ struct Engine {
     /// `verify`: a verify window - the GDN state is read, not written (commit() writes it for the kept rows).
     void layer(const Layer& L, size_t li, int T, int64_t p0, const int32_t* dpos, bool graph_mode, bool verify,
                const float* wn, float* hout) {
+        const LayerTail tail = layer_front(L, li, T, p0, dpos, graph_mode, verify);
+        layer_back(li, T, tail, wn, hout);
+    }
+    /// What layer_back needs from layer_front.
+    struct LayerTail {
+        bool hy_rows = false;            // the layer ran the hybrid rows path: the CPU pool's experts are still to come
+        bool ext = false;                // the shared expert's gate is the last column of logits_r
+        const int32_t* prow = nullptr;   // entry -> sorted row (the prompt's MMQ path), or null
+    };
+    /// The layer up to the point where the host takes part: the mixer, the router, the experts the GPU computes and the shared
+    /// expert, all queued on the stream.
+    LayerTail layer_front(const Layer& L, size_t li, int T, int64_t p0, const int32_t* dpos, bool graph_mode, bool verify) {
         const auto& g = m->g;
         const int N = (int) g.n_embd, Kp = (int) m->top_k, FF = (int) g.n_ff, FS = (int) g.n_ff_shexp;
         const int HK = (int) g.ssm_k_heads, HV = (int) g.ssm_v_heads, D = (int) g.ssm_state_size;
         const int C = (int) g.ssm_conv_channels;
         const int H = (int) g.n_head, HKV = (int) g.n_head_kv, HD = (int) g.head_dim;
         if (!L.attn) {
-            float* qkv_b = verify ? v_qkv[li] : qkv;
-            float* hc_b = verify ? v_hc[li] : hc;
-            float* al_b = verify ? v_alpha[li] : alpha;
-            float* be_b = verify ? v_beta[li] : beta;
+            // (win_row0: the second of two interleaved windows keeps its rows after the first one's, where commit_rows expects them)
+            float* qkv_b = verify ? v_qkv[li] + (size_t) win_row0 * (size_t) C : qkv;
+            float* hc_b = verify ? v_hc[li] + (size_t) win_row0 * (size_t) C : hc;
+            float* al_b = verify ? v_alpha[li] + (size_t) win_row0 * (size_t) HV : alpha;
+            float* be_b = verify ? v_beta[li] + (size_t) win_row0 * (size_t) HV : beta;
             prep_in(T);
             apply(L.qkv, xq, qkv_b, T);
             apply(L.zg, xq, z, T);
@@ -3391,9 +3424,14 @@ struct Engine {
             mm(L.sh_down, shh, sy, T);
         }
         if (!ext) f32mm(L.sh_gate_inp, h, sgate, N, 1, T);
-        if (hy_rows) moe_hybrid_cpu(li, T);   // the CPU pool's experts (while the GPU runs the rest), merged
-        // the combine, the shared expert's gate, the residual add and the next norm in one launch
-        moe_end(T, prow, sy, ext ? logits_r + g.n_expert : sgate, wn, hout, ext ? (int) g.n_expert + 1 : 1);
+        return {hy_rows, ext, prow};
+    }
+    /// The rest of the layer: the CPU pool's experts (while the GPU runs what layer_front queued), merged; then the combine,
+    /// the shared expert's gate, the residual add and the next norm in one launch.
+    void layer_back(size_t li, int T, const LayerTail& tail, const float* wn, float* hout) {
+        const int ne = (int) m->g.n_expert;
+        if (tail.hy_rows) moe_hybrid_cpu(li, T);
+        moe_end(T, tail.prow, sy, tail.ext ? logits_r + ne : sgate, wn, hout, tail.ext ? ne + 1 : 1);
     }
 
     /// The main model over T rows (device `tok`, positions p0 .. p0 + T - 1, also at *pos0): hmain gets every row's
@@ -3483,9 +3521,15 @@ struct Engine {
         k_argmax<<<dim3(1, n), kThreads, 0, st>>>(h2_logits, kArgBlocks, pk, amv, ami, true);
         k_map_pick<<<1, 32, 0, st>>>(pk, h2_ids, n);
     }
-    // STRATA_Q36_STRICT=1: every routed expert is computed by the CPU kernels (no resident experts, no prefetch), so the output has only the
-    // CPU path's rounding; the VRAM the slots would take stays free
+    // STRATA_Q36_STRICT=1: a routed expert gives the bits of the CPU kernels wherever it is computed, so the output does not depend
+    // on the slots or on the prefetch guesses. strict_gpu: the experts in VRAM slots run kernels with the CPU's arithmetic
+    // (setup_strict decides it per model); otherwise no expert is resident, no guess is made and the CPU computes them all.
+    // STRATA_Q36_STRICT=cpu asks for the second form.
     bool strict = false;
+    bool strict_gpu_wanted = false;
+    bool strict_gpu = false;
+    /// The CPU computes this layer's gate/up rows with the 4-bit kernel on repacked rows (build_jobs_glue sets gu_odd4 the same way)
+    static bool layer_odd4(const Layer& L) { return L.hblobs == nullptr && L.rp_g != nullptr; }
     int attn_ahead = 8;          // STRATA_Q36_ATTN_AHEAD: V cells loaded together by the decode attention kernel
     bool head_sub_off() const { return m->head_sub.d == nullptr; }
     int32_t draft_token(int32_t picked) const {
@@ -3888,6 +3932,31 @@ struct Engine {
     /// device quantizer reproduces bit for bit: the probe at placement checked it).
     bool dev_quant(size_t li) const { return ov.quant && li < hy_dev_quant.size() && hy_dev_quant[li] != 0; }
 
+    /// Strict mode: the grouped entries of the experts in VRAM slots with the CPU kernels' arithmetic. The tokens' Q8_K
+    /// activations and the entries' Q8_K hidden rows come from the device quantizer, whose bytes are the host quantizer's
+    /// (setup_strict probed both); the entries' hidden rows and their Q8_K image use the expert scratch.
+    void expert_grouped_strict(const Layer& L, size_t li, int T) {
+#if defined(STRATA_Q36_CPU_POOL)
+        const auto& g = m->g;
+        const int N = (int) g.n_embd, FF = (int) g.n_ff;
+        const int64_t n_ent = (int64_t) T * m->top_k, cap_groups = std::min<int64_t>(n_ent, g.n_expert);
+        const Hy& H = hy[li];
+        constexpr size_t kActStride = strata::kernels::cpu::kNativeActBytes;
+        if (!dev_quant(li)) q36act::launch(H.fmt.gu_act, h, d_acts, N, T, kActStride, st);   // dev_quant: moe_hybrid_gpu wrote them
+        float* const hidden = static_cast<float*>(escr);
+        uint8_t* const hq = static_cast<uint8_t*>(escr) + (((size_t) n_ent * (size_t) FF * sizeof(float) + 255) & ~(size_t) 255);
+        const size_t hq_stride = K::native_expert_strict_hq_stride(FF);
+        K::native_expert_strict_gu(L.L, grp_ptr, grp_start, n_groups, ent_tok, cap_groups, d_acts, kActStride, layer_odd4(L), hidden, st);
+        q36act::launch(H.fmt.d_act, hidden, hq, FF, (int) n_ent, hq_stride, st);
+        CK(cudaGetLastError());
+        K::native_expert_strict_down(L.L, grp_ptr, grp_start, n_groups, ent_dst, cap_groups, hq, hq_stride, eparts, st);
+#else
+        (void) L;
+        (void) li;
+        (void) T;
+#endif
+    }
+
     /// The GPU half of a hybrid MoE: the routing to the host, the resident experts' entries grouped and run.
     void moe_hybrid_gpu(const Layer& L, size_t li, int T) {
         const auto& g = m->g;
@@ -3906,13 +3975,14 @@ struct Engine {
 #endif
         CK(cudaMemcpyAsync(h_h, h, (size_t) T * N * 4, cudaMemcpyDeviceToHost, st));
         CK(cudaEventRecord(ev_route, st));
-        pf_predict(li, T);   // after the router result is on its way: the guess runs while the CPU pool works, not before the router
+        if (!win_no_prefetch) pf_predict(li, T);   // after the router result is on its way: the guess runs while the CPU pool works, not before the router
         group_entries(L, hy[li].slot_of_d, T);
         if (!xq_post) quant(h, N, T, xq);   // the experts' and the shared expert's input
-        const bool pf_here = pf_is_ready(li);   // this layer's guessed experts are in the ring (or on their way)
+        const bool pf_here = !win_no_prefetch && pf_is_ready(li);   // this layer's guessed experts are in the ring (or on their way)
         if (pf_here) CK(cudaStreamWaitEvent(st, pf_done[pfi(li)], 0));
-        K::native_expert_grouped(L.L, grp_ptr, grp_start, n_groups, ent_dst, ent_tok,
-                                 std::min<int64_t>(n_ent, g.n_expert), n_ent, xq, escr, eparts, st);
+        if (strict_gpu) expert_grouped_strict(L, li, T);
+        else K::native_expert_grouped(L.L, grp_ptr, grp_start, n_groups, ent_dst, ent_tok,
+                                      std::min<int64_t>(n_ent, g.n_expert), n_ent, xq, escr, eparts, st);
         if (pf_here) k_pf_clear<<<1, 32, 0, st>>>(hy[li].slot_of_d, pf_ids_d[pfi(li)], pf_n, L.pf_base);   // the guesses' slots -1 again
     }
 #if defined(STRATA_Q36_CPU_POOL)
@@ -3942,7 +4012,8 @@ struct Engine {
         const bool defer = effects && rows_deferred && li < m->layers.size();
         if (defer) {
             if (row_ids.size() < m->layers.size()) row_ids.resize(m->layers.size());
-            row_ids[li].assign(h_ids, h_ids + n_ent);
+            if (win_row0 > 0) row_ids[li].insert(row_ids[li].end(), h_ids, h_ids + n_ent);   // after the first window's rows
+            else row_ids[li].assign(h_ids, h_ids + n_ent);
         }
         for (int e = 0; e < n_ent; ++e) {
             const int x = h_ids[e];
@@ -4004,7 +4075,8 @@ struct Engine {
         const bool defer = rows_deferred && li < m->layers.size();
         if (defer) {
             if (row_ids.size() < m->layers.size()) row_ids.resize(m->layers.size());
-            row_ids[li].assign(h_ids, h_ids + n_ent);
+            if (win_row0 > 0) row_ids[li].insert(row_ids[li].end(), h_ids, h_ids + n_ent);   // after the first window's rows
+            else row_ids[li].assign(h_ids, h_ids + n_ent);
         }
         for (int e = 0; e < n_ent; ++e) {
             const int x = h_ids[e];
@@ -4095,10 +4167,13 @@ struct Engine {
 
     /// Whether the device quantizer writes the host quantizer's bytes for this layer's format (a few rows of mixed
     /// magnitude, once at placement): a build whose host quantizer differs keeps the host path.
-    bool probe_dev_quant(const strata::kernels::cpu::NativeFmt& f) {
+    /// `hidden`: the down activation (n_ff values in d_act, native_quant_h) instead of the gate/up one.
+    bool probe_dev_quant(const strata::kernels::cpu::NativeFmt& f, bool hidden = false) {
         namespace C = strata::kernels::cpu;
-        const int64_t n = f.n_embd;
-        if (f.had_gu || f.act_bytes > C::kNativeActBytes || !q36act::supported(f.gu_act, n)) return false;
+        const int64_t n = hidden ? f.n_ff : f.n_embd;
+        const int act_type = hidden ? f.d_act : f.gu_act;
+        const size_t act_bytes = hidden ? f.h_bytes : f.act_bytes;
+        if ((hidden ? f.had_d : f.had_gu) || act_bytes > C::kNativeActBytes || !q36act::supported(act_type, n)) return false;
         constexpr int kRows = 4;
         constexpr size_t kBytes = C::kNativeActBytes;
         std::vector<float> x((size_t) kRows * (size_t) n);
@@ -4114,7 +4189,7 @@ struct Engine {
         CK(cudaMalloc(&dx, x.size() * 4));
         CK(cudaMalloc(&dd, kRows * kBytes));
         CK(cudaMemcpyAsync(dx, x.data(), x.size() * 4, cudaMemcpyHostToDevice, st));
-        q36act::launch(f.gu_act, dx, dd, n, kRows, kBytes, st);
+        q36act::launch(act_type, dx, dd, n, kRows, kBytes, st);
         CK(cudaGetLastError());
         std::vector<uint8_t> dev(kRows * kBytes), host(kBytes);
         CK(cudaMemcpyAsync(dev.data(), dd, dev.size(), cudaMemcpyDeviceToHost, st));
@@ -4123,8 +4198,9 @@ struct Engine {
         CK(cudaFree(dd));
         bool same = true;
         for (int r = 0; r < kRows; ++r) {
-            C::native_quant_act(f, x.data() + (size_t) r * (size_t) n, host.data());
-            same = same && q36act::same_row(f.gu_act, n, host.data(), dev.data() + (size_t) r * kBytes);
+            if (hidden) C::native_quant_h(f, x.data() + (size_t) r * (size_t) n, host.data());
+            else C::native_quant_act(f, x.data() + (size_t) r * (size_t) n, host.data());
+            same = same && q36act::same_row(act_type, n, host.data(), dev.data() + (size_t) r * kBytes);
         }
         return same;
     }
@@ -4149,7 +4225,7 @@ struct Engine {
         }
         const auto t0 = Clock::now();
         hy_wait_ms += std::chrono::duration<double, std::milli>(t0 - tw).count();
-        const bool pf_mine = pf_is_ready(li);   // this layer's guessed experts are in the ring: their entries are not the CPU's
+        const bool pf_mine = !win_no_prefetch && pf_is_ready(li);   // this layer's guessed experts are in the ring: their entries are not the CPU's
         const bool gpu_act = dev_quant(li);
         // the merge flags of the glue path travel with the rows: one upload
         int32_t* const miss = ov.glue ? reinterpret_cast<int32_t*>(cpu_out + (size_t) n_ent * N) : h_miss;
@@ -4170,7 +4246,7 @@ struct Engine {
         hy_igpu += diverted;
         hy_gpu += n_ent - n_miss;
         if (n_miss == 0) {   // every entry is the GPU's: nothing to upload, the next layer's guess can start at once
-            pf_issue(li);
+            if (!win_no_prefetch) pf_issue(li);
             return;
         }
         if (igpu) igpu->submit(li, igpu_entries.data(), (int) igpu_entries.size());
@@ -4198,7 +4274,7 @@ struct Engine {
             CK(cudaMemcpyAsync(d_miss, h_miss, (size_t) n_ent * 4, cudaMemcpyHostToDevice, st));
             k_merge_cpu<<<n_ent, kThreads, 0, st>>>(eparts, ecpu, d_miss, N);
         }
-        pf_issue(li);   // only now: the copy engine must be free when the CPU rows above go to the card, they are on the critical path
+        if (!win_no_prefetch) pf_issue(li);   // only now: the copy engine must be free when the CPU rows above go to the card, they are on the critical path
         if (ov.stats) ov_enq_ms += ms_since(te);
 #else
         (void) li;
@@ -4210,7 +4286,7 @@ struct Engine {
     /// over all layers, between forwards (the copies are on the engine's stream).
     void rebalance(int max_swaps) {
         static const bool off = std::getenv("STRATA_Q36_FIXED_SLOTS") != nullptr;   // the slots as placed (tests)
-        if (!m->hybrid || off || warming || strict) return;
+        if (!m->hybrid || off || warming || (strict && !strict_gpu)) return;
         const int64_t ne = m->g.n_expert;
         int left = max_swaps;
         for (size_t li = 0; li < hy.size() && left > 0; ++li) {
@@ -4434,6 +4510,87 @@ struct Engine {
         graph_run(row_graphs[key], body);
     }
 
+    void win_load(const WinView& w) {
+        x = w.x; h = w.h; eparts = w.eparts; sy = w.sy; sgate = w.sgate; logits_r = w.logits_r; ewts = w.ewts;
+        hmain = w.hmain; logits = w.logits; cpu_out = w.cpu_out; h_h = w.h_h;
+        ids = w.ids; pick = w.pick; tok = w.tok; d_rcell = w.d_rcell; d_rslot = w.d_rslot; d_rdelta = w.d_rdelta;
+        d_gslot = w.d_gslot; d_grow0 = w.d_grow0; d_gcnt = w.d_gcnt; h_ids = w.h_ids; h_miss = w.h_miss;
+        ev_route = w.ev_route;
+        rows_G = w.rows_G;
+        win_row0 = w.row0;
+        win_no_prefetch = w.no_prefetch;
+    }
+    /// The engine's own buffers as the first window's view (`groups` groups, rows from row 0).
+    WinView win_first(int groups) const {
+        return {x, h, eparts, sy, sgate, logits_r, ewts, hmain, logits, cpu_out, h_h,
+                ids, pick, tok, d_rcell, d_rslot, d_rdelta, d_gslot, d_grow0, d_gcnt, h_ids, h_miss,
+                ev_route, groups, 0, false};
+    }
+    /// The second window's view: the same buffers from row `row0` on, its own row tables and routing event.
+    WinView win_second(const WinView& a, int row0, int groups) {
+        const size_t N = (size_t) m->g.n_embd, Kp = (size_t) m->top_k, V = (size_t) m->g.n_vocab, R = (size_t) row0;
+        const size_t ne1 = (size_t) m->g.n_expert + 1;
+        if (tok_w2 == nullptr) {
+            tok_w2 = dalloc_t<int32_t>(kVerify);
+            d_rcell_w2 = dalloc_t<int32_t>(kVerify);
+            d_rslot_w2 = dalloc_t<int32_t>(kVerify);
+            d_rdelta_w2 = dalloc_t<int32_t>(kVerify);
+            d_gslot_w2 = dalloc_t<int32_t>(kVerify);
+            d_grow0_w2 = dalloc_t<int32_t>(kVerify);
+            d_gcnt_w2 = dalloc_t<int32_t>(kVerify);
+            CK(cudaHostAlloc((void**) &hrow_w2, 128 * sizeof(int32_t), cudaHostAllocDefault));
+            CK(cudaEventCreateWithFlags(&ev_route_w2, cudaEventDisableTiming));
+        }
+        return {a.x + R * N, a.h + R * N, a.eparts + R * Kp * N, a.sy + R * N, a.sgate + R, a.logits_r + R * ne1, a.ewts + R * Kp,
+                a.hmain + R * N, a.logits + R * V, a.cpu_out + R * Kp * N, a.h_h + R * N,
+                a.ids + R * Kp, a.pick + R, tok_w2, d_rcell_w2, d_rslot_w2, d_rdelta_w2, d_gslot_w2, d_grow0_w2, d_gcnt_w2,
+                a.h_ids + R * Kp, a.h_miss + R * Kp, ev_route_w2, groups, row0, true};
+    }
+    /// Whether a window of G groups and T rows can run as two interleaved windows: every main layer takes the hybrid rows path,
+    /// nothing is captured in a graph, and the CPU rows and their merge flags travel apart (not the overlap glue layout).
+    bool can_interleave(int G, int T) const {
+        return interleave && G >= 2 && T <= kVerify && m->hybrid && main_hybrid && !use_graph && T <= hybrid_t && T <= kGemmT &&
+               !ov.any() && !ov.verify && !igpu && !verify_k;
+    }
+    /// forward() for two windows at once, layer by layer. Window a holds rows [0, TA) of the buffers, window b the TB rows after
+    /// them. The queue order keeps each window's layer_back next to its layer_front of the following layer (the quantized input
+    /// that moe_end leaves in xq is read before the other window writes xq), and gives the GPU the other window's layer_front
+    /// to run while the host computes a window's experts:
+    ///   back(a, l) [CPU: a's experts | GPU: front(b, l)], front(a, l + 1), back(b, l) [CPU: b's experts | GPU: a's merge and front(a, l + 1)], front(b, l + 1)
+    void forward_pair(const WinView& a, const WinView& b, int TA, int TB, int64_t p0, bool verify) {
+        const int N = (int) m->g.n_embd;
+        const size_t n_layers = m->layers.size();
+        LayerTail tail_a, tail_b;
+        const auto embed = [&](const WinView& w, int T) {
+            win_load(w);
+            K::iq_embed_rows(m->embd_type, m->embd, m->embd_row, tok, T, N, x, st);
+            k_rms<<<T, kThreads, 0, st>>>(x, m->layers[0].attn_norm, h, N, m->eps);
+        };
+        const auto front = [&](const WinView& w, int T, size_t l, LayerTail& tail) {
+            win_load(w);
+            tail = layer_front(m->layers[l], l, T, p0, pos0, false, verify);
+        };
+        const auto back = [&](const WinView& w, int T, size_t l, const LayerTail& tail) {
+            win_load(w);
+            const bool last = l + 1 == n_layers;
+            layer_back(l, T, tail, last ? m->out_norm : m->layers[l + 1].attn_norm, last ? hmain : h);
+        };
+        embed(a, TA);
+        front(a, TA, 0, tail_a);
+        embed(b, TB);
+        front(b, TB, 0, tail_b);
+        for (size_t l = 0; l < n_layers; ++l) {
+            back(a, TA, l, tail_a);
+            if (l + 1 < n_layers) front(a, TA, l + 1, tail_a);
+            back(b, TB, l, tail_b);
+            if (l + 1 < n_layers) front(b, TB, l + 1, tail_b);
+        }
+        win_load(a);
+        head_rows(hmain, TA + TB, logits, pick);   // b's rows follow a's in hmain, logits and pick
+        if (interleaved_windows++ == 0)
+            std::fprintf(stderr, "strata-q36: interleaved batch windows: two windows alternate layer by layer (the first one of %d and %d rows)\n", TA, TB);
+    }
+
     /// One window over the groups' rows.  `verify`: a verify window - the GDN state is read, not written (commit_rows writes
     /// it for the kept rows) and the sessions' positions stay.  The greedy picks end up in rows_pick (one per row), every
     /// row's logits in `logits`.  Without verify the sessions' positions advance by their rows.
@@ -4469,7 +4626,36 @@ struct Engine {
         rows_mode = true;
         rows_G = G;
         rows_deferred = true;
-        run_graph_key((verify ? 1000 : 0) + G * 10 + (T - G), [&] { forward(T, pmax, T, use_graph, verify); });
+        if (can_interleave(G, T)) {
+            // the first half of the groups is window a (the tables above already hold its rows first), the rest window b with
+            // its own tables: the same rows, numbered from its first row
+            const int GA = (G + 1) / 2, GB = G - GA;
+            const int TA = hrow[48 + GA], TB = T - TA;
+            const WinView a = win_first(GA);
+            const WinView b = win_second(a, TA, GB);
+            for (int r = 0; r < TB; ++r) {
+                hrow_w2[r] = hrow[TA + r];
+                hrow_w2[8 + r] = hrow[8 + TA + r];
+                hrow_w2[16 + r] = hrow[16 + TA + r];
+                hrow_w2[24 + r] = hrow[24 + TA + r];
+            }
+            for (int g = 0; g < GB; ++g) {
+                hrow_w2[40 + g] = hrow[40 + GA + g];
+                hrow_w2[48 + g] = hrow[48 + GA + g] - TA;
+                hrow_w2[56 + g] = hrow[56 + GA + g];
+            }
+            CK(cudaMemcpyAsync(b.tok, hrow_w2, (size_t) TB * 4, cudaMemcpyHostToDevice, st));
+            CK(cudaMemcpyAsync(b.d_rcell, hrow_w2 + 8, (size_t) TB * 4, cudaMemcpyHostToDevice, st));
+            CK(cudaMemcpyAsync(b.d_rslot, hrow_w2 + 16, (size_t) TB * 4, cudaMemcpyHostToDevice, st));
+            CK(cudaMemcpyAsync(b.d_rdelta, hrow_w2 + 24, (size_t) TB * 4, cudaMemcpyHostToDevice, st));
+            CK(cudaMemcpyAsync(b.d_gslot, hrow_w2 + 40, (size_t) GB * 4, cudaMemcpyHostToDevice, st));
+            CK(cudaMemcpyAsync(b.d_grow0, hrow_w2 + 48, (size_t) GB * 4, cudaMemcpyHostToDevice, st));
+            CK(cudaMemcpyAsync(b.d_gcnt, hrow_w2 + 56, (size_t) GB * 4, cudaMemcpyHostToDevice, st));
+            forward_pair(a, b, TA, TB, pmax, verify);
+            rows_G = G;   // (forward_pair left window a's view loaded: the engine's own buffers; the groups are all of them again)
+        } else {
+            run_graph_key((verify ? 1000 : 0) + G * 10 + (T - G), [&] { forward(T, pmax, T, use_graph, verify); });
+        }
         rows_deferred = false;
         rows_mode = false;
         CK(cudaMemcpyAsync(hrow + 32, pick, (size_t) T * 4, cudaMemcpyDeviceToHost, st));
@@ -4878,6 +5064,47 @@ void repack_iq3s_gate_up(Model& m) {
 /// The routed experts after the engine's buffers: all in VRAM when they fit in `vram_gib` (< 0: the free VRAM less a
 /// reserve), else the hybrid mode - every expert in host memory, the same number of VRAM slots per layer, a decode
 /// batch's other experts on the CPU pool and a prompt chunk's streamed through two staging buffers.
+/// STRATA_Q36_STRICT, after the placement and the repack: the experts in VRAM slots and the prefetch guesses stay when every hybrid
+/// layer has strict GPU kernels for its formats, the CPU runs the kernels they reproduce and the device quantizer writes the host
+/// quantizer's bytes. Otherwise the slots are emptied and the prefetch is off, so the CPU computes every expert.
+void setup_strict(Model& m, Engine& E) {
+    if (!E.strict || !m.hybrid) return;
+    namespace C = strata::kernels::cpu;
+    const char* why = nullptr;
+#if defined(STRATA_Q36_CPU_POOL)
+    if (!E.strict_gpu_wanted) why = "STRATA_Q36_STRICT=cpu";
+    else if (E.igpu) why = "the integrated GPU computes experts with its own arithmetic";
+    for (size_t li = 0; why == nullptr && li < E.hy.size(); ++li) {
+        if (!E.lhy(li)) continue;
+        const Layer& L = E.layer_at((int) li);
+        const C::NativeFmt& f = E.hy[li].fmt;
+        if (!K::native_expert_strict_supported(L.L) || !C::native_strict_supported(f, Engine::layer_odd4(L)))
+            why = "a layer's expert formats, or the CPU kernels in use for them, have no strict GPU kernel (IQ3_S gate/up and IQ4_XS down "
+                  "with STRATA_IQ_VBMI=1 do)";
+        else if (!E.probe_dev_quant(f) || !E.probe_dev_quant(f, true))
+            why = "the device quantizer does not write the host quantizer's bytes";
+    }
+#else
+    why = "this build has no CPU expert pool";
+#endif
+    if (why == nullptr) {
+        if (E.d_acts == nullptr) CK(cudaMalloc(&E.d_acts, (size_t) E.tmax * C::kNativeActBytes));
+        C::set_strict_swiglu(true);
+        E.strict_gpu = true;
+        std::fprintf(stderr, "strata-q36: strict mode: the experts in VRAM slots and the guessed experts use the CPU kernels' arithmetic, "
+                     "so an expert gives the same bits wherever it is computed\n");
+        return;
+    }
+    E.pf_n = 0;
+    for (size_t li = 0; li < E.hy.size(); ++li) {
+        Engine::Hy& H = E.hy[li];
+        if (H.slot_of_d == nullptr) continue;
+        std::fill(H.slot_of.begin(), H.slot_of.end(), -1);
+        CK(cudaMemcpy(H.slot_of_d, H.slot_of.data(), H.slot_of.size() * sizeof(int32_t), cudaMemcpyHostToDevice));
+    }
+    std::fprintf(stderr, "strata-q36: strict mode: every routed expert on the CPU, no resident experts and no prefetch (%s)\n", why);
+}
+
 bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid_t, int slots, std::string& err) {
     const auto t0 = Clock::now();
     const auto& g = m.g;
@@ -5083,7 +5310,6 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
             H.exp_in_slot[(size_t) s] = s;
         }
         H.score.assign((size_t) ne, 0.0);
-        if (E.strict) std::fill(H.slot_of.begin(), H.slot_of.end(), -1);   // STRATA_Q36_STRICT: no expert is resident, the CPU computes them all
         CK(cudaMalloc(&H.slot_of_d, (size_t) ne * 4));
         CK(cudaMemcpy(H.slot_of_d, H.slot_of.data(), (size_t) ne * 4, cudaMemcpyHostToDevice));
         if (!C::native_fmt(L.L.gu_type, L.L.d_type, g.n_embd, g.n_ff, H.fmt, err)) return false;
@@ -6269,8 +6495,11 @@ int strata::qwen35::run(int argc, char** argv) {
     E.cpu_experts = std::max(0, cpu_experts_arg);
     if (expert_prefetch_arg < 0)   // no flag: the environment decides; an explicit 0 stays off
         if (const char* pf_env = std::getenv("STRATA_Q36_EXPERT_PREFETCH")) expert_prefetch_arg = std::atoi(pf_env);
-    E.strict = std::getenv("STRATA_Q36_STRICT") != nullptr && std::string(std::getenv("STRATA_Q36_STRICT")) != "0";
-    E.pf_n = E.strict ? 0 : std::max(0, std::min(expert_prefetch_arg, 8));
+    const char* strict_env = std::getenv("STRATA_Q36_STRICT");
+    E.strict = strict_env != nullptr && std::string(strict_env) != "0";
+    E.strict_gpu_wanted = E.strict && std::string(strict_env) != "cpu";
+    if (const char* il = std::getenv("STRATA_Q36_INTERLEAVE")) E.interleave = std::string(il) != "0";
+    E.pf_n = E.strict && !E.strict_gpu_wanted ? 0 : std::max(0, std::min(expert_prefetch_arg, 8));
     if (const char* lead = std::getenv("STRATA_Q36_PF_LEAD")) E.pf_lead = std::atoi(lead) == 2 ? 2 : 1;
     if (vram_reserve_arg >= 0) {
         E.vram_reserve_mib = vram_reserve_arg;
@@ -6290,6 +6519,7 @@ int strata::qwen35::run(int argc, char** argv) {
         return 1;
     }
     repack_iq3s_gate_up(m);
+    setup_strict(m, E);
     E.ckpt_dir = ckpt_dir_arg;
     {
         // the model file and the engine build and cache format

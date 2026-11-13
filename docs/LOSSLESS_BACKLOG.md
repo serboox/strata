@@ -89,15 +89,15 @@ Every switch is off by default. The code of the items below has not been compile
 | L12 platform profile | `apply_platform_profile` (sudo -A fallback) | `--platform-profile NAME` |
 | L7 prefetch two layers ahead | guess for layer li+2 after layer li's router, three rings and three guess buffers, per-layer ready flags | `--prefetch-lead2` |
 | L1 hot experts, elastic | `--resident-experts` (16K window, 300 MiB reserve) and `--kv-lazy TIER`: K/V on CUDA virtual memory, pages mapped as the position grows (`VmmBuf`, `kv_ensure`), the experts' slots sized for the tier, whole layers of slots (with their guess slots, so also with prefetch) given up when the context outgrows it; one session | `--resident-experts`, `--kv-lazy` |
-| L9 dense GPU | the software side only: GPU clock lock (`--gpu-clocks MIN,MAX`, release with `reset`); no kernel was rewritten (they need stall data from Nsight Compute first) | `--gpu-clocks` |
+| L9 dense GPU | GPU clock lock (`--gpu-clocks MIN,MAX`, release with `reset`); the kernels were chosen by an Nsight Systems profile (see the L9 block below): the prefetch guess kernel `k_pf_logits` was rewritten (96 blocks instead of 3, the same bits), the output matrix is read less often through the draft token list, and the strict mode added two expert kernels | `--gpu-clocks`, `--draft-list` |
 | L11 shared arena | the expert staging pair, the prompt attention score buffers and the tails of the row-proportional mixer scratch buffers (the shared region sits on virtual memory, decode keeps only the pages of its 8 rows) are mapped only while a prompt is read (`lent_alloc`, `arena_map`) | `--lend-buffers` |
 | L13 warm guessed experts | prefetcht2 of the guessed experts' first bytes | `--warm-experts KIB` |
-| C1 strict mode | every expert on the CPU: no prefetch, no resident experts | `--strict` |
+| C1 strict mode | the experts in VRAM slots and the guessed experts run GPU kernels with the CPU kernels' arithmetic (`strict_gu_kernel`, `strict_down_kernel`, a shared SwiGLU in `strict_math_impl.hpp`), so an expert gives the same bits wherever it is computed; `--strict-cpu` keeps the first form (every expert on the CPU) | `--strict`, `--strict-cpu` |
 | C2 speculative sampling | `target_distribution`, `judge_sampled`, a judge hook in `spec_step` | `--spec-sampling` |
 | L14 two-stage verify head | `head_rows_pruned`: the listed tokens first, row norms (`k_prune_count`) prove that no other token can beat their best, else the whole matrix; needs `--draft-list` and a Q6_K head; counts hits and misses | `--head2` |
-| C3 two streams | the engine's batch window (`--batch N --batch-mtp`): the rows of N sessions share one pass over the experts; a layer-by-layer interleave of two windows was not written | `--parallel N` |
+| C3 two streams | the engine's batch window (`--batch N --batch-mtp`): the rows of N sessions share one pass over the experts; with `--interleave` the window runs as two windows that alternate layer by layer (`forward_pair`): the GPU computes one window's mixer, router and resident experts while the CPU computes the other window's experts | `--parallel N`, `--interleave` |
 
-C1 is the CPU-bit form only (`--strict`, also an engine mode): the GPU expert kernels were not rewritten to the CPU's rounding.
+C1 and C3 were first written in a reduced form (every expert on the CPU; the batch window only). Their full forms are described in the block "C1 and C3 in full form" below.
 
 ### First model runs of the new switches (13 November 2026)
 
@@ -239,3 +239,44 @@ C1 is the CPU-bit form only (`--strict`, also an engine mode): the GPU expert ke
 - **Concluded.** The token list pays: +6% (the draft head reads 5 to 10% of the output matrix twice a step; the verify pass keeps the whole vocabulary, so the text is the one the engine would write without the list; only the drafts change). It is now a default of `--fast50` when the file exists. Two limits: the list comes from English code, English and Russian docs, so an answer in another language loses drafts (it costs speed, not correctness); and `--draft-list FILE` takes any other list. The faster guess kernel gave +0.2% only: the guess runs while the CPU computes, so it was never on the critical path, the 14.5% of GPU time is idle time that the kernel filled; the rewrite stays (same bits, less GPU busy time, so a little less heat). `--head2` adds 0.7 tok/s (+1.2%): small, and its hit rate is not printed, so it stays opt-in. The next GPU target by this profile is the dense Q4_K matvec (27%), which at 25 us a call is already near the bandwidth of its 1.9 GiB read per step: not rewritten.
 
 **Tool calls of the final set (13 November 2026).** The generated set of `docs/TPS_REPORT.md` E15, against the engine's chat endpoint with nine tools, temperature 0, thinking off, on the dense Q4_K file with 6 experts, prefetch 3, lazy K/V, 64 KiB warm-up, adaptive draft depth, chained drafts, n-gram drafts and the token list: **main set 87 of 89** (the unchanged engine 88, dense Q4_K with 7 experts 88; the two misses are `select` cases, 30 of 32); **hard set 35 of 36** with the scorer that applies the edit and runs the test (the unchanged engine 36, Q4_K with 7 experts 36). A first reading of the hard set gave 26 of 36 and looked like a break of the multi-step chains (`fix_chain` 1 of 10); it was the strict scorer of `tc_hard.py`, which demands that `old_text` be exactly one buggy line and rejects correct edits that quote the whole function. The unchanged engine scores 30 of 36 with it (the same as in November), the final set 26; rescored with the applied-edit scorer (`tc_rescore.py`) the unchanged engine, dense Q4_K with 6 experts and prefetch alone, the lazy K/V cache alone, and the draft switches alone give 36, 35, 36 and 36 of 36, and the whole final set 35 of 36. So the new switches do not hurt the agent tests; the one miss in the hard set is a parallel call that returned one of two calls (as at 6 and 5 experts in November). The HumanEval loss (146 of 164 against 153) therefore stays the cost of dense Q4_K with 6 experts, not of the switches. Lesson for the test scripts: report the applied-edit score next to the strict one, as E15 does.
+
+### C1 and C3 in full form (13 November 2026; code written and compiled, not run with the model yet)
+
+**C1, strict mode on the GPU.** The goal: an expert gives the same bits on the CPU and in a VRAM slot, so the output does not depend on which experts are resident or guessed by the prefetch. What the CPU kernels compute, and what the new GPU kernels repeat:
+
+```
+activation x (n_embd floats) -> Q8_K blocks of 256: int8 values and one float scale per block   (the device quantiser already writes the host's bytes)
+one row of gate, up or down:
+    16 float lanes, all zero
+    for every weight block of 256:
+        lane += fl(d * activation scale) * (exact integer: sum of weight * activation, times the sub-block scales)     one FMA per lane
+    row = the lanes added as _mm512_reduce_add_ps adds them: (i, i+8), then (i, i+4), (i, i+2), (i, i+1)
+h = (gate / (1 + exp(-gate))) * up -> Q8_K -> the down rows the same way
+```
+
+- The integer part is exact on both sides, so only the float steps need the same order: one multiply for the factor, one FMA per block and lane, the fixed add tree. In `strict_gu_kernel` and `strict_down_kernel` (`src/kernels/cuda/iq_kernels.cu`) a warp is one row, lane `column` (0 to 15) is the CPU lane, and the two threads of a column each take half of its products. The float steps use the `_rn` intrinsics, which the compiler never merges.
+- Which weights a lane holds differs by CPU kernel, and the GPU kernel follows the kernel the CPU really runs: an IQ3_S lane (`iq3s_vbmi.cpp`) is the weights 16 L to 16 L + 15 of the block; a 4-bit lane (`iq4xs_vnni.cpp`, also used for gate/up with `--iq3s-4bit`) is, in each half of the block, the weights 4 m to 4 m + 3 and 16 + 4 m to 16 + 4 m + 3 of one sub-block. With `--iq3s-4bit` the slot keeps the IQ3_S rows (the same integers) and the GPU kernel takes the 4-bit lanes.
+- SwiGLU was the open point: the CPU kernels call the C library's `exp`, which a GPU cannot be made to repeat bit for bit without copying one library version. So the strict mode has its own `exp` (`include/strata/kernels/strict_math_impl.hpp`: range reduction and a degree-9 polynomial in double, every step an explicit operation), built once for the CPU (`strict_math.cpp`, compiled with `-ffp-contract=off`) and once for the GPU. In strict mode the IQ3_S and the 4-bit gate/up kernels of the CPU call it. Consequence: the text of `--strict` can differ in rare last bits from the text of `--strict-cpu`, which keeps the C library's `exp`; each of the two is the same on every run and for every placement of the experts.
+- The hidden row h is quantised on the device by the quantiser that already exists for the activations (`q36act`), and a probe at start compares its bytes with the host quantiser's for both sizes.
+- `setup_strict` decides at start. Every hybrid layer must have IQ3_S gate/up and IQ4_XS down, the CPU must run the AVX-512 kernels (`--iq-kernels on`), and both probes must pass. Otherwise the engine says why, empties the slots, turns the prefetch off and computes every expert on the CPU, as `--strict-cpu` does. So the dense Q4_K and Q5_K files keep their dense matrices on the GPU as before (those are not routed experts), and their experts are IQ3_S and IQ4_XS: they qualify.
+- Not covered: prompt chunks larger than the hybrid row limit (they take the streamed MMQ path, as before; the launcher's chunk of 512 rows stays under the limit), and a layer whose experts are all in VRAM (no CPU form to agree with).
+
+**C3, two windows layer by layer.** A layer is now two functions: `layer_front` (mixer, router, the experts the GPU computes, the shared expert: all queued on the stream) and `layer_back` (the CPU pool's experts, their upload and merge, the end of the MoE block). `forward_pair` runs two windows with this queue order:
+
+```
+front(a, 0), front(b, 0)
+for every layer l:
+    back(a, l)        host: a's experts on the CPU pool      GPU meanwhile: front(b, l)
+    front(a, l + 1)
+    back(b, l)        host: b's experts on the CPU pool      GPU meanwhile: a's merge and front(a, l + 1)
+    front(b, l + 1)
+one pass of the output matrix for the rows of both windows
+```
+
+- `run_rows` splits a batch window of two or more sessions into two halves of its groups. The second window uses the same buffers from its first row on (`WinView`: the residual, the experts' input and output rows, the router results, the host rows of the CPU experts, the verify buffers), so the callers and `commit_rows` see one window; only its row tables, their pinned staging and its routing event are separate.
+- The order keeps each window's `layer_back` next to its `layer_front` of the next layer, because `moe_end` leaves the quantised input of the next layer in a buffer both windows share.
+- The prefetch guesses serve the first window only: the guess slots of a layer hold one window's guess. The routing counts of the second window follow the first one's, so the slot rebalance sees every row.
+- It needs hybrid main layers, no graphs, no overlap switches and no integrated-GPU experts; otherwise the window runs as before. The engine prints one line at the first interleaved window.
+- Expected: the batch window already shares the GPU pass, so the interleave adds the GPU time of a layer that the CPU waited for, about gpu / (gpu + 2 cpu) of a window; with 0.4 ms of GPU and 1.2 ms of CPU a layer that is about +14% on two sessions. Not measured.
+
+**What the first runs must check** (in this order): (1) `tests/iq_vbmi_bench` style check of `strict_swiglu` against the C library on a sweep of inputs (the largest difference in ulps); (2) `--strict` must write the same text for the same prompt with no resident expert (a VRAM reserve that leaves no slot) and with 21 of them, and with the prefetch on and off; (3) `--parallel 2 --interleave` must write the same text per session as `--parallel 2`, then the total tokens a second of both.

@@ -1,4 +1,5 @@
 #include "strata/kernels/cpu/iq3s_vbmi.hpp"
+#include "strata/kernels/cpu/strict_math.hpp"
 
 #define GGML_COMMON_DECL_CPP
 #define GGML_COMMON_IMPL_CPP
@@ -258,6 +259,11 @@ void gu_rows(const uint8_t* blob, size_t gu_row, size_t up_off, int blocks, cons
             row_dot<NT>(up_row, up_row + ahead_bytes, blocks, tables, consts, planes, act_d, up[k]);
         }
         // the exp call clobbers every vector register, so it stays out of the row loop above
+        if (strict_swiglu_on()) {
+            for (int k = 0; k < rows; ++k)
+                for (int t = 0; t < NT; ++t) ff[t][batch + k] = strict_swiglu(gate[k][t], up[k][t]);
+            continue;
+        }
         for (int k = 0; k < rows; ++k)
             for (int t = 0; t < NT; ++t) ff[t][batch + k] = (gate[k][t] / (1.f + std::exp(-gate[k][t]))) * up[k][t];
     }
