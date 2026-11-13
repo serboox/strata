@@ -153,3 +153,19 @@ C1 is the CPU-bit form only (`--strict`, also an engine mode): the GPU expert ke
 
 - **Concluded.** The drop works: the session that stalled before ran clean. The draft switches add nothing on top of the repack (42.8 against 42.6), so for this family `--iq3s-4bit --iq3s-4bit-drop` is the whole setting. The memory price: about 10.6 GiB of anonymous memory for the repacked copy, with the 10 GiB of original gate/up pages dropped from the cache (a prompt chunk then reads them from the SSD again; prompt speed was not measured).
 - **Overall.** The prefetch family is the best measured: `--expert-prefetch 3 --kv-lazy 8192 --warm-experts 64 --mtp-adapt --chain-device --ngram 8,4` at 44.9 tok/s (+22.9%), against 42.8 (+16.8%) for the 4-bit family. They exclude each other (the repack is written for the mapped experts only; the pinned arena keeps IQ3_S). A repack for the pinned arena (CPU jobs reading repacked copies next to the GPU's IQ3_S slots) is the open step that could add the two gains, at a memory cost the machine cannot pay without dropping something else.
+
+### Quality of the new switches (teacher-forced KLD, 13 November 2026)
+
+- **Expected.** The 4-bit repack keeps every weight value, so its output should differ from the baseline only by the order of float additions; the prefetch family should stay near the 0.005 measured for the prefetch in November (GPU rounding of the activations).
+- **Done.** The method of `docs/TPS_REPORT.md` (E6): `strata-q36 --tokens ... --force ... --dump-full-logits`, 40 prompt tokens and 220 forced tokens of this project's text, 261 positions, logits of each setting against the unchanged engine (`--experts mapped`, `STRATA_IQ_VBMI=1`), 2200 MHz cap. A control: the unchanged engine with ggml's own IQ3_S dot (`STRATA_NO_IQ_VBMI=1`) against the same reference, to see how much a pure change of summation order moves the number.
+- **Got.**
+
+  | Setting against the reference | mean KLD | median | same best token | largest KLD |
+  | --- | --- | --- | --- | --- |
+  | the same engine again | 0 | 0 | 100% | 0 |
+  | ggml's IQ3_S dot instead of the vbmi kernel (control: order of sums only) | 0.0042 | 0.0013 | 96.2% | 0.111 |
+  | `--iq3s-4bit` | 0.0044 | 0.0015 | 97.7% | 0.081 |
+  | `--iq3s-4bit --iq3s-4bit-drop` | 0.0044 | 0.0015 | 97.7% | 0.081 |
+  | prefetch 3 + lazy K/V + warm experts | 0.0042 | 0.0016 | 96.9% | 0.069 |
+
+- **Concluded.** The 4-bit repack sits at the noise floor of this test: a change of nothing but the order of float sums (the control) already gives 0.0042, and the repack gives 0.0044. So the repack is as faithful as the IQ3_S kernel is to ggml; no weight changes. The prefetch family is at 0.0042, below the 0.0057 of the November prefetch test and a sixth of what 7 experts cost (0.025). Dropping the original pages changes nothing in the numbers (identical rows). Limits: 261 positions, one text, no task-level check (HumanEval or tool calls) of the final set. The draft switches (`--mtp-adapt`, `--chain-device`, `--ngram`) and `--attn-ahead` do not change the logits of a window (their text was identical in the speed runs).
