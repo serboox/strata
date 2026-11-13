@@ -2600,7 +2600,13 @@ struct Engine {
         };
         auto rows = [&](uint8_t* dev) {
             const size_t width = (size_t) n * row;
-            if (save) CK(cudaMemcpy2DAsync(blob, width, dev, (size_t) ctx * row, width, (size_t) g.n_head_kv, kind, st));
+            if (kv_lazy) {   // only the first n cells of each head have pages: a 2D copy would span the unmapped rest of the range
+                for (int h = 0; h < (int) g.n_head_kv; ++h) {
+                    uint8_t* head_dev = dev + (size_t) h * (size_t) ctx * row;
+                    CK(cudaMemcpyAsync(save ? (void*) (blob + (size_t) h * width) : (void*) head_dev,
+                                       save ? (const void*) head_dev : (const void*) (blob + (size_t) h * width), width, kind, st));
+                }
+            } else if (save) CK(cudaMemcpy2DAsync(blob, width, dev, (size_t) ctx * row, width, (size_t) g.n_head_kv, kind, st));
             else CK(cudaMemcpy2DAsync(dev, (size_t) ctx * row, blob, width, width, (size_t) g.n_head_kv, kind, st));
             blob += width * (size_t) g.n_head_kv;
         };
