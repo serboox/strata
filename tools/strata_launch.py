@@ -16,6 +16,7 @@ from serve.thermal import MAX_LIMIT_C, MIN_LIMIT_C  # noqa: E402
 MODEL_DIR = ROOT / "models" / "qwen3.6-35b-a3b"
 MODEL_FILE = MODEL_DIR / "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
 DENSE_Q5K_FILE = MODEL_DIR / "Qwen3.6-35B-A3B-UD-IQ4_XS-mtp-d5.gguf"
+DENSE_Q4K_FILE = MODEL_DIR / "Qwen3.6-35B-A3B-UD-IQ4_XS-mtp-d4.gguf"
 MODEL_NAME = "qwen3.6-35b-a3b"
 RUN_DIR = ROOT / "run"
 
@@ -81,6 +82,7 @@ IQ_KERNELS_OFF_ENV = {"STRATA_IQ_VBMI": "0"}
 # The setting measured on the author's laptop (i7-11370H, turbo off, 80 C limit): the highest CPU frequency, the pool workers
 # and the pool spin that held 30 tokens per second for minutes instead of 11 to 15; see "The frequency cap" in docs/TUNING.md.
 DEFAULT_CPU_MAX_MHZ = 2100.0
+FAST50_EXPERTS, FAST50_PREFETCH, FAST50_KV_TIER, FAST50_WARM_KIB, FAST50_NGRAM = 6, 3, 8192, 64, "8,4"
 RESIDENT_EXPERTS_CONTEXT = 16384   # tokens; the K/V cache takes 0.18 GiB instead of 0.73 GiB
 RESIDENT_EXPERTS_RESERVE_MIB = 300
 CAPPED_WORKERS = 6
@@ -469,7 +471,9 @@ def plan_memory(protect: bool | None, prewarm: bool | None, io: str, budget: str
 
 
 # Abbreviations that stay accepted although --protect-ram, --prewarm and their --no- forms share these prefixes.
-OLD_ABBREVIATIONS = {"--pro": "--profile", "--n": "--no-limit", "--no": "--no-limit", "--no-": "--no-limit"}
+OLD_ABBREVIATIONS = {"--pro": "--profile", "--n": "--no-limit", "--no": "--no-limit", "--no-": "--no-limit",
+                     "--ch": "--chunk", "--d": "--dry-run", "--dr": "--dry-run", "--mt": "--mtp", "--r": "--ram", "--s": "--sampling",
+                     "--w": "--workers"}
 
 
 def restore_old_abbreviations(arguments: list) -> list:
@@ -555,6 +559,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--iq3s-4bit-drop", action="store_true",
                         help="with --iq3s-4bit, drop the original gate/up pages from the page cache after the repack (saves about 10 GiB of cache; "
                              "a prompt chunk reads them again from the disk; off by default)")
+    parser.add_argument("--fast50", action="store_true",
+                        help="the measured set for a sustained 50 tok/s at a cost in quality (HumanEval 146 of 164 against 153): the dense Q4_K file, 6 experts, "
+                             "prefetch 3, lazy K/V, warm experts, adaptive draft depth, chained drafts and n-gram drafts; every flag given explicitly wins")
     parser.add_argument("--mtp-adapt", action="store_true",
                         help="after a step whose first draft was rejected, verify one draft only in the next step (the text is unchanged; off by default)")
     parser.add_argument("--cpu-adaptive", action="store_true",
@@ -594,6 +601,18 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args(restore_old_abbreviations(sys.argv[1:]))
+    if args.fast50:   # the measured 50 tok/s set (docs/LOSSLESS_BACKLOG.md, "Target 50 tok/s"); every flag given on the command line wins
+        if args.model is None and DENSE_Q4K_FILE.exists():
+            args.model = DENSE_Q4K_FILE
+        if args.experts_used is None:
+            args.experts_used = FAST50_EXPERTS
+        if args.expert_prefetch is None:
+            args.expert_prefetch = FAST50_PREFETCH
+        args.kv_lazy = args.kv_lazy or FAST50_KV_TIER
+        args.warm_experts = args.warm_experts or FAST50_WARM_KIB
+        args.mtp_adapt = True
+        args.chain_device = True
+        args.ngram = args.ngram or FAST50_NGRAM
     if not (args.max_temp == 0 or (math.isfinite(args.max_temp) and MIN_LIMIT_C <= args.max_temp <= MAX_LIMIT_C)):
         parser.error(f"--max-temp must be 0 (off) or from {MIN_LIMIT_C:g} to {MAX_LIMIT_C:g} degrees Celsius, not {args.max_temp:g}")
 
@@ -631,9 +650,9 @@ def main() -> int:
         profile["mtp"] = args.mtp
     if cpu_max_mhz:
         profile["cpu_max_mhz"] = cpu_max_mhz
+        profile["workers"] = CAPPED_WORKERS
     if args.cpu_adaptive and cpu_max_mhz:
         profile["cpu_adaptive"] = True
-        profile["workers"] = CAPPED_WORKERS
     if args.workers:
         profile["workers"] = args.workers
     if args.parallel > 1:
