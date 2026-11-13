@@ -35,6 +35,23 @@ class Fast50Tests(unittest.TestCase):
         self.assertEqual(len(data) % 4, 0)
         self.assertGreater(len(data) // 4, 10000)
 
+    def test_a_running_engine_is_found_with_the_port_of_its_server(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            proc = Path(folder)
+            for pid, comm, parent, cmdline in ((100, "python", 1, b"python\0serve/server.py\0--port\08081\0"),
+                                               (200, "strata-q36", 100, b"strata-q36\0--serve\0"), (300, "bash", 1, b"bash\0")):
+                (proc / str(pid)).mkdir()
+                (proc / str(pid) / "comm").write_text(comm + "\n", encoding="utf-8")
+                (proc / str(pid) / "stat").write_text(f"{pid} ({comm}) S {parent} 0 0\n", encoding="utf-8")
+                (proc / str(pid) / "cmdline").write_bytes(cmdline)
+            (proc / "self").mkdir()
+            engines = strata_launch.running_engines(proc)
+        self.assertEqual(engines, [(200, "8081")])
+        message = strata_launch.other_engine_message(engines)
+        self.assertIn("process 200 on port 8081", message)
+        self.assertIn("--allow-second-engine", message)
+
     def test_the_capped_default_start_uses_the_capped_worker_count(self):
         self.assertEqual(strata_launch.CAPPED_WORKERS, 6)
 

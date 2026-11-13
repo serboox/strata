@@ -102,6 +102,37 @@ MODEL_EXPERTS_USED = 8   # what the Qwen3.6-35B-A3B file routes per token; the e
 DEFAULT_EXPERTS_USED = 7   # mean KLD about 0.025 against 8 experts, a step about 10 percent shorter (docs/TPS_REPORT.md)
 
 
+ENGINE_PROCESS = "strata-q36"
+
+
+def running_engines(proc_root: Path = Path("/proc")) -> list[tuple[int, str]]:
+    """The Strata engines that run now, as (process id, port of their server or "" when it cannot be read)."""
+    found = []
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            if (entry / "comm").read_text(encoding="utf-8").strip() != ENGINE_PROCESS:
+                continue
+            parent = int((entry / "stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()[1])
+            server_args = (proc_root / str(parent) / "cmdline").read_bytes().split(b"\0")
+        except (OSError, ValueError, IndexError):
+            continue
+        port = ""
+        for at, word in enumerate(server_args[:-1]):
+            if word == b"--port":
+                port = server_args[at + 1].decode("ascii", "replace")
+        found.append((int(entry.name), port))
+    return found
+
+
+def other_engine_message(engines: list[tuple[int, str]]) -> str:
+    """What to tell the user who starts a second server: the card holds the weights and slots of one engine only."""
+    described = ", ".join(f"process {pid}" + (f" on port {port}" if port else "") for pid, port in engines)
+    return (f"strata-launch: a Strata engine is already running ({described}) and the graphics card has room for one. "
+            "Use that server (spi keeps its own on port 8081 while it runs) or stop it first; --allow-second-engine starts anyway.")
+
+
 def default_model_file() -> Path:
     """The file served when --model is not given: the dense Q5_K variant of the IQ4_XS file (made with tools/requant_dense.py) when it
     exists, else the Q4_K_XL file."""
@@ -609,6 +640,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=int, default=8080)
     parser.add_argument("--no-limit", action="store_true", help="do not run the server in a memory-limited cgroup")
     parser.add_argument("--dry-run", action="store_true", help="write the config and print the command, start nothing")
+    parser.add_argument("--allow-second-engine", action="store_true",
+                        help="start although another Strata engine runs (it fails with 'out of memory' when the card cannot hold both)")
     return parser
 
 
@@ -743,6 +776,11 @@ def main() -> int:
     apply_platform_profile(args.platform_profile, args.dry_run)
     apply_gpu_clocks(args.gpu_clocks, args.dry_run)
     apply_priority(args.priority, args.dry_run)
+    if not args.dry_run and not args.allow_second_engine:
+        engines = running_engines()
+        if engines:
+            print(other_engine_message(engines), file=sys.stderr)
+            return 1
     if args.dry_run:
         print(" ".join(command))
         return 0
