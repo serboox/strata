@@ -184,3 +184,24 @@ C1 is the CPU-bit form only (`--strict`, also an engine mode): the GPU expert ke
   | 32K | best set | 27.9 (+1%) | 0.612 | 108.2 |
 
 - **Concluded.** The eviction code ran without an error at both lengths (no out-of-memory message): the slots were given up as the context grew. The gain falls from +22.9% at a short prompt to +16% at 16K and to nothing at 32K, where every resident slot is gone and the attention takes a larger share of the step; the part of the 32K difference that is not noise is the higher draft acceptance (0.612 against 0.568). Prefill is unchanged at both lengths, so the lent buffers cost nothing there. One run per cell, so differences of a few percent are inside the noise. The set is for contexts up to about 16K; beyond that it is neutral.
+
+### Target 50 tok/s with a quality loss accepted (13 November 2026)
+
+- **Expected.** The dense Q4_K file (E4: -14% a step, KLD 0.04) plus fewer experts plus the best switches should pass 50 tok/s; the November maximum stack (Q4_K, 5 experts, prefetch 3) gave 52.1 and 55.4 with resident slots. The open question was whether 50 holds when the package heats.
+- **Done.** `tools/levers_lossless.d/experts_k.json` (K = 7, 6, 5); lever-matrix sessions on `Qwen3.6-35B-A3B-UD-IQ4_XS-mtp-d4.gguf` (dense Q4_K), code prompt, 2200 MHz cap, between two baselines; then a sustained test: 8 requests of 900 tokens back to back with no cool-down (`--cool 90`), at the caps 2200 and 2100 MHz.
+- **Got.** Short requests, cool package (baseline 42.4 tok/s, the dense Q4_K file with 8 experts and no switch): the set `--expert-prefetch 3 --kv-lazy 8192 --warm-experts 64 --mtp-adapt --chain-device --ngram 8,4` with 6 experts 54.8 tok/s (+29.2%, 63 C), with 5 experts 54.7 (+28.7%). Sustained, 8 requests in a row:
+
+  | Cap | Setting | tok/s per request | mean | lowest | peak C |
+  | --- | --- | --- | --- | --- | --- |
+  | 2200 MHz | the unchanged engine on the same file | 42.5, 42.3, 43.1, 42.7, 38.3, 40.7, 34.3, 37.3 | 40.4 | 34.3 | 79 |
+  | 2200 MHz | set + 6 experts | 52.3, 50.9, 51.2, 52.8, 49.9, 51.2, 51.7, 51.5 | 51.4 | 49.9 | 76 |
+  | 2100 MHz | set + 6 experts | 53.2, 52.1, 51.6, 55.8, 49.9, 52.7, 52.1, 51.2 | 52.3 | 49.9 | 76 |
+
+- **Concluded.** 50 tok/s holds under sustained heat: the set stays between 49.9 and 55.8 over eight requests in a row while the unchanged engine on the same file sags from 42 to 34 once the package passes 78 C. 2100 MHz (the launcher's default cap) is slightly faster and cooler than 2200, so the cap stays at its default. Five experts gain nothing over six (54.7 against 54.8), so the quality cost stops at six. The final setting:
+
+  ```
+  bin/strata-serve --model models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp-d4.gguf \
+    --experts-used 6 --expert-prefetch 3 --kv-lazy 8192 --warm-experts 64 --mtp-adapt --chain-device --ngram 8,4
+  ```
+
+  Quality cost (from the November runs of the same ingredients, not of this exact set): dense Q4_K with 6 experts and prefetch 3 gave a mean KLD of 0.066 and the same best token in 90.0% of the positions (E18); the Q5_K variant of 6 experts gave HumanEval 152 of 164 and tool calls 89 of 89 and 36 of 36 (E17). The exact final set has no HumanEval, tool-call or KLD run of its own yet, and its minimum of 49.9 tok/s in one request of each sustained series is a hair under 50: "stable 50" means a mean of 51 to 52 with single requests down to 49.9. Limits: one run per cap, the code prompt only, a short context (the gain was neutral at 32K, see above).

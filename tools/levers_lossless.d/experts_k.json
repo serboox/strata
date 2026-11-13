@@ -1,0 +1,48 @@
+{
+  "name": "experts_k",
+  "lever": 2,
+  "title": "Fewer routed experts per token (changes the output; the target of 50 tok/s accepts the loss)",
+  "variants": [
+    {
+      "name": "k7",
+      "env": {
+        "STRATA_Q36_EXPERTS_USED": "7"
+      },
+      "engine_args": [],
+      "launcher_args": [
+        "--experts-used",
+        "7"
+      ]
+    },
+    {
+      "name": "k6",
+      "env": {
+        "STRATA_Q36_EXPERTS_USED": "6"
+      },
+      "engine_args": [],
+      "launcher_args": [
+        "--experts-used",
+        "6"
+      ]
+    },
+    {
+      "name": "k5",
+      "env": {
+        "STRATA_Q36_EXPERTS_USED": "5"
+      },
+      "engine_args": [],
+      "launcher_args": [
+        "--experts-used",
+        "5"
+      ]
+    }
+  ],
+  "needs": {
+    "build_option": "",
+    "model_file": "the served GGUF (dense Q4_K file for the fastest stack)",
+    "root": false
+  },
+  "quality_check": "tools/kld_experts.py, HumanEval",
+  "parity_check": "",
+  "notes": "K=5 costs a mean KLD of about 0.09, K=4 breaks the code and tool-call tests (docs/TPS_REPORT.md E1, E15)."
+}
