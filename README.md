@@ -120,24 +120,30 @@ on tasks is not measured for this model) and needs about 23 GB of free RAM for f
 better file when a browser and chat programs hold part of the memory; without a cap it is also the faster one (14.7 against 12.9
 tokens per second).
 
-## The default stack: dense Q5_K, 7 experts, prefetch 3
+## The default stack: a sustained 50 tokens per second
 
 `bin/strata-serve` starts the measured fast setting of this model unless told otherwise:
 
-- the file `Qwen3.6-35B-A3B-UD-IQ4_XS-mtp-d5.gguf` when it exists (else the Q4_K_XL file): the IQ4_XS file with the dense matrices
-  (attention, recurrent blocks, shared expert, embeddings, MTP projection) re-quantised from Q8_0 to Q5_K;
+- the file `Qwen3.6-35B-A3B-UD-IQ4_XS-mtp-d4.gguf` when it exists (else the dense Q5_K file, else the Q4_K_XL file): the IQ4_XS file
+  with the dense matrices (attention, recurrent blocks, shared expert, embeddings, MTP projection) re-quantised from Q8_0 to Q4_K;
 - 7 routed experts per token instead of 8 (`--experts-used`);
-- a prefetch of 3 guessed experts per layer to the GPU over PCIe (`--expert-prefetch`), on the `auto` profile.
+- a prefetch of 3 guessed experts per layer to the GPU over PCIe (`--expert-prefetch`), on the `auto` profile;
+- the switches that cost no quality: a K/V cache whose pages follow the position (`--kv-lazy`), a warm-up of the guessed experts,
+  an adaptive draft depth, chained drafts on the device, n-gram drafts and a list of frequent tokens for the draft head.
 
-On the reference laptop (code prompt, MTP 2, 2.2 GHz cap) this takes a decode step from 65 ms to about 53 ms: 44 to 46 against 35 tokens per
-second, at a mean KL divergence of about 0.025 from the unchanged file; HumanEval 150 of 164 against 153, and no loss on the
-generated tool-call tests. The measurements and the other settings that were tried are in [docs/TPS_REPORT.md](docs/TPS_REPORT.md).
+On the reference laptop (code prompt, MTP 2, 2.2 GHz cap) this gives 57 tokens per second on a short request and 54 on average
+over eight requests of 900 tokens back to back (the slowest one 48), against 37 for the unchanged file, at a peak of 77 C.
+The cost: HumanEval 149 of 164 against 153; the dense Q4_K file has a mean KL divergence of about 0.0125 from the unchanged file
+and 7 experts about 0.025. No setting reaches 50 tokens per second with no loss. The measurements are in
+[docs/LOSSLESS_BACKLOG.md](docs/LOSSLESS_BACKLOG.md) and [docs/TPS_REPORT.md](docs/TPS_REPORT.md).
 
 ```sh
 python3 tools/requant_dense.py models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp.gguf \
-    models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp-d5.gguf --groups all --to q5_K     # makes the 16.3 GiB file
-bin/strata-serve --experts-used 8 --expert-prefetch 0                                      # the model's own routing, no prefetch
-bin/strata-serve --model models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp.gguf       # another file, same two settings
+    models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp-d4.gguf --groups all --to q4_K     # makes the dense Q4_K file
+bin/strata-serve --experts-used 8                                                          # gentler: about 50 on average, dips to 43
+bin/strata-serve --no-fast50                                                               # dense Q5_K, 7 experts, prefetch 3 only (44 to 46)
+bin/strata-serve --no-fast50 --experts-used 8 --expert-prefetch 0                          # the model's own routing, no prefetch
+bin/strata-serve --model models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp.gguf       # another file, the same settings
 ```
 
 The prefetch keeps all the experts page-locked in RAM (about 15 GiB) and the server takes about a minute to start. The launcher

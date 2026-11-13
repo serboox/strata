@@ -569,10 +569,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help="with --iq3s-4bit, drop the original gate/up pages from the page cache after the repack (saves about 10 GiB of cache; "
                              "a prompt chunk reads them again from the disk; off by default)")
     parser.add_argument("--fast50", action="store_true",
-                        help="the measured set for a sustained 50 tok/s at a small cost in quality (54 tok/s on average over requests back to back, HumanEval 149 of "
-                             "164 against 153): the dense Q4_K file, 7 experts, prefetch 3, lazy K/V, warm experts, adaptive draft depth, chained drafts, "
-                             "n-gram drafts and the draft token list; every flag given explicitly wins (--experts-used 8: about 50 on average with "
-                             "dips to 43; --experts-used 6: 58 on a short request, HumanEval 146)")
+                        help="the default since 13 November 2026, kept as a flag for old command lines: the measured set for a sustained 50 tok/s at a "
+                             "small cost in quality (54 tok/s on average over requests back to back, HumanEval 149 of 164 against 153): the dense Q4_K "
+                             "file, 7 experts, prefetch 3, lazy K/V, warm experts, adaptive draft depth, chained drafts, n-gram drafts and the draft "
+                             "token list; every flag given explicitly wins (--experts-used 8: about 50 on average with dips to 43; "
+                             "--experts-used 6: 58 on a short request, HumanEval 146)")
+    parser.add_argument("--no-fast50", action="store_true",
+                        help="start without the 50 tok/s set: the dense Q5_K file, 7 experts and prefetch 3 only (the default before 13 November 2026)")
     parser.add_argument("--mtp-adapt", action="store_true",
                         help="after a step whose first draft was rejected, verify one draft only in the next step (the text is unchanged; off by default)")
     parser.add_argument("--cpu-adaptive", action="store_true",
@@ -612,14 +615,18 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     parser = build_parser()
     args = parser.parse_args(restore_old_abbreviations(sys.argv[1:]))
-    if args.fast50:   # the measured 50 tok/s set (docs/LOSSLESS_BACKLOG.md, "Target 50 tok/s"); every flag given on the command line wins
+    # The measured 50 tok/s set (docs/LOSSLESS_BACKLOG.md) is the default start; --no-fast50 gives the stack without it, and every
+    # flag given on the command line wins. --strict-cpu keeps no experts in VRAM, so the set does not apply to it.
+    args.fast50 = not args.no_fast50 and not args.strict_cpu
+    if args.fast50:
         if args.model is None and DENSE_Q4K_FILE.exists():
             args.model = DENSE_Q4K_FILE
         if args.experts_used is None:
             args.experts_used = FAST50_EXPERTS
         if args.expert_prefetch is None:
             args.expert_prefetch = FAST50_PREFETCH
-        args.kv_lazy = args.kv_lazy or FAST50_KV_TIER
+        if args.parallel == 1:   # the lazy K/V cache serves one session
+            args.kv_lazy = args.kv_lazy or FAST50_KV_TIER
         args.warm_experts = args.warm_experts or FAST50_WARM_KIB
         args.mtp_adapt = True
         args.chain_device = True

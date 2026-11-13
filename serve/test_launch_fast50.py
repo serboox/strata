@@ -14,11 +14,15 @@ class Fast50Tests(unittest.TestCase):
 
     def test_the_new_switches_are_off_by_default(self):
         args = self.parse()
-        self.assertFalse(any([args.fast50, args.strict, args.strict_cpu, args.interleave, args.mtp_adapt, args.chain_device, args.spec_sampling, args.iq3s_4bit,
+        self.assertFalse(any([args.no_fast50, args.strict, args.strict_cpu, args.interleave, args.mtp_adapt, args.chain_device, args.spec_sampling, args.iq3s_4bit,
                               args.lend_buffers, args.attn_ahead, args.prefetch_lead2, args.head2, args.resident_experts]))
         self.assertEqual((args.kv_lazy, args.warm_experts, args.ngram, args.parallel), (0, 0, "", 1))
         self.assertIsNone(args.platform_profile)
         self.assertIsNone(args.gpu_clocks)
+
+    def test_the_set_is_the_default_and_no_fast50_or_strict_cpu_turn_it_off(self):
+        source = (ROOT / "tools" / "strata_launch.py").read_text(encoding="utf-8")
+        self.assertIn("args.fast50 = not args.no_fast50 and not args.strict_cpu", source)
 
     def test_the_fast50_constants_are_the_measured_set(self):
         self.assertEqual((strata_launch.FAST50_EXPERTS, strata_launch.FAST50_PREFETCH, strata_launch.FAST50_KV_TIER,

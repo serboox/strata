@@ -126,18 +126,20 @@ it when `spi` ends. The models it may start are listed in `~/.pi/agent-local/loc
 ```json
 {
   "root": "~/path/to/strata",
-  "default": "qwen3.6-35b-a3b-q5k",
+  "default": "qwen3.6-35b-a3b-fast",
   "models": {
-    "qwen3.6-35b-a3b-q5k": {"file": "models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp-d5.gguf"},
-    "qwen3.6-35b-a3b-iq4xs": {"file": "models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp.gguf", "args": ["--experts-used", "8", "--expert-prefetch", "0"]},
-    "qwen3.6-35b-a3b-q4kxl": {"file": "models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf", "args": ["--experts-used", "8", "--expert-prefetch", "0"]}
+    "qwen3.6-35b-a3b-fast": {"file": "models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp-d4.gguf"},
+    "qwen3.6-35b-a3b-q5k": {"file": "models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp-d5.gguf", "args": ["--no-fast50"]},
+    "qwen3.6-35b-a3b-iq4xs": {"file": "models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp.gguf", "args": ["--no-fast50", "--experts-used", "8", "--expert-prefetch", "0"]},
+    "qwen3.6-35b-a3b-q4kxl": {"file": "models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf", "args": ["--no-fast50", "--experts-used", "8", "--expert-prefetch", "0"]}
   }
 }
 ```
 
 A model id is the `id` of an entry in `models.json`, so `/model` in pi lists the same models. The first one (`default`) starts with `spi`.
-The dense Q5_K file is the default because it runs the measured fast setting of the launcher (7 experts per token, a prefetch of 3; see
-"The default stack" in the README); the two entries with `--experts-used 8 --expert-prefetch 0` run their files with the model's own
+The dense Q4_K file is the default because it runs the measured fast setting of the launcher (7 experts per token, a prefetch of 3
+and the draft and cache switches: 54 tokens per second on average over requests back to back; see "The default stack" in the README).
+The launcher applies that setting to any file unless `--no-fast50` is given: the dense Q5_K entry keeps the earlier stack with it, and the two entries with `--experts-used 8 --expert-prefetch 0` run their files with the model's own
 routing and no prefetch, which is what to pick when the output must not differ from the original model's. When another model is chosen with `/model` or `Ctrl+P`, the next request makes the manager finish the request that is running,
 stop the server, start the other one and pass the request on: the first answer after a switch waits for the load, about ten seconds
 with the files in the page cache and longer from the SSD. Only one model is in memory at a time. The manager answers `GET /v1/models`
