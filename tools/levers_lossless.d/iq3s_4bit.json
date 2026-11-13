@@ -1,0 +1,25 @@
+{
+  "name": "iq3s_4bit",
+  "lever": 1,
+  "title": "IQ3_S gate/up repacked into 4-bit codes for the CPU kernel (backlog L3)",
+  "variants": [
+    {
+      "name": "on",
+      "env": {
+        "STRATA_IQ3S_4BIT": "1"
+      },
+      "engine_args": [],
+      "launcher_args": [
+        "--iq3s-4bit"
+      ]
+    }
+  ],
+  "needs": {
+    "build_option": "",
+    "model_file": "the served GGUF (IQ4_XS with MTP)",
+    "root": false
+  },
+  "quality_check": "",
+  "parity_check": "Greedy text identical to the baseline's.",
+  "notes": "Mapped experts only (no --experts pinned). The engine log prints the repack time. Output must equal the baseline's."
+}

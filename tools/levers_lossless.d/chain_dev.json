@@ -1,0 +1,25 @@
+{
+  "name": "chain_dev",
+  "lever": 3,
+  "title": "MTP drafts chained on the device (L6)",
+  "variants": [
+    {
+      "name": "on",
+      "env": {
+        "STRATA_Q36_CHAIN_DEV": "1"
+      },
+      "engine_args": [],
+      "launcher_args": [
+        "--chain-device"
+      ]
+    }
+  ],
+  "needs": {
+    "build_option": "",
+    "model_file": "the served GGUF (IQ4_XS with MTP)",
+    "root": false
+  },
+  "quality_check": "",
+  "parity_check": "Greedy text identical.",
+  "notes": ""
+}

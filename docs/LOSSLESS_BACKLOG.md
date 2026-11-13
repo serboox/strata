@@ -98,3 +98,22 @@ Every switch is off by default. The code of the items below has not been compile
 | C3 two streams | the engine's batch window (`--batch N --batch-mtp`): the rows of N sessions share one pass over the experts; a layer-by-layer interleave of two windows was not written | `--parallel N` |
 
 C1 is the CPU-bit form only (`--strict`, also an engine mode): the GPU expert kernels were not rewritten to the CPU's rounding.
+
+### First model runs of the new switches (13 November 2026)
+
+- **Expected.** L3 about -31% of the IQ3_S gate/up time (microbenchmark); the draft items a few percent on this prompt; the others small.
+- **Done.** `tools/levers_lossless.d/*.json` (one lever each) run through `tools/lever_matrix.py run --each --budget none --prompts code --repeats 2 --warmup 1 --max-tokens 500 --cpu-max-mhz 2200`, between two baselines; IQ4_XS file with the MTP block, the code prompt, package cooled to 55 C before each request. Two runs: the first (L3 only) and the second (the rest).
+- **Got.**
+
+  | Switch | tok/s | against the baselines | Text | Peak C |
+  | --- | --- | --- | --- | --- |
+  | baseline (first run) | 34.1 and 36.5 | drift +6.9% (flagged unstable) | - | 62-64 |
+  | baseline (second run) | 36.5 and 36.6 | drift +0.4% (stable) | - | 62-66 |
+  | `--iq3s-4bit` (L3) | 42.7 and 42.8 | +17% to +25% | differs | 62-63 |
+  | `--mtp-adapt` (L5) | 36.8 | +0.6% | identical | 64 |
+  | `--chain-device` (L6) | 36.6 | +0.2% | identical | 63 |
+  | `--attn-ahead` (L10) | 36.6 | +0.3% | identical | 63 |
+  | `--ngram 8,4` (L8) | 36.7 | +0.5% | identical | 64 |
+  | prefetch 3 + `--warm-experts 64` (L13) | 40.0 | +9.3% (prefetch 3 alone was +10% to +13% in November, not run in this session) | differs (prefetch rounds on the GPU) | 64 |
+
+- **Concluded.** L3 is the one that pays: +17% with a stable baseline, and it runs hot no more than the baseline. Its text differs from the baseline's because the 4-bit kernel adds floats in another order than the IQ3_S kernel (the same reason the IQ3_S kernel itself is not bit-identical to ggml); the quality cost has not been measured (`tools/kld_experts.py` is the check). L5, L6, L8 and L10 are correct (identical text) and inside the noise on this prompt and at a short context: L10 matters at a long context, L8 on text that repeats itself, so they were not measured where they should pay. L13 gave no visible gain over the known prefetch figure; it needs a run next to prefetch 3 alone. Not run yet: L1 (`--kv-lazy`, `--resident-experts`), L4/L14 (need a token list), L7, L11, C2, C3 (`--parallel 2`) and the clock lock.

@@ -1,0 +1,37 @@
+{
+  "name": "ngram",
+  "lever": 5,
+  "title": "n-gram drafts as a second proposer (L8)",
+  "variants": [
+    {
+      "name": "m8",
+      "env": {
+        "STRATA_Q36_NGRAM": "8,4"
+      },
+      "engine_args": [],
+      "launcher_args": [
+        "--ngram",
+        "8,4"
+      ]
+    },
+    {
+      "name": "m6",
+      "env": {
+        "STRATA_Q36_NGRAM": "6,4"
+      },
+      "engine_args": [],
+      "launcher_args": [
+        "--ngram",
+        "6,4"
+      ]
+    }
+  ],
+  "needs": {
+    "build_option": "",
+    "model_file": "the served GGUF (IQ4_XS with MTP)",
+    "root": false
+  },
+  "quality_check": "",
+  "parity_check": "Greedy text identical.",
+  "notes": "Helps on text that repeats itself (the code prompt)."
+}

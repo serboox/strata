@@ -1,0 +1,50 @@
+{
+  "name": "warm_prefetch",
+  "lever": 6,
+  "title": "Prefetch 3 with the guessed experts warmed into the CPU caches (L13)",
+  "variants": [
+    {
+      "name": "w64",
+      "env": {
+        "STRATA_Q36_WARM": "64"
+      },
+      "engine_args": [
+        "--experts",
+        "pinned",
+        "--expert-prefetch",
+        "3"
+      ],
+      "launcher_args": [
+        "--expert-prefetch",
+        "3",
+        "--warm-experts",
+        "64"
+      ]
+    },
+    {
+      "name": "lead2",
+      "env": {
+        "STRATA_Q36_PF_LEAD": "2"
+      },
+      "engine_args": [
+        "--experts",
+        "pinned",
+        "--expert-prefetch",
+        "3"
+      ],
+      "launcher_args": [
+        "--expert-prefetch",
+        "3",
+        "--prefetch-lead2"
+      ]
+    }
+  ],
+  "needs": {
+    "build_option": "",
+    "model_file": "the served GGUF (IQ4_XS with MTP)",
+    "root": false
+  },
+  "quality_check": "",
+  "parity_check": "",
+  "notes": "Compare with prefetch 3 alone (tools/levers.d/expert_prefetch.json p3). About 15 GiB of page-locked RAM."
+}

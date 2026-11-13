@@ -1,0 +1,25 @@
+{
+  "name": "mtp_adapt",
+  "lever": 2,
+  "title": "One draft after a step whose first draft failed (L5)",
+  "variants": [
+    {
+      "name": "on",
+      "env": {
+        "STRATA_Q36_MTP_ADAPT": "1"
+      },
+      "engine_args": [],
+      "launcher_args": [
+        "--mtp-adapt"
+      ]
+    }
+  ],
+  "needs": {
+    "build_option": "",
+    "model_file": "the served GGUF (IQ4_XS with MTP)",
+    "root": false
+  },
+  "quality_check": "",
+  "parity_check": "Greedy text identical.",
+  "notes": "Judge by ms per step as well as tok/s."
+}

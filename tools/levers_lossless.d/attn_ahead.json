@@ -1,0 +1,25 @@
+{
+  "name": "attn_ahead",
+  "lever": 4,
+  "title": "Decode attention loads 16 V cells together (L10)",
+  "variants": [
+    {
+      "name": "on",
+      "env": {
+        "STRATA_Q36_ATTN_AHEAD": "16"
+      },
+      "engine_args": [],
+      "launcher_args": [
+        "--attn-ahead"
+      ]
+    }
+  ],
+  "needs": {
+    "build_option": "",
+    "model_file": "the served GGUF (IQ4_XS with MTP)",
+    "root": false
+  },
+  "quality_check": "",
+  "parity_check": "Greedy text identical.",
+  "notes": "Matters at a long context."
+}
