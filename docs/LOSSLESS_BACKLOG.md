@@ -117,3 +117,25 @@ C1 is the CPU-bit form only (`--strict`, also an engine mode): the GPU expert ke
   | prefetch 3 + `--warm-experts 64` (L13) | 40.0 | +9.3% (prefetch 3 alone was +10% to +13% in November, not run in this session) | differs (prefetch rounds on the GPU) | 64 |
 
 - **Concluded.** L3 is the one that pays: +17% with a stable baseline, and it runs hot no more than the baseline. Its text differs from the baseline's because the 4-bit kernel adds floats in another order than the IQ3_S kernel (the same reason the IQ3_S kernel itself is not bit-identical to ggml); the quality cost has not been measured (`tools/kld_experts.py` is the check). L5, L6, L8 and L10 are correct (identical text) and inside the noise on this prompt and at a short context: L10 matters at a long context, L8 on text that repeats itself, so they were not measured where they should pay. L13 gave no visible gain over the known prefetch figure; it needs a run next to prefetch 3 alone. Not run yet: L1 (`--kv-lazy`, `--resident-experts`), L4/L14 (need a token list), L7, L11, C2, C3 (`--parallel 2`) and the clock lock.
+
+### Prefetch, lazy K/V and the combinations (13 November 2026)
+
+- **Expected.** The singles add: L1 gives resident experts where the 64K K/V cache sat, the draft items add a little, L3 cuts the CPU expert time. Prefetch (needs the experts pinned) and the 4-bit repack (mapped experts only) exclude each other, so two families.
+- **Done.** The lever definitions now sit together in `tools/levers_lossless.d` (9 files); each session is `lever_matrix.py run --levers A,B,C --budget none --prompts code --repeats 2 --warmup 1 --max-tokens 500 --cpu-max-mhz 2200 --max-load 3.5` between two baselines. In the engine, `--kv-lazy` takes a 300 MiB margin instead of 768 MiB (`--vram-reserve` still wins): the first run left 0 resident slots because the old margin ate the room the lazy cache freed.
+- **Got.** Baselines 36.2 to 36.7 tok/s (drift under 1.1%), package 59-66 C throughout.
+
+  | Setting | tok/s | against the baseline | Text |
+  | --- | --- | --- | --- |
+  | prefetch 3 (reference) | 40.3 | +10.1% | differs (GPU rounding) |
+  | prefetch 3 + guess two layers ahead (L7) | 38.3 | +4.6% | differs |
+  | prefetch 3 + lazy K/V, 768 MiB margin (first run) | 39.9 | +9.0%, 0 resident slots | differs |
+  | prefetch 3 + lazy K/V, 300 MiB margin (L1) | 43.8 | +20.4% | differs |
+  | prefetch 3 + lazy K/V + warm experts (64 KiB) + `--mtp-adapt` + `--chain-device` + `--ngram 8,4` | 44.9 | +22.9% | differs |
+  | `--iq3s-4bit` alone (first session) | 42.8 | +17% | differs |
+  | `--iq3s-4bit` + `--mtp-adapt` + `--chain-device` + `--attn-ahead` + `--ngram 8,4` | not measured: the run was aborted by the runner ("other programs are stalling on memory", 15.7%) | - | - |
+
+- **Concluded.**
+  - **Best measured set (family with prefetch):** `--expert-prefetch 3 --kv-lazy 8192 --warm-experts 64 --mtp-adapt --chain-device --ngram 8,4`, 44.9 tok/s, +22.9% against the unchanged engine (36.6) and +11% against prefetch 3 alone. About three quarters of that is L1 (the lazy K/V cache with resident slots), the rest is the draft switches and the warm-up, which are each inside the noise alone and together add about 1.1 tok/s.
+  - **L7 does not pay** (38.3 against 40.3 for prefetch 3 alone): the guess made a layer earlier is no better (22% of the entries from the ring, as before) and the third ring costs a layer of copies. Leave `--prefetch-lead2` off.
+  - **The 4-bit repack costs memory, not 2 GiB:** the engine keeps the GGUF's gate/up bytes (the GPU and prompt paths read them) and adds an anonymous copy of the repacked gate/up, about 10.6 GiB. With the 17 GiB model in the page cache and the desktop, the runner saw memory stalls in the combined session. The first session (+17%) passed. The family needs either that memory free or the original gate/up pages dropped after the repack (not written), and its combination was not measured.
+  - Not compared yet: the best set with the 4-bit family's gain, the quality (KLD) of the 4-bit repack and of the prefetch family, a long-context run for `--attn-ahead` and `--ngram`, the final set on both prompts.

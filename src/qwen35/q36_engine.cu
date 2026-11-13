@@ -4877,7 +4877,9 @@ bool place_experts(Model& m, Engine& E, double vram_gib, int threads, int hybrid
     const size_t stage_bytes = (size_t) std::max(1, std::min<int>(E.mmq_group, (int) ne)) * max_stride + kMmqTail;
     size_t fr = 0, tot = 0;
     CK(cudaMemGetInfo(&fr, &tot));
-    const size_t reserve = ((size_t) E.vram_reserve_mib << 20) + (E.kv_lazy ? E.kv_tier_bytes() : 0);
+    // the lazy K/V cache grows into the room the tier leaves, so a fixed margin of 300 MiB is enough on top of it (--vram-reserve still wins)
+    const size_t base_reserve = E.kv_lazy && !E.vram_reserve_set ? (size_t) 300 << 20 : (size_t) E.vram_reserve_mib << 20;
+    const size_t reserve = base_reserve + (E.kv_lazy ? E.kv_tier_bytes() : 0);
     const size_t budget = vram_gib >= 0 ? (size_t) (vram_gib * (double) (1ull << 30))
                                         : (fr > reserve ? fr - reserve : 0);
     // every expert fits once the packed Q8_0 decode copies are given back (a file a few GiB larger than the card's

@@ -1,0 +1,29 @@
+{
+  "name": "prefetch3",
+  "lever": 6,
+  "title": "Prefetch 3 alone, the reference for L1, L7 and L13",
+  "variants": [
+    {
+      "name": "p3",
+      "env": {},
+      "engine_args": [
+        "--experts",
+        "pinned",
+        "--expert-prefetch",
+        "3"
+      ],
+      "launcher_args": [
+        "--expert-prefetch",
+        "3"
+      ]
+    }
+  ],
+  "needs": {
+    "build_option": "",
+    "model_file": "the served GGUF (IQ4_XS with MTP); about 15 GiB of free RAM for the page-locked experts",
+    "root": false
+  },
+  "quality_check": "",
+  "parity_check": "",
+  "notes": "The reference the next two are read against."
+}

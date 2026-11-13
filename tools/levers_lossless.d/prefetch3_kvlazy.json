@@ -1,0 +1,34 @@
+{
+  "name": "prefetch3_kvlazy",
+  "lever": 4,
+  "title": "Prefetch 3 with the lazy K/V cache and room for 8192 cells (L1)",
+  "variants": [
+    {
+      "name": "tier8k",
+      "env": {
+        "STRATA_Q36_KV_LAZY": "1",
+        "STRATA_Q36_KV_TIER": "8192"
+      },
+      "engine_args": [
+        "--experts",
+        "pinned",
+        "--expert-prefetch",
+        "3"
+      ],
+      "launcher_args": [
+        "--expert-prefetch",
+        "3",
+        "--kv-lazy",
+        "8192"
+      ]
+    }
+  ],
+  "needs": {
+    "build_option": "",
+    "model_file": "the served GGUF (IQ4_XS with MTP); about 15 GiB of free RAM for the page-locked experts",
+    "root": false
+  },
+  "quality_check": "",
+  "parity_check": "",
+  "notes": "Resident slots appear where the 64K K/V cache used to sit; read the engine log for the slots per layer."
+}

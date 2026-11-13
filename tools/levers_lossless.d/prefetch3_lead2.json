@@ -1,0 +1,32 @@
+{
+  "name": "prefetch3_lead2",
+  "lever": 5,
+  "title": "Prefetch 3, guess two layers ahead (L7)",
+  "variants": [
+    {
+      "name": "lead2",
+      "env": {
+        "STRATA_Q36_PF_LEAD": "2"
+      },
+      "engine_args": [
+        "--experts",
+        "pinned",
+        "--expert-prefetch",
+        "3"
+      ],
+      "launcher_args": [
+        "--expert-prefetch",
+        "3",
+        "--prefetch-lead2"
+      ]
+    }
+  ],
+  "needs": {
+    "build_option": "",
+    "model_file": "the served GGUF (IQ4_XS with MTP); about 15 GiB of free RAM for the page-locked experts",
+    "root": false
+  },
+  "quality_check": "",
+  "parity_check": "",
+  "notes": "Read the engine log line 'expert prefetch so far' for the hit rate."
+}
