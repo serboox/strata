@@ -64,7 +64,17 @@ else
         echo "spi: no Strata server on port $PORT and no $MODELS_CONFIG to start one from; start it with bin/strata-serve" >&2
         exit 1
     fi
-    RUN=(pi "$@")
+    # Rules for the model, added to pi's system prompt at every start: ~/.prompt for every project, then .prompt of the project
+    # folder (the later text wins where they disagree). An empty or missing file is skipped; SPI_PROMPT=0 turns this off.
+    PROMPT_ARGS=()
+    PROMPT_FILES=()
+    if [ "${SPI_PROMPT:-1}" != 0 ]; then
+        for file in "$HOME/.prompt" "$CWD/.prompt"; do
+            [ -f "$file" ] && [ -s "$file" ] && { PROMPT_ARGS+=(--append-system-prompt "$file"); PROMPT_FILES+=("$file"); }
+        done
+    fi
+    [ ${#PROMPT_FILES[@]} -gt 0 ] && echo "spi: rules for the model from ${PROMPT_FILES[*]}" >&2
+    RUN=(pi "${PROMPT_ARGS[@]}" "$@")
 fi
 
 SOCK=${XDG_RUNTIME_DIR:-/tmp}/spi-$$.sock
@@ -170,6 +180,8 @@ if [ -n "${SPI_RO:-}" ]; then
     IFS=: read -ra extra <<< "$SPI_RO"
     for dir in "${extra[@]}"; do ARGS+=(--ro-bind "$dir" "$dir"); done
 fi
+# the home folder's .prompt is outside the project: the sandbox sees it read-only unless a writable path below names it
+[ -f "$HOME/.prompt" ] && ARGS+=(--ro-bind "$HOME/.prompt" "$HOME/.prompt")
 # Files or folders outside the project that the sandbox may write: SPI_RW=/path/a:/path/b for one run, and one path per line in
 # $AGENT_DIR/rw-paths for every run ("~/" is the home folder, "#" starts a comment). Each path must exist: a missing file is not
 # created, so a typing error cannot open a new place. A file is bound as it is: a program that replaces it by renaming a new file

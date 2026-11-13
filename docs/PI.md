@@ -235,6 +235,7 @@ cd ~/some/project && spi               # interactive, the local model
 spi -p "list the files here"           # one shot
 spi --shell                            # a shell in the same sandbox: see what the model sees
 SPI_RO=/home/you/.cargo:/home/you/go spi   # more directories, read-only (toolchains the project needs)
+SPI_PROMPT=0 spi                       # do not add ~/.prompt and ./.prompt (rules for the model) to the system prompt
 SPI_RW=/home/you/notes.md spi              # one more file or folder the sandbox may write (it must exist); for every run: a line in ~/.pi/agent-local/rw-paths
 SPI_GH_REPOS=owner/other-repo spi      # more repositories for the read-only gh
 SPI_WEB=0 spi                          # no web access at all
