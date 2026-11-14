@@ -319,3 +319,13 @@ one pass of the output matrix for the rows of both windows
   | `--parallel 2 --strict --interleave` | 18.3 s | 43.7 | one session the same, the other different |
 
 - **Concluded.** C1 works in the engine: the strict mode keeps the slots and the prefetch and its text does not depend on the placement; it costs about 3% of the two-session speed here. C3 does not pay and is not correct yet. It is 19% slower than the plain batch window: two windows of 2 rows double the kernel launches of the GPU side and the jobs of the CPU pool, the second window has no prefetch, and the plain window already shares one pass. And in strict mode one of the two sessions gets a different text, so a fault remains in one window's path (not found: the review of the shared buffers and of the prefetch slots did not show it). `--interleave` stays off by default and should not be used; the next step, if this is taken up again, is to find which window differs with two sessions of the same prompt.
+
+### Eight experts at a steady 50 tok/s: an analysis (14 November 2026, no runs)
+
+`docs/qwen36-eight-experts-50.html` (English and Russian) asks whether all 8 experts can run at a steady 50 tok/s inside 80 C by software alone. It is an analysis of the figures above, not a measurement.
+
+- **Where 8 experts stand.** Dense Q4_K, default switches, 8 requests in a row: mean 50.6, worst 43.1 tok/s (7 experts: 54.3 and 48.2). The dips are pause episodes of the thermal governor.
+- **Heat budget.** The two heat-limited series give about 540 ms of CPU expert time per second (54.3 tok/s x 9.6 ms and 50.6 x 11.0 ms per token, model estimates). Today 8 experts cost about 11.0 ms per token, so about 49 tok/s is steady.
+- **The combination that was never run.** The 4-bit CPU kernel (L3, +17% alone, 9.3 ms less a step) was measured only without resident slots, without the token list and on the Q8_0 dense file. Prefetch excludes it, but prefetch adds only about 5 points of expert entries once 21 slots exist (logs: 3 slots 7.8%, prefetch alone 18.8%, slots and prefetch 28.7%). With the 4-bit kernel and slots, 8 experts cost about 9.3 ms per token, less than today's 7-expert default.
+- **Projection (estimates).** Dense Q4_K with 8 experts: about 60 tok/s short (57 to 63), 55 to 57 in a row; dense Q5_K about 56 short; the original file about 52 short.
+- **Next run.** `bin/strata-serve --experts-used 8 --expert-prefetch 0 --iq3s-4bit --iq3s-4bit-drop` (a launcher dry run shows that the flags combine with the default set); 8 requests of 900 tokens in a row; accept when every request is at or above 50 tok/s with the peak under 80 C. Then HumanEval and the tool-call sets, a pinned form of the repacked copy, and `--cpu-adaptive` against the pauses.

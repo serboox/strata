@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en" data-lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Eight experts at a steady 50 tok/s</title>
+<style>
+:root{color-scheme:light;--bg:#f4f6fb;--card:#fcfcfb;--ink:#16181d;--muted:#52514e;--line:#e2e4ea;--accent:#2a78d6;--soft:#eff6ff;--now:#eb6834;--ok:#1b9e63;--est:#8a6fd8}
+@media (prefers-color-scheme:dark){:root{color-scheme:dark;--bg:#111110;--card:#1a1a19;--ink:#f0efec;--muted:#c3c2b7;--line:#34342f;--accent:#3987e5;--soft:#1d2a3d;--now:#f08a5d;--ok:#3cc48a;--est:#a893ee}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:900px;margin:0 auto;padding:20px 16px 48px}
+h1{font-size:1.65rem;line-height:1.25;margin:.2em 0 .3em}
+h2{font-size:1.2rem;margin:1.7em 0 .5em}
+p,li{margin:.45em 0}
+.muted{color:var(--muted);font-size:.93rem}
+html[data-lang="ru"] .en,html[data-lang="en"] .ru{display:none!important}
+.toggle{display:flex;gap:6px;justify-content:flex-end}
+.toggle button{border:1px solid var(--line);background:var(--card);color:var(--ink);padding:4px 12px;border-radius:999px;cursor:pointer;font:inherit;font-size:.85rem}
+html[data-lang="ru"] .toggle .b-ru,html[data-lang="en"] .toggle .b-en{background:var(--accent);color:#fff;border-color:var(--accent)}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin:12px 0}
+.answer{border-left:5px solid var(--ok);background:var(--soft)}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px;margin:12px 0}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:10px 12px}
+.stat b{display:block;font-size:1.5rem;line-height:1.2}
+.stat span{color:var(--muted);font-size:.86rem}
+.wrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:.92rem}
+th,td{border-bottom:1px solid var(--line);padding:6px 8px;text-align:left;vertical-align:top}
+th{color:var(--muted);font-weight:600}
+td.n,th.n{text-align:right;white-space:nowrap}
+.bars{margin:10px 0 4px}
+.row{display:grid;grid-template-columns:minmax(150px,38%) 1fr 64px;gap:8px;align-items:center;margin:7px 0;font-size:.9rem}
+.track{position:relative;height:18px;background:var(--line);border-radius:5px}
+.fill{position:absolute;left:0;top:0;bottom:0;border-radius:5px;background:var(--now)}
+.fill.ok{background:var(--ok)}
+.fill.est{background:var(--est)}
+.mark{position:absolute;top:-4px;bottom:-4px;width:2px;background:var(--ink)}
+.ml{position:absolute;top:-21px;font-size:.72rem;color:var(--muted);white-space:nowrap}
+.ml.l{transform:translateX(-100%);padding-right:4px}
+.ml.r{padding-left:6px}
+th.n{white-space:normal}
+@media (max-width:560px){table.proj{font-size:.84rem}table.proj td:last-child,table.proj th:last-child{min-width:84px}th,td{padding:6px 4px}}
+.bars{padding-top:20px}
+@media (min-width:561px){table.proj td:last-child,table.proj th:last-child{min-width:150px}}
+td.w{white-space:normal}
+.val{text-align:right;font-variant-numeric:tabular-nums}
+code{background:var(--soft);padding:1px 5px;border-radius:5px;font-size:.88em}
+pre{background:var(--soft);padding:10px 12px;border-radius:8px;overflow-x:auto;font-size:.84rem;margin:.6em 0}
+.tag{display:inline-block;font-size:.75rem;padding:1px 7px;border-radius:999px;border:1px solid var(--line);color:var(--muted);margin-left:4px}
+</style>
+</head>
+<body>
+<main>
+<div class="toggle"><button class="b-en" onclick="setLang('en')">EN</button><button class="b-ru" onclick="setLang('ru')">RU</button></div>
+
+<h1><span class="en">Eight experts at a steady 50 tokens per second: can software alone do it?</span><span class="ru">Восемь экспертов на устойчивых 50 токенах в секунду: хватит ли одной программной части?</span></h1>
+<p class="muted en">Qwen3.6-35B-A3B on the reference laptop (i7-11370H, RTX 3050 Ti 4 GiB, 32 GiB RAM, shared cooler). Analysis of 14 November 2026. No model was run for this page: every projection is an estimate built on the measurements of 12 and 13 November in <code>docs/LOSSLESS_BACKLOG.md</code>.</p>
+<p class="muted ru">Qwen3.6-35B-A3B на эталонном ноутбуке (i7-11370H, RTX 3050 Ti 4 ГиБ, 32 ГиБ ОЗУ, общий кулер). Анализ от 14 ноября 2026. Для этой страницы модель не запускалась: все прогнозы — оценки по замерам 12 и 13 ноября из <code>docs/LOSSLESS_BACKLOG.md</code>.</p>
+
+<div class="card answer">
+<p class="en"><b>Answer: probably yes</b> (my estimate: about 3 chances in 4), and most likely without new engine code. With today's switches 8 experts average 50.6 tok/s over requests back to back and fall to 43.1, so they are not steady. One measured item was never combined with the rest: the CPU kernel that reads the IQ3_S gate/up matrices as 4-bit codes (+17% alone, same weights). With it, 8 experts need less CPU time per token than today's 7-expert default, which holds 54 tok/s. Projection: about 60 tok/s on a short request and 55 to 57 sustained, inside 80 C. One sustained run has to confirm it.</p>
+<p class="ru"><b>Ответ: скорее да</b> (моя оценка: примерно 3 шанса из 4), и, вероятнее всего, без нового кода в движке. С сегодняшними флагами 8 экспертов дают в среднем 50,6 ток/с на запросах подряд и проваливаются до 43,1, то есть устойчивости нет. Один измеренный пункт ни разу не сочетался с остальными: ядро CPU, читающее матрицы gate/up формата IQ3_S как 4-битные коды (+17% в одиночку, те же веса). С ним 8 экспертов требуют меньше времени CPU на токен, чем сегодняшние 7 экспертов по умолчанию, которые держат 54 ток/с. Прогноз: около 60 ток/с на коротком запросе и 55–57 устойчиво, в пределах 80 °C. Подтвердить должен один устойчивый прогон.</p>
+</div>
+
+<div class="stats">
+<div class="stat"><b>50.6 / 43.1</b><span class="en">tok/s today with 8 experts: mean and worst of 8 requests in a row (measured)</span><span class="ru">ток/с сегодня с 8 экспертами: среднее и худший из 8 запросов подряд (замер)</span></div>
+<div class="stat"><b>≈ 60</b><span class="en">tok/s projected on a short request, range 57 to 63 (estimate)</span><span class="ru">ток/с по прогнозу на коротком запросе, диапазон 57–63 (оценка)</span></div>
+<div class="stat"><b>55–57</b><span class="en">tok/s projected for requests back to back (estimate)</span><span class="ru">ток/с по прогнозу на запросах подряд (оценка)</span></div>
+<div class="stat"><b>77 °C</b><span class="en">package peak in every sustained run of the switch sets (measured; the limit is 80)</span><span class="ru">пик корпуса процессора во всех устойчивых прогонах наборов (замер; предел 80)</span></div>
+</div>
+
+<h2><span class="en">1. What is measured</span><span class="ru">1. Что измерено</span></h2>
+<p class="en">Dense Q4_K file, code prompt, the default switches (prefetch 3, lazy K/V with resident slots, draft switches, token list). Short: 3 requests of 700 tokens with a cool-down. In a row: 8 requests of 900 tokens with no cool-down, 2200 MHz cap.</p>
+<p class="ru">Файл с плотными матрицами Q4_K, кодовый запрос, флаги по умолчанию (prefetch 3, ленивый K/V с резидентными слотами, флаги черновиков, список токенов). Коротко: 3 запроса по 700 токенов с охлаждением. Подряд: 8 запросов по 900 токенов без охлаждения, потолок 2200 МГц.</p>
+<div class="wrap"><table>
+<tr><th><span class="en">Experts per token</span><span class="ru">Экспертов на токен</span></th><th class="n"><span class="en">Short</span><span class="ru">Коротко</span></th><th class="n"><span class="en">In a row: mean</span><span class="ru">Подряд: среднее</span></th><th class="n"><span class="en">Worst request</span><span class="ru">Худший запрос</span></th><th class="n"><span class="en">Peak</span><span class="ru">Пик</span></th></tr>
+<tr><td>6 <span class="tag en">in a row: without the token list</span><span class="tag ru">подряд: без списка токенов</span></td><td class="n">58.2</td><td class="n">51.4</td><td class="n">49.9</td><td class="n">76 °C</td></tr>
+<tr><td>7 <span class="tag en">today's default</span><span class="tag ru">сейчас по умолчанию</span></td><td class="n">57.3</td><td class="n">54.3</td><td class="n">48.2</td><td class="n">77 °C</td></tr>
+<tr><td><b>8</b></td><td class="n"><b>55.2</b></td><td class="n"><b>50.6</b></td><td class="n"><b>43.1</b></td><td class="n">77 °C</td></tr>
+</table></div>
+<p class="muted en">One session each. The 8-expert series ran last, on a chassis that had been under load for about an hour. The unchanged engine on the same file sagged from 42 to 34 tok/s in its series (peak 79 C).</p>
+<p class="muted ru">По одной сессии на строку. Серия с 8 экспертами шла последней, на корпусе, который был под нагрузкой около часа. Неизменённый движок на том же файле в своей серии просел с 42 до 34 ток/с (пик 79 °C).</p>
+
+<h2><span class="en">2. Why 8 experts dip</span><span class="ru">2. Почему 8 экспертов проваливаются</span></h2>
+<ul class="en">
+<li>The 80 C limit is held by a governor that <b>pauses</b> the engine when the package is about to reach it. It acts ahead, so the peak stays at 77 C; each dip in a series is a pause episode. A pause costs speed one to one.</li>
+<li>Most of the heat is the CPU expert kernels. The chart shows the CPU expert time per generated token (a model estimate: about 42 of the 65 ms of the unchanged step are CPU experts, 928 expert entries a step; the 4-bit kernel saves the measured 9.3 ms).</li>
+<li>The two heat-limited series give the cooler's budget: 54.3 tok/s × 9.6 ms = 521 ms and 50.6 × 11.0 = 557 ms of CPU expert time per second, so <b>about 540 ms a second</b> at 2200 MHz with the GPU busy. Steady speed is then about 540 divided by the milliseconds per token: 49 tok/s for 8 experts today, 56 for 7.</li>
+</ul>
+<ul class="ru">
+<li>Предел 80 °C держит регулятор, который <b>ставит движок на паузу</b>, когда корпус вот-вот его достигнет. Он действует с упреждением, поэтому пик остаётся на 77 °C; каждый провал в серии — эпизод пауз. Пауза отнимает скорость один к одному.</li>
+<li>Основное тепло дают ядра экспертов на CPU. На диаграмме время экспертов CPU на один сгенерированный токен (оценка по модели: около 42 из 65 мс неизменённого шага — эксперты CPU, 928 записей экспертов на шаг; 4-битное ядро экономит измеренные 9,3 мс).</li>
+<li>Две серии, упёршиеся в тепло, дают бюджет кулера: 54,3 ток/с × 9,6 мс = 521 мс и 50,6 × 11,0 = 557 мс времени экспертов CPU в секунду, то есть <b>около 540 мс в секунду</b> при 2200 МГц и занятом GPU. Устойчивая скорость тогда примерно равна 540, делённым на миллисекунды на токен: 49 ток/с для 8 экспертов сегодня, 56 для 7.</li>
+</ul>
+<div class="card">
+<b class="en">CPU expert time per generated token, ms (estimate)</b><b class="ru">Время экспертов CPU на сгенерированный токен, мс (оценка)</b>
+<div class="bars">
+<div class="row"><span><span class="en">unchanged engine, 8 experts</span><span class="ru">неизменённый движок, 8 экспертов</span></span><div class="track"><div class="fill" style="width:95.3%"></div><div class="mark" style="left:63.5%"></div><div class="mark" style="left:57.6%"></div><span class="ml l" style="left:57.6%">55</span><span class="ml r" style="left:63.5%">50 <span class="en">tok/s</span><span class="ru">ток/с</span></span></div><span class="val">16.2</span></div>
+<div class="row"><span><span class="en">8 experts, today's switches</span><span class="ru">8 экспертов, сегодняшние флаги</span></span><div class="track"><div class="fill" style="width:64.7%"></div><div class="mark" style="left:63.5%"></div><div class="mark" style="left:57.6%"></div></div><span class="val">11.0</span></div>
+<div class="row"><span><span class="en">7 experts, today's default</span><span class="ru">7 экспертов, сейчас по умолчанию</span></span><div class="track"><div class="fill ok" style="width:56.5%"></div><div class="mark" style="left:63.5%"></div><div class="mark" style="left:57.6%"></div></div><span class="val">9.6</span></div>
+<div class="row"><span><span class="en">6 experts</span><span class="ru">6 экспертов</span></span><div class="track"><div class="fill ok" style="width:48.8%"></div><div class="mark" style="left:63.5%"></div><div class="mark" style="left:57.6%"></div></div><span class="val">8.3</span></div>
+<div class="row"><span><b class="en">8 experts, 4-bit kernel + resident slots</b><b class="ru">8 экспертов, 4-битное ядро + слоты</b></span><div class="track"><div class="fill est" style="width:54.7%"></div><div class="mark" style="left:63.5%"></div><div class="mark" style="left:57.6%"></div></div><span class="val">9.3</span></div>
+</div>
+<p class="muted en">The two vertical marks are the heat budget: up to 10.8 ms per token allows a steady 50 tok/s, up to 9.8 ms allows 55. A bar that ends left of a mark fits under it.</p>
+<p class="muted ru">Две вертикальные отметки — тепловой бюджет: до 10,8 мс на токен позволяют устойчивые 50 ток/с, до 9,8 мс — 55. Столбец, который кончается левее отметки, в неё укладывается.</p>
+</div>
+
+<h2><span class="en">3. The combination that was never run</span><span class="ru">3. Сочетание, которое ни разу не запускалось</span></h2>
+<ul class="en">
+<li><b>The 4-bit CPU kernel</b> (<code>--iq3s-4bit</code>, item L3) stores the same IQ3_S weights as 4-bit codes. Measured alone on the original file: 36.6 to 42.7 tok/s (+17%), 9.3 ms less a step, quality at the noise floor (KLD 0.0044 against 0.0042 for a control run).</li>
+<li>It was measured only with <b>no resident slots, no token list and the Q8_0 dense matrices</b>. The resident slots (lazy K/V) and the token list were measured only in the other family, with prefetch. The two families exclude each other: prefetch needs the experts pinned in IQ3_S form, the repack works on mapped experts.</li>
+<li><b>Prefetch adds little once slots exist.</b> Engine logs of 13 November: 3 slots a layer take 7.8% of the expert entries, prefetch alone 18.8%, 21 slots with prefetch 28.7%. So 21 slots alone take about 23% (my estimate, 20 to 26%): prefetch adds about 5 points.</li>
+<li>A step model with these shares gives 41 and 44 tok/s for "prefetch" and "prefetch + slots"; the measured figures are 40.3 and 43.8. The same model gives the projections below.</li>
+</ul>
+<ul class="ru">
+<li><b>4-битное ядро CPU</b> (<code>--iq3s-4bit</code>, пункт L3) хранит те же веса IQ3_S в виде 4-битных кодов. Замер в одиночку на исходном файле: с 36,6 до 42,7 ток/с (+17%), на 9,3 мс короче шаг, качество на уровне шума (KLD 0,0044 против 0,0042 у контрольного прогона).</li>
+<li>Оно измерялось только <b>без резидентных слотов, без списка токенов и с плотными матрицами Q8_0</b>. Резидентные слоты (ленивый K/V) и список токенов измерялись только в другом семействе, с prefetch. Семейства исключают друг друга: prefetch требует экспертов, закреплённых в памяти в формате IQ3_S, а перепаковка работает с отображёнными в память экспертами.</li>
+<li><b>Prefetch мало добавляет, когда есть слоты.</b> Логи движка от 13 ноября: 3 слота на слой берут 7,8% записей экспертов, один prefetch — 18,8%, 21 слот вместе с prefetch — 28,7%. Значит, 21 слот сам по себе берёт около 23% (моя оценка, 20–26%): prefetch добавляет около 5 пунктов.</li>
+<li>Модель шага с этими долями даёт 41 и 44 ток/с для «prefetch» и «prefetch + слоты»; замеры — 40,3 и 43,8. Та же модель даёт прогнозы ниже.</li>
+</ul>
+
+<h2><span class="en">4. Projection for 8 experts</span><span class="ru">4. Прогноз для 8 экспертов</span></h2>
+<p class="en">"Projected" is the 4-bit kernel with resident slots and the token list (the command of step 1 in section 5); the second line of a cell is the range. With the original file the model's quality does not change at all.</p>
+<p class="ru">«Прогноз» — это 4-битное ядро с резидентными слотами и списком токенов (команда шага 1 из раздела 5); вторая строка ячейки — диапазон. С исходным файлом качество модели не меняется вовсе.</p>
+<div class="wrap"><table class="proj">
+<tr><th><span class="en">Dense matrices</span><span class="ru">Плотные матрицы</span></th><th class="n"><span class="en">Measured today, short</span><span class="ru">Замер сегодня, коротко</span></th><th class="n"><span class="en">Projected, short</span><span class="ru">Прогноз, коротко</span></th><th class="n"><span class="en">In a row</span><span class="ru">Подряд</span></th><th><span class="en">Steady 50?</span><span class="ru">Устойчивые 50?</span></th></tr>
+<tr><td><b>Q4_K</b></td><td class="n">55.2</td><td class="n"><b>≈ 60</b><br><span class="muted">57–63</span></td><td class="n"><b>55–57</b></td><td><span class="en">likely (3 in 4)</span><span class="ru">вероятно (3 из 4)</span></td></tr>
+<tr><td>Q5_K</td><td class="n">51.4</td><td class="n">≈ 56<br><span class="muted">53–59</span></td><td class="n">52–54</td><td><span class="en">on the edge (1 in 2)</span><span class="ru">на грани (1 из 2)</span></td></tr>
+<tr><td>Q8_0<br><span class="muted en">original file</span><span class="muted ru">исходный файл</span></td><td class="n">≈ 47.6*</td><td class="n">≈ 52<br><span class="muted">49–55</span></td><td class="n">48–50</td><td><span class="en">unlikely (1 in 4)</span><span class="ru">маловероятно (1 из 4)</span></td></tr>
+</table></div>
+<p class="muted en">* 44.9 was measured without the token list; the list adds about 6%. All projections are estimates. "In a row" takes 4% off for the longer requests and then applies the heat budget of section 2. With 8 experts on the Q4_K file the only change against the original model is the dense matrices: mean KLD about 0.0125, twice the noise floor (7 experts: about 0.025).</p>
+<p class="muted ru">* 44,9 измерено без списка токенов; список добавляет около 6%. Все прогнозы — оценки. «Подряд» — минус 4% на более длинные запросы и затем тепловой бюджет из раздела 2. С 8 экспертами на файле Q4_K единственное отличие от исходной модели — плотные матрицы: средний KLD около 0,0125, вдвое выше шума (7 экспертов: около 0,025).</p>
+
+<h2><span class="en">5. Plan</span><span class="ru">5. План</span></h2>
+<ol class="en">
+<li><b>One run, no code.</b> A launcher dry run shows that the flags combine (dense Q4_K file, 8 experts, mapped experts, lazy K/V, draft switches, token list, 2100 MHz cap):
+<pre>bin/strata-serve --experts-used 8 --expert-prefetch 0 --iq3s-4bit --iq3s-4bit-drop</pre>
+Accept if all 8 requests of 900 tokens in a row stay at or above 50 tok/s with a peak under 80 C. Then HumanEval and the tool-call sets for this setting, and it can become the default.</li>
+<li><b>Make it robust</b> (about a day of engine work). Today the repacked copy is 10.6 GiB of ordinary memory that the desktop can push to swap, and the launcher reports its memory protection as partial. Keep the repacked gate/up and the down matrices in pinned memory, as the prefetch family does; the resident slots keep loading IQ3_S from the file.</li>
+<li><b>Frequency steps instead of pauses.</b> <code>--cpu-adaptive</code> (item L2) lowers the cap by 100 MHz when the package nears 77 C. It is coded and was never measured. A lower frequency removes heat faster than it removes speed, so the dips should turn into a flat line a little under the peak speed. Evidence: 6 experts held 52.3 tok/s at 2100 MHz against 51.4 at 2200.</li>
+<li><b>Small, heat only.</b> The host thread spins on a core while it waits for the GPU. A <code>pause</code> in those loops is bit-exact; its effect on the package is not measured.</li>
+<li><b>Later, optional.</b> A GPU kernel for 4-bit gate/up would let prefetch return on top (estimated +1 to 3%); a repacked model file would remove the repack at start (+1.6 GiB on disk).</li>
+</ol>
+<ol class="ru">
+<li><b>Один прогон, без кода.</b> Пробный запуск лаунчера показывает, что флаги сочетаются (файл Q4_K, 8 экспертов, отображённые эксперты, ленивый K/V, флаги черновиков, список токенов, потолок 2100 МГц):
+<pre>bin/strata-serve --experts-used 8 --expert-prefetch 0 --iq3s-4bit --iq3s-4bit-drop</pre>
+Принять, если все 8 запросов по 900 токенов подряд держатся на 50 ток/с и выше при пике ниже 80 °C. Затем HumanEval и наборы вызовов инструментов для этой настройки, и её можно делать настройкой по умолчанию.</li>
+<li><b>Сделать надёжным</b> (около дня работы над движком). Сейчас перепакованная копия — 10,6 ГиБ обычной памяти, которую рабочий стол может вытеснить в подкачку, а лаунчер сообщает, что защита памяти частичная. Держать перепакованные gate/up и матрицы down в закреплённой памяти, как это делает семейство с prefetch; резидентные слоты по-прежнему загружают IQ3_S из файла.</li>
+<li><b>Шаги частоты вместо пауз.</b> <code>--cpu-adaptive</code> (пункт L2) снижает потолок на 100 МГц, когда корпус подходит к 77 °C. Он написан и ни разу не измерялся. Снижение частоты убирает тепло быстрее, чем скорость, поэтому провалы должны превратиться в ровную линию чуть ниже пиковой скорости. Свидетельство: 6 экспертов держали 52,3 ток/с при 2100 МГц против 51,4 при 2200.</li>
+<li><b>Мелочь, только тепло.</b> Главный поток крутит ядро вхолостую, пока ждёт GPU. Команда <code>pause</code> в этих циклах не меняет ни одного бита; её влияние на температуру не измерено.</li>
+<li><b>Позже, по желанию.</b> Ядро GPU для 4-битных gate/up позволило бы вернуть prefetch поверх (оценка +1–3%); перепакованный файл модели убрал бы перепаковку при старте (+1,6 ГиБ на диске).</li>
+</ol>
+
+<h2><span class="en">6. What can go wrong</span><span class="ru">6. Что может пойти не так</span></h2>
+<ul class="en">
+<li><b>The combination is untested.</b> The 4-bit kernel never ran together with lazy K/V slots, the token list or the Q4_K file. An engine fault there is possible.</li>
+<li><b>The slot share is an estimate.</b> At 20% instead of 23% the short figure falls by about 1 tok/s.</li>
+<li><b>Memory.</b> About 16 GiB must stay in RAM (10.6 GiB repacked copy, 5.7 GiB down matrices). Under desktop memory pressure an unpinned copy stalls the engine; step 2 removes this.</li>
+<li><b>Context length.</b> Every figure is for the short context of the test. Other sets lost about 15 to 20% at a 16K fill and more at 32K; the 4-bit kernel should lose less, because it does not depend on slots that a long context evicts. Not measured.</li>
+<li><b>Session spread.</b> The unchanged engine's mean in a row ranged from 35 to 41 tok/s between sessions of one day. A single series is not a guarantee.</li>
+<li><b>Quality of 8 experts on Q4_K</b> is known from KLD only; HumanEval was measured for 7 experts (149 of 164) and for the unchanged engine (153).</li>
+</ul>
+<ul class="ru">
+<li><b>Сочетание не проверено.</b> 4-битное ядро ни разу не работало вместе со слотами ленивого K/V, списком токенов и файлом Q4_K. Ошибка в движке на этом пути возможна.</li>
+<li><b>Доля слотов — оценка.</b> При 20% вместо 23% короткая цифра падает примерно на 1 ток/с.</li>
+<li><b>Память.</b> В ОЗУ должны оставаться около 16 ГиБ (10,6 ГиБ перепакованной копии, 5,7 ГиБ матриц down). При нехватке памяти у рабочего стола незакреплённая копия подвешивает движок; шаг 2 это убирает.</li>
+<li><b>Длина контекста.</b> Все цифры даны для короткого контекста теста. Другие наборы теряли около 15–20% при заполнении 16K и больше при 32K; 4-битное ядро должно терять меньше, потому что не зависит от слотов, которые длинный контекст вытесняет. Не измерено.</li>
+<li><b>Разброс между сессиями.</b> Среднее неизменённого движка на запросах подряд в течение одного дня колебалось от 35 до 41 ток/с. Одна серия — не гарантия.</li>
+<li><b>Качество 8 экспертов на Q4_K</b> известно только по KLD; HumanEval измерен для 7 экспертов (149 из 164) и для неизменённого движка (153).</li>
+</ul>
+
+<h2><span class="en">7. Not proposed</span><span class="ru">7. Что не предлагается</span></h2>
+<p class="en">Nothing here touches hardware or raises a clock: the frequency cap stays at 2.1 to 2.2 GHz and turbo stays off. The firmware's platform profile is <code>low-power</code> now; a higher profile would probably give the fans more room, but the owner declined that test earlier, so it is not part of this plan.</p>
+<p class="ru">Ничто здесь не трогает железо и не поднимает частоты: потолок остаётся на 2,1–2,2 ГГц, турбо выключено. Профиль платформы в прошивке сейчас <code>low-power</code>; более высокий профиль, вероятно, дал бы вентиляторам больше запаса, но владелец ранее отказался от этого теста, поэтому в план он не входит.</p>
+</main>
+<script>
+function setLang(l){document.documentElement.setAttribute('data-lang',l);document.documentElement.lang=l;try{localStorage.setItem('strata-doc-lang',l)}catch(e){}}
+try{var s=localStorage.getItem('strata-doc-lang');if(s==='ru'||s==='en')setLang(s)}catch(e){}
+</script>
+</body>
+</html>
