@@ -175,27 +175,36 @@ for f in passwd group nsswitch.conf hosts localtime ssl pki ld.so.cache ld.so.co
 done
 ARGS+=("${GH_ARGS[@]}" "${WEB_ARGS[@]}")
 [ -n "${COLORTERM:-}" ] && ARGS+=(--setenv COLORTERM "$COLORTERM")
-# SPI_RO=/path/a:/path/b: more directories, read-only (toolchains the project needs); PATH entries stay yours to set
-if [ -n "${SPI_RO:-}" ]; then
-    IFS=: read -ra extra <<< "$SPI_RO"
-    for dir in "${extra[@]}"; do ARGS+=(--ro-bind "$dir" "$dir"); done
-fi
-# the home folder's .prompt is outside the project: the sandbox sees it read-only unless a writable path below names it
-[ -f "$HOME/.prompt" ] && ARGS+=(--ro-bind "$HOME/.prompt" "$HOME/.prompt")
-# Files or folders outside the project that the sandbox may write: SPI_RW=/path/a:/path/b for one run, and one path per line in
-# $AGENT_DIR/rw-paths for every run ("~/" is the home folder, "#" starts a comment). Each path must exist: a missing file is not
-# created, so a typing error cannot open a new place. A file is bound as it is: a program that replaces it by renaming a new file
-# over it gets an error, writing into it works.
-RW_PATHS=()
-[ -n "${SPI_RW:-}" ] && IFS=: read -ra RW_PATHS <<< "$SPI_RW"
-if [ -f "$AGENT_DIR/rw-paths" ]; then
+# one path per line of a list file ("~/" is the home folder, "#" starts a comment, a trailing "/" is dropped)
+read_path_list() {
+    local line
+    [ -f "$1" ] || return 0
     while IFS= read -r line || [ -n "$line" ]; do
         line=${line%%#*}
         line=${line#"${line%%[![:space:]]*}"}
         line=${line%"${line##*[![:space:]]}"}
-        [ -n "$line" ] && RW_PATHS+=("${line/#\~\//$HOME/}")
-    done < "$AGENT_DIR/rw-paths"
-fi
+        line=${line/#\~\//$HOME/}
+        [ -n "$line" ] && printf '%s\n' "${line%/}"
+    done < "$1"
+    return 0
+}
+# More files and folders outside the project, read-only (toolchains the project needs, folders to read): SPI_RO=/path/a:/path/b for one
+# run, and one path per line in $AGENT_DIR/ro-paths for every run. A path that does not exist is skipped with a warning.
+RO_PATHS=()
+[ -n "${SPI_RO:-}" ] && IFS=: read -ra RO_PATHS <<< "$SPI_RO"
+mapfile -t -O "${#RO_PATHS[@]}" RO_PATHS < <(read_path_list "$AGENT_DIR/ro-paths")
+for path in "${RO_PATHS[@]}"; do
+    case "$path" in /*) ;; *) echo "spi: a read-only path must be absolute, not $path" >&2; exit 1 ;; esac
+    if [ -e "$path" ]; then ARGS+=(--ro-bind "$path" "$path"); else echo "spi: warning: the read-only path $path does not exist, skipped" >&2; fi
+done
+# the home folder's .prompt is outside the project: the sandbox sees it read-only unless a writable path below names it
+[ -f "$HOME/.prompt" ] && ARGS+=(--ro-bind "$HOME/.prompt" "$HOME/.prompt")
+# Files or folders outside the project that the sandbox may write: SPI_RW=/path/a:/path/b for one run, and one path per line in
+# $AGENT_DIR/rw-paths for every run. Each path must exist: a missing file is not created, so a typing error cannot open a new place.
+# A file is bound as it is: a program that replaces it by renaming a new file over it gets an error, writing into it works.
+RW_PATHS=()
+[ -n "${SPI_RW:-}" ] && IFS=: read -ra RW_PATHS <<< "$SPI_RW"
+mapfile -t -O "${#RW_PATHS[@]}" RW_PATHS < <(read_path_list "$AGENT_DIR/rw-paths")
 for path in "${RW_PATHS[@]}"; do
     case "$path" in /*) ;; *) echo "spi: a writable path must be absolute, not $path" >&2; exit 1 ;; esac
     [ -e "$path" ] || { echo "spi: the writable path $path does not exist (create it first)" >&2; exit 1; }
