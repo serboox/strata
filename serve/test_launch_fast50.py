@@ -34,19 +34,19 @@ class Fast50Tests(unittest.TestCase):
                   "overlap": False, "igpu_experts": False}
         return strata_launch.choose_fast_family(**{**values, **changes})
 
-    def test_the_default_start_needs_the_models_size_plus_the_repack_margin(self):
+    def test_the_default_start_needs_the_models_size_plus_the_protect_margin(self):
         gib = strata_launch.GIB
-        needed = 16 * gib + strata_launch.REPACK_MARGIN
+        needed = 16 * gib + strata_launch.PROTECT_MARGIN
         self.assertEqual(self.choose(available=needed), ("repack", []))
         with self.assertRaises(strata_launch.NotEnoughMemory) as caught:
             self.choose(available=needed - 1)
-        self.assertIn("the default start needs 22.0 GiB", str(caught.exception))
+        self.assertIn("the default start needs 18.0 GiB", str(caught.exception))
         with self.assertRaises(strata_launch.NotEnoughMemory):
             self.choose(available=None)
 
     def test_a_memory_budget_below_the_need_refuses_too(self):
         gib = strata_launch.GIB
-        needed = 16 * gib + strata_launch.REPACK_MARGIN
+        needed = 16 * gib + strata_launch.PROTECT_MARGIN
         with self.assertRaises(strata_launch.NotEnoughMemory) as caught:
             self.choose(budget=needed - 1)
         self.assertIn("memory budget", str(caught.exception))

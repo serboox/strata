@@ -129,9 +129,12 @@ tokens per second).
 - the switches that cost no quality: a K/V cache whose pages follow the position (`--kv-lazy`), an adaptive draft depth, chained drafts
   on the device, n-gram drafts and a list of frequent tokens for the draft head;
 - all 8 experts per token with the 4-bit repack: the IQ3_S gate/up matrices are repacked into 4-bit codes for the CPU kernel
-  (`--iq3s-4bit --iq3s-4bit-drop`), no prefetch. The start needs free memory of at least the model's size plus 6 GiB, because the
-  repacked copy is ordinary memory and thrashes in the swap with less. Without it the launcher stops with
-  `strata-launch: cannot start: ...` and a hint, and does not start a slower setting on its own;
+  (`--iq3s-4bit --iq3s-4bit-drop`), no prefetch. The engine copies the repacked gate/up matrices and the down matrices into
+  page-locked memory (about 16 GiB), which the kernel can neither swap out nor evict, and the server runs in a scope with
+  `MemorySwapMax=0`, so nothing of the server goes to the swap: programs that need memory give theirs up instead. The start needs
+  free memory of at least the model's size plus 2 GiB; without it the launcher stops with `strata-launch: cannot start: ...` and a
+  hint, and the engine stops with `strata-q36: cannot start: ...` if the page-locked memory cannot be allocated; neither starts a
+  slower setting on its own;
 - a temperature limit of 70 C (`--max-temp`): the engine pauses for part of every half second when the CPU or the GPU nears it.
 
 Measured on the reference laptop (code prompt, MTP 2, 2.2 GHz cap, 80 C limit): the prefetch family gave 57 tokens per second on a short
@@ -139,9 +142,10 @@ request and 54 on average over eight requests of 900 tokens back to back (the sl
 unchanged file; the dense Q4_K file has a mean KL divergence of about 0.0125 from the unchanged file and 7 experts about 0.025.
 Two things are not measured cleanly. Under the **70 C limit** one run of the prefetch family, started on a package that had not cooled, averaged
 32 tokens per second (25 to 52) while the governor paused the engine 20 to 85 percent of the time: the lower limit costs sustained speed on this
-laptop, and `--max-temp 80` gives the figures above. The **repack family** was started once, with 16 GiB free, and thrashed (12 to 44 tokens per
-second, a prompt of 4000 tokens took 178 s, 7 GiB in swap), which is why the start refuses below the model's size plus 6 GiB; it has no measurement with enough
-free memory yet. Details in [docs/LOSSLESS_BACKLOG.md](docs/LOSSLESS_BACKLOG.md) and [docs/TPS_REPORT.md](docs/TPS_REPORT.md).
+laptop, and `--max-temp 80` gives the figures above. The first **repack** start (16 GiB free, memory not yet page-locked) thrashed (12 to 44 tokens per
+second, a prompt of 4000 tokens took 178 s, 7 GiB in swap). With the memory page-locked one start at 21 GiB free gave 53, 59 and 61 tokens per
+second on three requests of 500 tokens with no swap use by the engine (other programs went into the swap instead: 3.9 to 6.8 GiB); no
+sustained series was run. Details in [docs/LOSSLESS_BACKLOG.md](docs/LOSSLESS_BACKLOG.md) and [docs/TPS_REPORT.md](docs/TPS_REPORT.md).
 
 ```sh
 python3 tools/requant_dense.py models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp.gguf \

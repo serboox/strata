@@ -1278,6 +1278,7 @@ struct Layer {
     // expert each; the CPU jobs of the mapped path read these, the GPU paths keep the GGUF's own bytes
     uint8_t *rp_g = nullptr, *rp_u = nullptr;
     size_t rp_gsz = 0;
+    uint8_t* rp_d = nullptr;    // the same layer's down matrices copied next to them: page-locked like rp_g and rp_u, `src_dsz` bytes per expert
     int n_slots = 0;            // hybrid mode: the experts resident in VRAM
     int pf_base = -1;           // expert prefetch: the slot index where this layer's guessed experts go (-1: none)
 };
@@ -3532,6 +3533,8 @@ struct Engine {
     bool strict_on_gpu(size_t li) const { return strict_gpu && !(li < strict_cpu_layer.size() && strict_cpu_layer[li]); }
     /// The CPU computes this layer's gate/up rows with the 4-bit kernel on repacked rows (build_jobs_glue sets gu_odd4 the same way)
     static bool layer_odd4(const Layer& L) { return L.hblobs == nullptr && L.rp_g != nullptr; }
+    /// Expert x's down matrix as the CPU path reads it: the page-locked copy when the layer has one, else the GGUF in place.
+    static const uint8_t* cpu_down(const Layer& L, size_t x) { return (L.rp_d != nullptr ? L.rp_d : L.src_d) + x * L.src_dsz; }
     int attn_ahead = 8;          // STRATA_Q36_ATTN_AHEAD: V cells loaded together by the decode attention kernel
     bool head_sub_off() const { return m->head_sub.d == nullptr; }
     int32_t draft_token(int32_t picked) const {
@@ -4042,7 +4045,7 @@ struct Engine {
                     const uint8_t* up = L.rp_g != nullptr ? L.rp_u + (size_t) x * L.rp_gsz : L.src_u + (size_t) x * L.src_gsz;
                     C::NativeFmt& f = out_fmt.emplace_back(H.fmt);
                     f.up_off = (size_t) ((uintptr_t) up - (uintptr_t) gate);   // modular: the
-                    f.down_off = (size_t) ((uintptr_t) (L.src_d + (size_t) x * L.src_dsz) - (uintptr_t) gate); // file's tensor order does not matter
+                    f.down_off = (size_t) ((uintptr_t) cpu_down(L, (size_t) x) - (uintptr_t) gate); // file's tensor order does not matter
                     if (L.rp_g != nullptr) { f.gu_odd4 = true; f.gu_row = L.rp_gsz / (size_t) f.n_ff; }
                     j.blob = gate;
                     j.fmt = &f;
@@ -4105,7 +4108,7 @@ struct Engine {
                     const uint8_t* up = L.rp_g != nullptr ? L.rp_u + (size_t) x * L.rp_gsz : L.src_u + (size_t) x * L.src_gsz;
                     C::NativeFmt& f = job_fmt.emplace_back(H.fmt);
                     f.up_off = (size_t) ((uintptr_t) up - (uintptr_t) gate);
-                    f.down_off = (size_t) ((uintptr_t) (L.src_d + (size_t) x * L.src_dsz) - (uintptr_t) gate);
+                    f.down_off = (size_t) ((uintptr_t) cpu_down(L, (size_t) x) - (uintptr_t) gate);
                     if (L.rp_g != nullptr) { f.gu_odd4 = true; f.gu_row = L.rp_gsz / (size_t) f.n_ff; }
                     j.blob = gate;
                     j.fmt = &f;
@@ -5028,23 +5031,41 @@ void repack_iq3s_gate_up(Model& m) {
     std::atomic<size_t> done_layers{0};
     const size_t ne = (size_t) m.g.n_expert;
     const bool drop_pages = std::getenv("STRATA_IQ3S_4BIT_DROP") != nullptr && std::string(std::getenv("STRATA_IQ3S_4BIT_DROP")) != "0";
+    // The CPU path of these layers reads the repacked gate/up copies and a copy of the down matrices from page-locked memory: the kernel
+    // can neither swap it out nor evict it, so a busy desktop cannot take its pages back and slow decode down. All of it is allocated here,
+    // before any copy; when the memory is not there the start ends with a message instead of running on pages that may be swapped out.
+    size_t pinned_bytes = 0;
+    for (Layer* layer : all) {
+        Layer& L = *layer;
+        if (L.L.gu_type != 21 || L.src_g == nullptr || L.src_u == nullptr || L.src_d == nullptr || L.src_gsz % kIq3sBlock != 0) continue;
+        const size_t bytes = L.src_gsz / kIq3sBlock * k4BitBlock;
+        uint8_t *g = nullptr, *u = nullptr, *d = nullptr;
+        const bool ok = cudaHostAlloc((void**) &g, bytes * ne, cudaHostAllocDefault) == cudaSuccess &&
+                        cudaHostAlloc((void**) &u, bytes * ne, cudaHostAllocDefault) == cudaSuccess &&
+                        cudaHostAlloc((void**) &d, L.src_dsz * ne, cudaHostAllocDefault) == cudaSuccess;
+        if (!ok) {
+            cudaGetLastError();
+            std::fprintf(stderr, "strata-q36: cannot start: %.1f GiB of the experts' memory were page-locked and the next %.1f GiB could not be: "
+                         "not enough free memory (close programs and start again)\n", pinned_bytes / 1073741824.0,
+                         (2 * bytes + L.src_dsz) * ne / 1073741824.0);
+            std::exit(1);
+        }
+        L.rp_g = g;
+        L.rp_u = u;
+        L.rp_d = d;
+        L.rp_gsz = bytes;
+        pinned_bytes += (2 * bytes + L.src_dsz) * ne;
+    }
     auto worker = [&] {
         for (size_t i = next++; i < all.size(); i = next++) {
             Layer& L = *all[i];
-            if (L.L.gu_type != 21 || L.src_g == nullptr || L.src_u == nullptr || L.src_gsz % kIq3sBlock != 0) continue;
+            if (L.rp_g == nullptr) continue;
             const size_t blocks = L.src_gsz / kIq3sBlock;
-            const size_t bytes = blocks * k4BitBlock;
-            auto grab = [&](size_t n) { return static_cast<uint8_t*>(std::aligned_alloc(64, (n + 63) / 64 * 64)); };
-            uint8_t* g = grab(bytes * ne);
-            uint8_t* u = grab(bytes * ne);
-            if (g == nullptr || u == nullptr) { std::free(g); std::free(u); continue; }
             for (size_t e = 0; e < ne; ++e) {
-                C::iq3s_repack_to_4bit(L.src_g + e * L.src_gsz, g + e * bytes, blocks);
-                C::iq3s_repack_to_4bit(L.src_u + e * L.src_gsz, u + e * bytes, blocks);
+                C::iq3s_repack_to_4bit(L.src_g + e * L.src_gsz, L.rp_g + e * L.rp_gsz, blocks);
+                C::iq3s_repack_to_4bit(L.src_u + e * L.src_gsz, L.rp_u + e * L.rp_gsz, blocks);
             }
-            L.rp_g = g;
-            L.rp_u = u;
-            L.rp_gsz = bytes;
+            std::memcpy(L.rp_d, L.src_d, L.src_dsz * ne);
             ++done_layers;
             if (drop_pages) {   // the CPU path no longer reads the original gate/up pages: let the page cache go (a prompt chunk reads them again from the disk)
                 for (int r = 0; r < 2; ++r) {
@@ -5060,8 +5081,9 @@ void repack_iq3s_gate_up(Model& m) {
     for (unsigned t = 0; t < 3; ++t) pool.emplace_back(worker);
     worker();
     for (auto& t : pool) t.join();
-    std::fprintf(stderr, "strata-q36: %zu layers' gate/up repacked from IQ3_S into 4-bit codes in %.1f s (the CPU path of the mapped experts uses them)\n",
-                 done_layers.load(), ms_since(t0) / 1000.0);
+    std::fprintf(stderr, "strata-q36: %zu layers' gate/up repacked from IQ3_S into 4-bit codes in %.1f s (the CPU path of the mapped experts uses them); "
+                 "%.1f GiB of expert memory (the repacked gate/up and a copy of the down matrices) is page-locked and cannot be swapped out\n",
+                 done_layers.load(), ms_since(t0) / 1000.0, pinned_bytes / 1073741824.0);
 }
 
 /// The routed experts after the engine's buffers: all in VRAM when they fit in `vram_gib` (< 0: the free VRAM less a

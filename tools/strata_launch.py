@@ -174,7 +174,8 @@ def choose_fast_family(expert_prefetch: int | None, repack: bool, profile_name: 
     all the model's experts, no prefetch. "prefetch": page-locked experts and a prefetch of 3, 7 experts (only when --expert-prefetch asks
     for it). "mapped": neither, the experts stay mapped from the file (--overlap, --igpu-experts and the memory-capped profiles). An explicit
     --iq3s-4bit or --expert-prefetch chooses by itself. Otherwise the repack family runs, and when the free memory or the memory budget is
-    below the model's size plus REPACK_MARGIN, NotEnoughMemory says so: a slower family would start without being asked for."""
+    below the model's size plus PROTECT_MARGIN (the engine page-locks about the model's size of experts in RAM), NotEnoughMemory says so:
+    a slower family would start without being asked for."""
     if repack:
         return "repack", []
     if expert_prefetch:
@@ -183,13 +184,13 @@ def choose_fast_family(expert_prefetch: int | None, repack: bool, profile_name: 
         return "mapped", ["the 4-bit repack of the gate/up matrices does not combine with --overlap or --igpu-experts, so it is off"]
     if profile_name not in PREFETCH_DEFAULT_PROFILES:
         return "mapped", []
-    needed = model_size + REPACK_MARGIN
+    needed = model_size + PROTECT_MARGIN
     if available is None:
         raise NotEnoughMemory("the free memory could not be read")
     if available < needed:
         raise NotEnoughMemory(f"{available / GIB:.1f} GiB of memory is free and the default start needs {needed / GIB:.1f} GiB (the model's size "
-                              f"plus {REPACK_MARGIN / GIB:g} GiB: its 4-bit copy of the gate/up matrices is ordinary memory and thrashes in the swap "
-                              "with less)")
+                              f"plus {PROTECT_MARGIN / GIB:g} GiB: the experts' memory is page-locked in RAM, so it must be free, not taken "
+                              "from other programs)")
     if budget is not None and budget < needed:
         raise NotEnoughMemory(f"the memory budget of {budget / GIB:.1f} GiB is below the {needed / GIB:.1f} GiB the default start needs")
     return "repack", []
@@ -409,8 +410,20 @@ def background_scope_works() -> bool:
     return result.returncode == 0 and result.stdout.strip() == "1"
 
 
-def scope_properties(memory_budget: str | None, background: bool, memory_low: int | None = None) -> list:
-    properties = [f"MemoryMax={memory_budget}", "MemorySwapMax=0"] if memory_budget else []
+def swap_limit_works() -> bool:
+    """Whether a user scope takes MemorySwapMax=0, which keeps every page of the server out of the swap."""
+    try:
+        result = subprocess.run(["systemd-run", "--user", "--scope", "--quiet", "-p", "MemorySwapMax=0", "--", "true"], capture_output=True,
+                                timeout=PROBE_TIMEOUT_SECONDS, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def scope_properties(memory_budget: str | None, background: bool, memory_low: int | None = None, no_swap: bool = False) -> list:
+    properties = [f"MemoryMax={memory_budget}"] if memory_budget else []
+    if memory_budget or no_swap:
+        properties.append("MemorySwapMax=0")
     if memory_low:
         properties.append(f"MemoryLow={memory_low}")
     return properties + (BACKGROUND_PROPERTIES if background else [])
@@ -419,7 +432,6 @@ def scope_properties(memory_budget: str | None, background: bool, memory_low: in
 GIB = 1 << 30
 SIZE_UNITS = {"": 1, "K": 1 << 10, "M": 1 << 20, "G": GIB, "T": 1 << 40}
 PROTECT_MARGIN = 2 * GIB    # what the server needs next to the cached model: KV cache, buffers, the Python server
-REPACK_MARGIN = 6 * GIB   # free memory beyond the model's size: the repacked copy is ordinary memory the kernel may swap out (16 GiB free thrashed, 26 GiB ran clean)
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 
 
@@ -654,7 +666,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="the default since 13 November 2026, kept as a flag for old command lines: the measured fast set (docs/LOSSLESS_BACKLOG.md): the "
                              "dense Q4_K file, lazy K/V, adaptive draft depth, chained drafts, n-gram drafts and the draft token list, the 4-bit "
                              "repack of the gate/up matrices with all 8 experts and no prefetch; it refuses to start when the free memory is below "
-                             "the model's size plus 6 GiB; every flag given explicitly wins")
+                             "the model's size plus 2 GiB; every flag given explicitly wins")
     parser.add_argument("--no-fast50", action="store_true",
                         help="start without the 50 tok/s set: the dense Q5_K file, 7 experts and prefetch 3 only (the default before 13 November 2026)")
     parser.add_argument("--mtp-adapt", action="store_true",
@@ -816,14 +828,18 @@ def main() -> int:
         print("strata-launch: this machine does not give the server its own CPU weight, so only the idle scheduling class is set", file=sys.stderr)
         background = False
     memory_io = PINNED_EXPERTS_IO if expert_prefetch else profile["io"]
+    no_swap = have_systemd and (args.dry_run or swap_limit_works())
+    if have_systemd and not no_swap:
+        print("strata-launch: this machine does not take a swap limit for the server's scope, so its ordinary pages can still be swapped out",
+              file=sys.stderr)
     memory_low, prewarm_bytes, scope_for_prewarm, messages = plan_memory(
         args.protect_ram, args.prewarm, memory_io, memory_budget, model_size, have_systemd,
-        scope_properties(memory_budget, background), args.dry_run)
+        scope_properties(memory_budget, background, no_swap=no_swap), args.dry_run)
     for message in messages:
         print(f"strata-launch: {message}", file=sys.stderr)
     if prewarm_bytes:
         server = [server[0], str(ROOT / "tools" / "strata_prewarm.py"), "--limit", str(prewarm_bytes), str(MODEL_FILE), "--"] + server
-    command = wrap_in_scope(server, scope_properties(memory_budget, background, memory_low), always=scope_for_prewarm)
+    command = wrap_in_scope(server, scope_properties(memory_budget, background, memory_low, no_swap), always=scope_for_prewarm)
     print(f"strata-launch: profile {args.profile}, memory budget {profile['ram'] or 'none (elastic page cache)'}, context {profile['context']}, "
           f"port {args.port}, temperature limit {f'{args.max_temp:g} C' if args.max_temp > 0 else 'none'}, turbo {args.turbo}, "
           f"priority {args.priority}, model {MODEL_FILE.name}, iq kernels {iq_kernel_state(kernel_env)}"

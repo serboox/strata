@@ -138,8 +138,8 @@ it when `spi` ends. The models it may start are listed in `~/.pi/agent-local/loc
 
 A model id is the `id` of an entry in `models.json`, so `/model` in pi lists the same models. The first one (`default`) starts with `spi`.
 The dense Q4_K file is the default because it runs the measured fast setting of the launcher (all 8 experts with the 4-bit repack, the draft and cache switches and a temperature limit of 70 C; see
-"The default stack" in the README). It needs free memory of the model's size plus 6 GiB: without it the server does not start, and the
-error that `spi` shows says how much memory is free and how much is needed.
+"The default stack" in the README). The server page-locks about 16 GiB of expert memory, so it needs free memory of the model's size plus 2 GiB: without it the server does
+not start, and the error that `spi` shows says how much memory is free and how much is needed.
 The launcher applies that setting to any file unless `--no-fast50` is given: the dense Q5_K entry keeps the earlier stack with it, and the two entries with `--experts-used 8 --expert-prefetch 0` run their files with the model's own
 routing and no prefetch, which is what to pick when the output must not differ from the original model's. When another model is chosen with `/model` or `Ctrl+P`, the next request makes the manager finish the request that is running,
 stop the server, start the other one and pass the request on: the first answer after a switch waits for the load, about ten seconds
