@@ -164,13 +164,17 @@ def resolve_stack(experts_used: int | None, expert_prefetch: int | None, profile
     return experts, DEFAULT_EXPERT_PREFETCH, []
 
 
+class NotEnoughMemory(Exception):
+    """The default fast set cannot start in the free memory; the message says how much it needs."""
+
+
 def choose_fast_family(expert_prefetch: int | None, repack: bool, profile_name: str, model_size: int, available: int | None,
                        budget: int | None, overlap: bool, igpu_experts: bool) -> tuple[str, list[str]]:
-    """The family of the fast set this start can run, as (family, notes). "repack": the gate/up matrices as 4-bit codes for the CPU kernel,
-    all the model's experts, no prefetch; it needs the model's size plus REPACK_MARGIN of free memory. "prefetch": page-locked experts and a
-    prefetch of 3, 7 experts; the page-locked copy cannot be swapped out, so it needs only the model's size plus a margin. "mapped": neither,
-    the experts stay mapped from the file. An explicit --iq3s-4bit or --expert-prefetch chooses by itself; otherwise the best family that
-    the free memory allows runs."""
+    """The family of the fast set this start runs, as (family, notes). "repack": the gate/up matrices as 4-bit codes for the CPU kernel,
+    all the model's experts, no prefetch. "prefetch": page-locked experts and a prefetch of 3, 7 experts (only when --expert-prefetch asks
+    for it). "mapped": neither, the experts stay mapped from the file (--overlap, --igpu-experts and the memory-capped profiles). An explicit
+    --iq3s-4bit or --expert-prefetch chooses by itself. Otherwise the repack family runs, and when the free memory or the memory budget is
+    below the model's size plus REPACK_MARGIN, NotEnoughMemory says so: a slower family would start without being asked for."""
     if repack:
         return "repack", []
     if expert_prefetch:
@@ -179,18 +183,15 @@ def choose_fast_family(expert_prefetch: int | None, repack: bool, profile_name: 
         return "mapped", ["the 4-bit repack of the gate/up matrices does not combine with --overlap or --igpu-experts, so it is off"]
     if profile_name not in PREFETCH_DEFAULT_PROFILES:
         return "mapped", []
-    needed, repack_needed = model_size + PROTECT_MARGIN, model_size + REPACK_MARGIN
+    needed = model_size + REPACK_MARGIN
     if available is None:
-        return "mapped", ["the free memory could not be read, so the 4-bit repack and the prefetch are off"]
+        raise NotEnoughMemory("the free memory could not be read")
     if available < needed:
-        return "mapped", [f"{available / GIB:.1f} GiB of memory is available and the page-locked experts need about {needed / GIB:.1f} GiB, "
-                          "so the 4-bit repack and the prefetch are off"]
+        raise NotEnoughMemory(f"{available / GIB:.1f} GiB of memory is free and the default start needs {needed / GIB:.1f} GiB (the model's size "
+                              f"plus {REPACK_MARGIN / GIB:g} GiB: its 4-bit copy of the gate/up matrices is ordinary memory and thrashes in the swap "
+                              "with less)")
     if budget is not None and budget < needed:
-        return "mapped", [f"the memory budget of {budget / GIB:.1f} GiB is below the {needed / GIB:.1f} GiB the page-locked experts need, "
-                          "so the 4-bit repack and the prefetch are off"]
-    if available < repack_needed or (budget is not None and budget < repack_needed):
-        return "prefetch", [f"{available / GIB:.1f} GiB of memory is available and the 4-bit repack of the gate/up matrices needs about "
-                            f"{repack_needed / GIB:.1f} GiB to stay out of the swap, so the fast set uses the prefetch family (7 experts)"]
+        raise NotEnoughMemory(f"the memory budget of {budget / GIB:.1f} GiB is below the {needed / GIB:.1f} GiB the default start needs")
     return "repack", []
 
 
@@ -651,9 +652,9 @@ def build_parser() -> argparse.ArgumentParser:
                              "a prompt chunk reads them again from the disk; off by default)")
     parser.add_argument("--fast50", action="store_true",
                         help="the default since 13 November 2026, kept as a flag for old command lines: the measured fast set (docs/LOSSLESS_BACKLOG.md): the "
-                             "dense Q4_K file, lazy K/V, adaptive draft depth, chained drafts, n-gram drafts and the draft token list, and one of two "
-                             "families by the free memory: the 4-bit repack of the gate/up matrices with all 8 experts and no prefetch (needs about "
-                             "the model's size in free memory), else prefetch 3 with 7 experts; every flag given explicitly wins")
+                             "dense Q4_K file, lazy K/V, adaptive draft depth, chained drafts, n-gram drafts and the draft token list, the 4-bit "
+                             "repack of the gate/up matrices with all 8 experts and no prefetch; it refuses to start when the free memory is below "
+                             "the model's size plus 6 GiB; every flag given explicitly wins")
     parser.add_argument("--no-fast50", action="store_true",
                         help="start without the 50 tok/s set: the dense Q5_K file, 7 experts and prefetch 3 only (the default before 13 November 2026)")
     parser.add_argument("--mtp-adapt", action="store_true",
@@ -774,8 +775,17 @@ def main() -> int:
     except ValueError:
         budget_bytes = None
     if args.fast50:
-        family, family_notes = choose_fast_family(args.expert_prefetch, args.iq3s_4bit, args.profile, model_size, available, budget_bytes,
-                                                  bool(args.overlap), bool(args.igpu_experts))
+        try:
+            family, family_notes = choose_fast_family(args.expert_prefetch, args.iq3s_4bit, args.profile, model_size, available, budget_bytes,
+                                                      bool(args.overlap), bool(args.igpu_experts))
+        except NotEnoughMemory as shortage:
+            print(f"strata-launch: cannot start: {shortage}", file=sys.stderr)
+            print("strata-launch: free some memory (close programs), or ask for a start that needs less: --no-fast50, or --expert-prefetch 3 "
+                  "--experts-used 7; --iq3s-4bit --iq3s-4bit-drop starts this one anyway", file=sys.stderr)
+            if not args.dry_run:
+                return 1
+            print("strata-launch: (dry run: the configuration below is the one that would start with enough memory)", file=sys.stderr)
+            family, family_notes = "repack", []
         apply_fast_family(args, family)
         for note in family_notes:
             print(f"strata-launch: {note}", file=sys.stderr)

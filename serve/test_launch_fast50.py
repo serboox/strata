@@ -34,25 +34,37 @@ class Fast50Tests(unittest.TestCase):
                   "overlap": False, "igpu_experts": False}
         return strata_launch.choose_fast_family(**{**values, **changes})
 
-    def test_the_family_is_the_best_one_the_free_memory_allows(self):
+    def test_the_default_start_needs_the_models_size_plus_the_repack_margin(self):
         gib = strata_launch.GIB
-        pinned_needed = 16 * gib + strata_launch.PROTECT_MARGIN
-        repack_needed = 16 * gib + strata_launch.REPACK_MARGIN
-        self.assertEqual(self.choose(available=repack_needed), ("repack", []))
-        family, notes = self.choose(available=repack_needed - 1)
-        self.assertEqual(family, "prefetch")
-        self.assertIn("stay out of the swap", notes[0])
-        self.assertEqual(self.choose(available=pinned_needed)[0], "prefetch")
-        family, notes = self.choose(available=pinned_needed - 1)
-        self.assertEqual(family, "mapped")
-        self.assertIn("page-locked experts need", notes[0])
-        self.assertEqual(self.choose(available=None)[0], "mapped")
+        needed = 16 * gib + strata_launch.REPACK_MARGIN
+        self.assertEqual(self.choose(available=needed), ("repack", []))
+        with self.assertRaises(strata_launch.NotEnoughMemory) as caught:
+            self.choose(available=needed - 1)
+        self.assertIn("the default start needs 22.0 GiB", str(caught.exception))
+        with self.assertRaises(strata_launch.NotEnoughMemory):
+            self.choose(available=None)
 
-    def test_a_memory_budget_limits_the_family_like_the_free_memory(self):
+    def test_a_memory_budget_below_the_need_refuses_too(self):
         gib = strata_launch.GIB
-        self.assertEqual(self.choose(budget=16 * gib + strata_launch.PROTECT_MARGIN - 1)[0], "mapped")
-        self.assertEqual(self.choose(budget=16 * gib + strata_launch.PROTECT_MARGIN)[0], "prefetch")
-        self.assertEqual(self.choose(budget=16 * gib + strata_launch.REPACK_MARGIN)[0], "repack")
+        needed = 16 * gib + strata_launch.REPACK_MARGIN
+        with self.assertRaises(strata_launch.NotEnoughMemory) as caught:
+            self.choose(budget=needed - 1)
+        self.assertIn("memory budget", str(caught.exception))
+        self.assertEqual(self.choose(budget=needed)[0], "repack")
+
+    def test_main_returns_one_and_says_why_when_the_memory_is_short(self):
+        import contextlib
+        import io
+        from unittest import mock
+        if not strata_launch.DENSE_Q4K_FILE.exists():
+            self.skipTest("the dense Q4_K file is not here")
+        errors = io.StringIO()
+        with mock.patch.object(strata_launch, "memory_available", return_value=strata_launch.GIB), \
+                mock.patch.object(sys, "argv", ["strata-launch", "--port", "18999"]), contextlib.redirect_stderr(errors):
+            code = strata_launch.main()
+        self.assertEqual(code, 1)
+        self.assertIn("strata-launch: cannot start: 1.0 GiB of memory is free", errors.getvalue())
+        self.assertIn("--no-fast50", errors.getvalue())
 
     def test_explicit_flags_and_other_profiles_decide_the_family(self):
         low = {"available": 1}

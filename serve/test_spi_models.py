@@ -278,6 +278,21 @@ class FailureTests(ProxyTestCase):
         self.supervisor.serve_command = self.script
         self.assertEqual((await self.chat("alpha"))[0], 200)
 
+    async def test_a_launcher_that_refuses_to_start_gives_its_reason_in_the_503(self):
+        refusing = Path(self.tmp.name) / "refusing-serve"
+        refusing.write_text("#!/bin/sh\necho 'strata-launch: cannot start: 15.0 GiB of memory is free and the default start needs 22.0 GiB' >&2\nexit 1\n",
+                            encoding="utf-8")
+        refusing.chmod(0o755)
+        self.supervisor.serve_command = refusing
+        status, body = await self.chat("alpha")
+        self.assertEqual(status, 503)
+        self.assertIn('model "alpha" cannot start: 15.0 GiB of memory is free', body["error"]["message"])
+        self.assertNotIn("ended with code", body["error"]["message"])
+
+    def test_the_refusal_is_read_from_the_last_matching_line_only(self):
+        self.assertEqual(spi_models.launcher_refusal("noise\nstrata-launch: cannot start: not enough memory\nmore\n"), "not enough memory")
+        self.assertEqual(spi_models.launcher_refusal("strata-launch: profile auto\n"), "")
+
     async def test_a_program_that_cannot_be_run_gives_a_503(self):
         self.supervisor.serve_command = Path("/nonexistent/strata-serve")
         status, body = await self.chat("alpha")

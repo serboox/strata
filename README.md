@@ -128,12 +128,10 @@ tokens per second).
   with the dense matrices (attention, recurrent blocks, shared expert, embeddings, MTP projection) re-quantised from Q8_0 to Q4_K;
 - the switches that cost no quality: a K/V cache whose pages follow the position (`--kv-lazy`), an adaptive draft depth, chained drafts
   on the device, n-gram drafts and a list of frequent tokens for the draft head;
-- one of three ways to run the experts, chosen by the free memory at the start (the launcher prints which and why):
-  - **4-bit repack**, with free memory of at least the model's size plus 6 GiB: all 8 experts per token, the IQ3_S gate/up matrices
-    repacked into 4-bit codes for the CPU kernel (`--iq3s-4bit --iq3s-4bit-drop`), no prefetch;
-  - **prefetch**, with at least the model's size plus 2 GiB: 7 experts per token, the experts page-locked in RAM and 3 guessed experts per
-    layer sent to the GPU ahead of the router (`--expert-prefetch 3`);
-  - below that, the experts stay mapped from the file (about 35 to 40 tokens per second);
+- all 8 experts per token with the 4-bit repack: the IQ3_S gate/up matrices are repacked into 4-bit codes for the CPU kernel
+  (`--iq3s-4bit --iq3s-4bit-drop`), no prefetch. The start needs free memory of at least the model's size plus 6 GiB, because the
+  repacked copy is ordinary memory and thrashes in the swap with less. Without it the launcher stops with
+  `strata-launch: cannot start: ...` and a hint, and does not start a slower setting on its own;
 - a temperature limit of 70 C (`--max-temp`): the engine pauses for part of every half second when the CPU or the GPU nears it.
 
 Measured on the reference laptop (code prompt, MTP 2, 2.2 GHz cap, 80 C limit): the prefetch family gave 57 tokens per second on a short
@@ -142,7 +140,7 @@ unchanged file; the dense Q4_K file has a mean KL divergence of about 0.0125 fro
 Two things are not measured cleanly. Under the **70 C limit** one run of the prefetch family, started on a package that had not cooled, averaged
 32 tokens per second (25 to 52) while the governor paused the engine 20 to 85 percent of the time: the lower limit costs sustained speed on this
 laptop, and `--max-temp 80` gives the figures above. The **repack family** was started once, with 16 GiB free, and thrashed (12 to 44 tokens per
-second, a prompt of 4000 tokens took 178 s, 7 GiB in swap), which is why it asks for the extra 6 GiB; it has no measurement with enough
+second, a prompt of 4000 tokens took 178 s, 7 GiB in swap), which is why the start refuses below the model's size plus 6 GiB; it has no measurement with enough
 free memory yet. Details in [docs/LOSSLESS_BACKLOG.md](docs/LOSSLESS_BACKLOG.md) and [docs/TPS_REPORT.md](docs/TPS_REPORT.md).
 
 ```sh
@@ -150,7 +148,7 @@ python3 tools/requant_dense.py models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-
     models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp-d4.gguf --groups all --to q4_K     # makes the dense Q4_K file
 bin/strata-serve --max-temp 80                                                             # the earlier temperature limit
 bin/strata-serve --iq3s-4bit --iq3s-4bit-drop --experts-used 8                             # force the repack family whatever the memory
-bin/strata-serve --experts-used 7 --expert-prefetch 3                                      # force the prefetch family
+bin/strata-serve --experts-used 7 --expert-prefetch 3                                      # 7 experts with prefetch: needs the model's size plus 2 GiB
 bin/strata-serve --no-fast50                                                               # dense Q5_K, 7 experts, prefetch 3 only (44 to 46)
 bin/strata-serve --no-fast50 --experts-used 8 --expert-prefetch 0                          # the model's own routing, no prefetch
 ```

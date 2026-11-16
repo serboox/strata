@@ -18,6 +18,7 @@ RELAY_IDLE_TIMEOUT_SECONDS = 1200
 BODY_TIMEOUT_SECONDS = 120
 READY_TIMEOUT_SECONDS = 300
 READY_POLL_SECONDS = 1.0
+LAUNCHER_REFUSAL = "strata-launch: cannot start:"
 STOP_TIMEOUT_SECONDS = 60
 PROBE_TIMEOUT_SECONDS = 3
 PARENT_POLL_SECONDS = 2
@@ -185,6 +186,14 @@ def port_is_taken(port: int) -> bool:
         return probe.connect_ex(("127.0.0.1", port)) == 0
 
 
+def launcher_refusal(log_text: str) -> str:
+    """The reason the launcher gave for refusing to start ("cannot start: ..."), or an empty string."""
+    for line in reversed(log_text.splitlines()):
+        if LAUNCHER_REFUSAL in line:
+            return line.split(LAUNCHER_REFUSAL, 1)[1].strip()
+    return ""
+
+
 class ModelSupervisor:
     """Keeps one Strata server alive for the model that was asked for last, and replaces it when another one is asked for."""
 
@@ -247,6 +256,8 @@ class ModelSupervisor:
         self.server_log.parent.mkdir(parents=True, exist_ok=True)
         with open(self.server_log, "ab") as output:
             output.write(f"\n=== {time.strftime('%F %T')} starting {name}\n".encode("utf-8"))
+            output.flush()
+            log_start = output.tell()
             try:
                 self.child = await asyncio.create_subprocess_exec(*command, stdout=output, stderr=output, stdin=asyncio.subprocess.DEVNULL,
                                                                   start_new_session=True)
@@ -257,6 +268,9 @@ class ModelSupervisor:
             if self.child.returncode is not None:
                 code = self.child.returncode
                 self.child = None
+                reason = launcher_refusal(self.server_log.read_bytes()[log_start:].decode("utf-8", "replace"))
+                if reason:
+                    raise Refused(503, f'model "{name}" cannot start: {reason} (log: {self.server_log})')
                 raise Refused(503, f'the server of model "{name}" ended with code {code} while it started (log: {self.server_log})')
             health = await probe_health(self.port)
             if health is not None:
