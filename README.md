@@ -10,7 +10,7 @@ at hand: the numbers below are measured on it, and other GPUs and models are mea
 - **About 37 tokens per second** when generating in a short burst on a cool CPU with the turbo boost on and 23 GB of RAM free for
   the page cache; the speed falls gradually, not to zero, when memory is short.
 - **Steady speed on a hot laptop.** The CPU of a laptop reaches 80 C within seconds under this load, so the server keeps the
-  CPU and the GPU under a temperature limit (80 C by default) and holds the highest CPU frequency at 2.1 GHz. With a cap like that
+  CPU and the GPU under a temperature limit (70 C by default) and holds the highest CPU frequency at 2.1 GHz. With a cap like that
   the model holds **27 to 33 tokens per second for minutes** instead of 11 to 15 without one (33 is the Q4_K_XL file at 2.1 GHz, the
   lower figures are earlier measurements of the UD-IQ4_XS file at 2.2 GHz; see "Steady speed under a temperature limit").
 - **A 64K-token window** (65,536 by default, 69,391 at most) in 4 GB of VRAM, with a q8 K/V cache.
@@ -47,7 +47,7 @@ implemented).
 ## Steady speed under a temperature limit
 
 A burst of 37 tokens per second does not last: the package passes 80 C within seconds. The server therefore reads the CPU and
-GPU temperatures and pauses the engine for a part of every half second when they near the limit (`--max-temp`, 80 C by
+GPU temperatures and pauses the engine for a part of every half second when they near the limit (`--max-temp`, 70 C by
 default). The CPU turbo boost is off by default (`--turbo`), and the server yields the CPU and the disk to other programs
 (`--priority background`).
 
@@ -120,30 +120,39 @@ on tasks is not measured for this model) and needs about 23 GB of free RAM for f
 better file when a browser and chat programs hold part of the memory; without a cap it is also the faster one (14.7 against 12.9
 tokens per second).
 
-## The default stack: a sustained 50 tokens per second
+## The default stack: the fast set
 
 `bin/strata-serve` starts the measured fast setting of this model unless told otherwise:
 
 - the file `Qwen3.6-35B-A3B-UD-IQ4_XS-mtp-d4.gguf` when it exists (else the dense Q5_K file, else the Q4_K_XL file): the IQ4_XS file
   with the dense matrices (attention, recurrent blocks, shared expert, embeddings, MTP projection) re-quantised from Q8_0 to Q4_K;
-- 7 routed experts per token instead of 8 (`--experts-used`);
-- a prefetch of 3 guessed experts per layer to the GPU over PCIe (`--expert-prefetch`), on the `auto` profile;
-- the switches that cost no quality: a K/V cache whose pages follow the position (`--kv-lazy`), a warm-up of the guessed experts,
-  an adaptive draft depth, chained drafts on the device, n-gram drafts and a list of frequent tokens for the draft head.
+- the switches that cost no quality: a K/V cache whose pages follow the position (`--kv-lazy`), an adaptive draft depth, chained drafts
+  on the device, n-gram drafts and a list of frequent tokens for the draft head;
+- one of three ways to run the experts, chosen by the free memory at the start (the launcher prints which and why):
+  - **4-bit repack**, with free memory of at least the model's size plus 6 GiB: all 8 experts per token, the IQ3_S gate/up matrices
+    repacked into 4-bit codes for the CPU kernel (`--iq3s-4bit --iq3s-4bit-drop`), no prefetch;
+  - **prefetch**, with at least the model's size plus 2 GiB: 7 experts per token, the experts page-locked in RAM and 3 guessed experts per
+    layer sent to the GPU ahead of the router (`--expert-prefetch 3`);
+  - below that, the experts stay mapped from the file (about 35 to 40 tokens per second);
+- a temperature limit of 70 C (`--max-temp`): the engine pauses for part of every half second when the CPU or the GPU nears it.
 
-On the reference laptop (code prompt, MTP 2, 2.2 GHz cap) this gives 57 tokens per second on a short request and 54 on average
-over eight requests of 900 tokens back to back (the slowest one 48), against 37 for the unchanged file, at a peak of 77 C.
-The cost: HumanEval 149 of 164 against 153; the dense Q4_K file has a mean KL divergence of about 0.0125 from the unchanged file
-and 7 experts about 0.025. No setting reaches 50 tokens per second with no loss. The measurements are in
-[docs/LOSSLESS_BACKLOG.md](docs/LOSSLESS_BACKLOG.md) and [docs/TPS_REPORT.md](docs/TPS_REPORT.md).
+Measured on the reference laptop (code prompt, MTP 2, 2.2 GHz cap, 80 C limit): the prefetch family gave 57 tokens per second on a short
+request and 54 on average over eight requests of 900 tokens back to back (the slowest 48), HumanEval 149 of 164 against 153 for the
+unchanged file; the dense Q4_K file has a mean KL divergence of about 0.0125 from the unchanged file and 7 experts about 0.025.
+Two things are not measured cleanly. Under the **70 C limit** one run of the prefetch family, started on a package that had not cooled, averaged
+32 tokens per second (25 to 52) while the governor paused the engine 20 to 85 percent of the time: the lower limit costs sustained speed on this
+laptop, and `--max-temp 80` gives the figures above. The **repack family** was started once, with 16 GiB free, and thrashed (12 to 44 tokens per
+second, a prompt of 4000 tokens took 178 s, 7 GiB in swap), which is why it asks for the extra 6 GiB; it has no measurement with enough
+free memory yet. Details in [docs/LOSSLESS_BACKLOG.md](docs/LOSSLESS_BACKLOG.md) and [docs/TPS_REPORT.md](docs/TPS_REPORT.md).
 
 ```sh
 python3 tools/requant_dense.py models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp.gguf \
     models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp-d4.gguf --groups all --to q4_K     # makes the dense Q4_K file
-bin/strata-serve --experts-used 8                                                          # gentler: about 50 on average, dips to 43
+bin/strata-serve --max-temp 80                                                             # the earlier temperature limit
+bin/strata-serve --iq3s-4bit --iq3s-4bit-drop --experts-used 8                             # force the repack family whatever the memory
+bin/strata-serve --experts-used 7 --expert-prefetch 3                                      # force the prefetch family
 bin/strata-serve --no-fast50                                                               # dense Q5_K, 7 experts, prefetch 3 only (44 to 46)
 bin/strata-serve --no-fast50 --experts-used 8 --expert-prefetch 0                          # the model's own routing, no prefetch
-bin/strata-serve --model models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp.gguf       # another file, the same settings
 ```
 
 The prefetch keeps all the experts page-locked in RAM (about 15 GiB) and the server takes about a minute to start. The launcher
@@ -179,7 +188,7 @@ measured before the AVX-512 kernels (see [docs/TUNING.md](docs/TUNING.md)).
 keep the cached model in memory and read it in before the start; the read-in is skipped when free memory is short or the profile reads
 with O_DIRECT, and the protection is soft and depends on the control groups above the server (see "Keeping the model in memory" in
 [docs/TUNING.md](docs/TUNING.md)).
-`--max-temp C` (80 by default, 0 turns it off), `--turbo off|on|keep` (off by default; `tools/turbo on|off|status` does the same on
+`--max-temp C` (70 by default, 0 turns it off), `--turbo off|on|keep` (off by default; `tools/turbo on|off|status` does the same on
 its own) and `--cpu-max-mhz MHZ` (2100 with the `auto` profile, 0 turns it off) are described in "Heat and turbo" in [docs/TUNING.md](docs/TUNING.md).
 `--context` and `--chunk` change the context window and the prompt chunk, the two things that compete for the 4 GB of
 VRAM. Everything the launcher does is visible with `--dry-run`.

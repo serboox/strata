@@ -25,8 +25,78 @@ class Fast50Tests(unittest.TestCase):
         self.assertIn("args.fast50 = not args.no_fast50 and not args.strict_cpu", source)
 
     def test_the_fast50_constants_are_the_measured_set(self):
-        self.assertEqual((strata_launch.FAST50_EXPERTS, strata_launch.FAST50_PREFETCH, strata_launch.FAST50_KV_TIER,
-                          strata_launch.FAST50_WARM_KIB, strata_launch.FAST50_NGRAM), (7, 3, 8192, 64, "8,4"))
+        self.assertEqual((strata_launch.FAST50_EXPERTS_REPACK, strata_launch.FAST50_EXPERTS_PREFETCH, strata_launch.FAST50_PREFETCH,
+                          strata_launch.FAST50_KV_TIER, strata_launch.FAST50_WARM_KIB, strata_launch.FAST50_NGRAM), (8, 7, 3, 8192, 64, "8,4"))
+
+    def choose(self, **changes):
+        gib = strata_launch.GIB
+        values = {"expert_prefetch": None, "repack": False, "profile_name": "auto", "model_size": 16 * gib, "available": 40 * gib, "budget": None,
+                  "overlap": False, "igpu_experts": False}
+        return strata_launch.choose_fast_family(**{**values, **changes})
+
+    def test_the_family_is_the_best_one_the_free_memory_allows(self):
+        gib = strata_launch.GIB
+        pinned_needed = 16 * gib + strata_launch.PROTECT_MARGIN
+        repack_needed = 16 * gib + strata_launch.REPACK_MARGIN
+        self.assertEqual(self.choose(available=repack_needed), ("repack", []))
+        family, notes = self.choose(available=repack_needed - 1)
+        self.assertEqual(family, "prefetch")
+        self.assertIn("stay out of the swap", notes[0])
+        self.assertEqual(self.choose(available=pinned_needed)[0], "prefetch")
+        family, notes = self.choose(available=pinned_needed - 1)
+        self.assertEqual(family, "mapped")
+        self.assertIn("page-locked experts need", notes[0])
+        self.assertEqual(self.choose(available=None)[0], "mapped")
+
+    def test_a_memory_budget_limits_the_family_like_the_free_memory(self):
+        gib = strata_launch.GIB
+        self.assertEqual(self.choose(budget=16 * gib + strata_launch.PROTECT_MARGIN - 1)[0], "mapped")
+        self.assertEqual(self.choose(budget=16 * gib + strata_launch.PROTECT_MARGIN)[0], "prefetch")
+        self.assertEqual(self.choose(budget=16 * gib + strata_launch.REPACK_MARGIN)[0], "repack")
+
+    def test_explicit_flags_and_other_profiles_decide_the_family(self):
+        low = {"available": 1}
+        self.assertEqual(self.choose(repack=True, **low), ("repack", []))
+        self.assertEqual(self.choose(expert_prefetch=3, **low), ("prefetch", []))
+        self.assertEqual(self.choose(profile_name="lean"), ("mapped", []))
+        self.assertEqual(self.choose(overlap=True)[0], "mapped")
+        self.assertEqual(self.choose(igpu_experts=True)[0], "mapped")
+
+    def test_the_repack_family_takes_all_experts_and_no_prefetch(self):
+        args = self.parse()
+        strata_launch.apply_fast_family(args, "repack")
+        self.assertEqual((args.experts_used, args.expert_prefetch, args.iq3s_4bit, args.iq3s_4bit_drop, args.warm_experts), (8, 0, True, True, 0))
+
+    def test_the_prefetch_family_takes_seven_experts_and_a_prefetch_of_three(self):
+        args = self.parse()
+        strata_launch.apply_fast_family(args, "prefetch")
+        self.assertEqual((args.experts_used, args.expert_prefetch, args.iq3s_4bit, args.warm_experts), (7, 3, False, 64))
+
+    def test_the_mapped_family_leaves_the_prefetch_to_the_stack_rules(self):
+        args = self.parse()
+        strata_launch.apply_fast_family(args, "mapped")
+        self.assertEqual((args.experts_used, args.expert_prefetch, args.iq3s_4bit, args.warm_experts), (7, None, False, 0))
+
+    def test_values_given_on_the_command_line_stay(self):
+        args = self.parse("--experts-used", "6", "--expert-prefetch", "0", "--warm-experts", "16")
+        strata_launch.apply_fast_family(args, "repack")
+        self.assertEqual((args.experts_used, args.expert_prefetch), (6, 0))
+        args = self.parse("--experts-used", "5", "--expert-prefetch", "2", "--warm-experts", "16")
+        strata_launch.apply_fast_family(args, "prefetch")
+        self.assertEqual((args.experts_used, args.expert_prefetch, args.warm_experts), (5, 2, 16))
+
+    def test_the_temperature_limit_defaults_to_70_everywhere(self):
+        from serve import thermal
+        self.assertEqual(thermal.DEFAULT_LIMIT_C, 70.0)
+        self.assertEqual(self.parse().max_temp, thermal.DEFAULT_LIMIT_C)
+        sys.path.insert(0, str(ROOT / "tools"))
+        import cooling_kit
+        import kld_experts
+        import lever_matrix
+        import llama_thermal_bench
+        import quant_bench
+        self.assertEqual((kld_experts.DEFAULT_MAX_TEMP, llama_thermal_bench.DEFAULT_MAX_TEMP_C, quant_bench.DEFAULT_MAX_TEMP_C,
+                          lever_matrix.DEFAULT_MAX_TEMP_C, cooling_kit.DEFAULT_LIMIT_C), (thermal.DEFAULT_LIMIT_C,) * 5)
 
     def test_the_fast50_token_list_is_in_the_repo_and_is_a_list_of_int32_ids(self):
         path = strata_launch.FAST50_DRAFT_LIST

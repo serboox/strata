@@ -13,6 +13,7 @@ COOL_BAND_C = 2.0
 FAST_DROP_BAND_C = 3.0
 
 DEFAULT_TARGET_C = 77.0
+TARGET_BELOW_LIMIT_C = 3.0
 DEFAULT_MIN_MHZ = 1800.0
 DEFAULT_MAX_MHZ = 2600.0
 DEFAULT_STEP_MHZ = 100.0
@@ -103,6 +104,14 @@ class CapController:
             thread.join(timeout=2.0)
 
 
+def default_target_c(thermal_block: dict) -> float:
+    """Where the controller aims: a few degrees under the pause limit of the same config, so that the pause stays the last resort."""
+    limit = thermal_block.get("max_temp_c")
+    if isinstance(limit, (int, float)) and not isinstance(limit, bool) and limit > TARGET_BELOW_LIMIT_C:
+        return float(limit) - TARGET_BELOW_LIMIT_C
+    return DEFAULT_TARGET_C
+
+
 def create(cfg: Optional[dict], cap, temperatures: Callable[[], dict], log: Callable[[str], None] = say) -> Optional[CapController]:
     """The controller for the config's "thermal": {"cpu_adaptive": {...}} block, or None when it is absent or there is no cap to move."""
     block = (cfg or {}).get("cpu_adaptive")
@@ -112,7 +121,7 @@ def create(cfg: Optional[dict], cap, temperatures: Callable[[], dict], log: Call
         block = {}
     if not isinstance(block, dict):
         raise ValueError('"thermal.cpu_adaptive" must be true or an object')
-    values = {"target_c": DEFAULT_TARGET_C, "min_mhz": DEFAULT_MIN_MHZ, "max_mhz": DEFAULT_MAX_MHZ, "step_mhz": DEFAULT_STEP_MHZ}
+    values = {"target_c": default_target_c(cfg or {}), "min_mhz": DEFAULT_MIN_MHZ, "max_mhz": DEFAULT_MAX_MHZ, "step_mhz": DEFAULT_STEP_MHZ}
     for key in values:
         if key in block:
             value = block[key]

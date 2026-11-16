@@ -38,7 +38,7 @@ class FlagTests(unittest.TestCase):
 
     def test_the_other_defaults_are_untouched(self):
         args = self.parse()
-        self.assertEqual((args.profile, args.priority, args.turbo, args.max_temp, args.port), ("auto", "background", "off", 80.0, 8080))
+        self.assertEqual((args.profile, args.priority, args.turbo, args.max_temp, args.port), ("auto", "background", "off", 70.0, 8080))
 
 
 class SizeTests(unittest.TestCase):
@@ -317,7 +317,7 @@ class PlanMemoryTests(unittest.TestCase):
 
 
 OLD_FLAG_VALUES = {"--profile": "fast", "--ram": "8G", "--context": "1000", "--chunk": "256", "--sampling": "card", "--mtp": "1",
-                   "--workers": "2", "--max-temp": "70", "--turbo": "on", "--priority": "normal", "--port": "9000"}
+                   "--workers": "2", "--max-temp": "75", "--turbo": "on", "--priority": "normal", "--port": "9000"}
 OLD_FLAGS = list(OLD_FLAG_VALUES) + ["--no-limit", "--dry-run"]
 
 

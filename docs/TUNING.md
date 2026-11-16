@@ -82,7 +82,7 @@ flags switched off prints the same command as before. Not measured: how the mode
 | `--workers` | 3 | CPU expert threads besides the main one; 4 is slower, 7 is half the speed |
 | `--mtp` | 2 | drafts per step, about 90% accepted; 3 and 4 were not faster |
 | `--sampling` | greedy | drafting runs only for greedy requests, `card` turns it off |
-| `--max-temp` | 80 | while the CPU package or the GPU is at this many degrees or hotter, the engine is paused for a share of every half second, a bigger share the hotter it is; 0 turns the limit off |
+| `--max-temp` | 70 | while the CPU package or the GPU is at this many degrees or hotter, the engine is paused for a share of every half second, a bigger share the hotter it is; 0 turns the limit off |
 | `--turbo` | off | the CPU turbo boost at start: `off`, `on` or `keep`; `tools/turbo on|off|status` switches it at any time |
 | `--priority` | background | the server and the engine yield the CPU and the disk to every other program (see "Staying in the background"); `normal` leaves the priorities alone |
 | `--protect-ram` | on | ask the kernel to keep the cached model in memory (`MemoryLow` on the server's scope); soft, and only fully honoured when every level above allows it (see "Keeping the model in memory"); `--no-protect-ram` turns it off |
@@ -100,7 +100,7 @@ gain from a cool start.
 The laptop heats up quickly under the model, and a hot CPU slows itself down in uneven steps. Two settings keep that under control.
 
 **The temperature limit.** The server reads the CPU package temperature (`coretemp` or `k10temp` in sysfs) and the GPU's, once
-a second. At the limit (80 C by default) it stops the engine process with SIGSTOP for a part of every half second and
+a second. At the limit (70 C by default) it stops the engine process with SIGSTOP for a part of every half second and
 resumes it with SIGCONT: a stopped process draws no CPU and starts no GPU work, so both cool. The step looks ahead: a rising
 sensor counts as the temperature it will have in 3 seconds, judged by its own slope over the last 4 seconds (every sensor keeps
 its own history, and a sensor that drops out starts a fresh one), so the pause starts before the

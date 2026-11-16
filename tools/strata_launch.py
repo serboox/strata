@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(1, str(Path(__file__).resolve().parent))
 from serve.cpucap import MAX_MHZ, MIN_MHZ  # noqa: E402
-from serve.thermal import MAX_LIMIT_C, MIN_LIMIT_C  # noqa: E402
+from serve.thermal import DEFAULT_LIMIT_C, MAX_LIMIT_C, MIN_LIMIT_C  # noqa: E402
 MODEL_DIR = ROOT / "models" / "qwen3.6-35b-a3b"
 MODEL_FILE = MODEL_DIR / "Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
 DENSE_Q5K_FILE = MODEL_DIR / "Qwen3.6-35B-A3B-UD-IQ4_XS-mtp-d5.gguf"
@@ -83,7 +83,8 @@ IQ_KERNELS_OFF_ENV = {"STRATA_IQ_VBMI": "0"}
 # and the pool spin that held 30 tokens per second for minutes instead of 11 to 15; see "The frequency cap" in docs/TUNING.md.
 DEFAULT_CPU_MAX_MHZ = 2100.0
 FAST50_DRAFT_LIST = ROOT / "tools" / "draft_lists" / "code_ru.i32"   # frequent tokens of this project's code and docs, English and Russian (+6% measured)
-FAST50_EXPERTS, FAST50_PREFETCH, FAST50_KV_TIER, FAST50_WARM_KIB, FAST50_NGRAM = 7, 3, 8192, 64, "8,4"
+FAST50_EXPERTS_REPACK, FAST50_EXPERTS_PREFETCH = 8, 7   # the 4-bit repack leaves the heat budget room for all of the model's experts, the prefetch family does not
+FAST50_PREFETCH, FAST50_KV_TIER, FAST50_WARM_KIB, FAST50_NGRAM = 3, 8192, 64, "8,4"
 RESIDENT_EXPERTS_CONTEXT = 16384   # tokens; the K/V cache takes 0.18 GiB instead of 0.73 GiB
 RESIDENT_EXPERTS_RESERVE_MIB = 300
 CAPPED_WORKERS = 6
@@ -161,6 +162,54 @@ def resolve_stack(experts_used: int | None, expert_prefetch: int | None, profile
         limit = f"the memory budget of {budget / GIB:.1f} GiB is below the {needed / GIB:.1f} GiB the page-locked experts need"
         return experts, 0, [f"expert prefetch is off: {limit}"]
     return experts, DEFAULT_EXPERT_PREFETCH, []
+
+
+def choose_fast_family(expert_prefetch: int | None, repack: bool, profile_name: str, model_size: int, available: int | None,
+                       budget: int | None, overlap: bool, igpu_experts: bool) -> tuple[str, list[str]]:
+    """The family of the fast set this start can run, as (family, notes). "repack": the gate/up matrices as 4-bit codes for the CPU kernel,
+    all the model's experts, no prefetch; it needs the model's size plus REPACK_MARGIN of free memory. "prefetch": page-locked experts and a
+    prefetch of 3, 7 experts; the page-locked copy cannot be swapped out, so it needs only the model's size plus a margin. "mapped": neither,
+    the experts stay mapped from the file. An explicit --iq3s-4bit or --expert-prefetch chooses by itself; otherwise the best family that
+    the free memory allows runs."""
+    if repack:
+        return "repack", []
+    if expert_prefetch:
+        return "prefetch", []
+    if overlap or igpu_experts:
+        return "mapped", ["the 4-bit repack of the gate/up matrices does not combine with --overlap or --igpu-experts, so it is off"]
+    if profile_name not in PREFETCH_DEFAULT_PROFILES:
+        return "mapped", []
+    needed, repack_needed = model_size + PROTECT_MARGIN, model_size + REPACK_MARGIN
+    if available is None:
+        return "mapped", ["the free memory could not be read, so the 4-bit repack and the prefetch are off"]
+    if available < needed:
+        return "mapped", [f"{available / GIB:.1f} GiB of memory is available and the page-locked experts need about {needed / GIB:.1f} GiB, "
+                          "so the 4-bit repack and the prefetch are off"]
+    if budget is not None and budget < needed:
+        return "mapped", [f"the memory budget of {budget / GIB:.1f} GiB is below the {needed / GIB:.1f} GiB the page-locked experts need, "
+                          "so the 4-bit repack and the prefetch are off"]
+    if available < repack_needed or (budget is not None and budget < repack_needed):
+        return "prefetch", [f"{available / GIB:.1f} GiB of memory is available and the 4-bit repack of the gate/up matrices needs about "
+                            f"{repack_needed / GIB:.1f} GiB to stay out of the swap, so the fast set uses the prefetch family (7 experts)"]
+    return "repack", []
+
+
+def apply_fast_family(args: argparse.Namespace, family: str) -> None:
+    """Fills in what the family needs and the user did not say; every explicit value stays."""
+    if family == "repack":
+        if args.experts_used is None:
+            args.experts_used = FAST50_EXPERTS_REPACK
+        if args.expert_prefetch is None:
+            args.expert_prefetch = 0
+        args.iq3s_4bit = True
+        args.iq3s_4bit_drop = True
+        return
+    if args.experts_used is None:
+        args.experts_used = FAST50_EXPERTS_PREFETCH
+    if family == "prefetch":
+        if args.expert_prefetch is None:
+            args.expert_prefetch = FAST50_PREFETCH
+        args.warm_experts = args.warm_experts or FAST50_WARM_KIB
 
 
 def experts_used_env(experts_used: int | None) -> dict:
@@ -369,6 +418,7 @@ def scope_properties(memory_budget: str | None, background: bool, memory_low: in
 GIB = 1 << 30
 SIZE_UNITS = {"": 1, "K": 1 << 10, "M": 1 << 20, "G": GIB, "T": 1 << 40}
 PROTECT_MARGIN = 2 * GIB    # what the server needs next to the cached model: KV cache, buffers, the Python server
+REPACK_MARGIN = 6 * GIB   # free memory beyond the model's size: the repacked copy is ordinary memory the kernel may swap out (16 GiB free thrashed, 26 GiB ran clean)
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 
 
@@ -544,9 +594,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="greedy: MTP drafts speed decoding up (default); card: the model card's sampling, no drafts")
     parser.add_argument("--mtp", type=int, help="MTP drafts per speculative step (0 turns drafting off)")
     parser.add_argument("--workers", type=int, help="CPU expert worker threads (the main thread computes too)")
-    parser.add_argument("--max-temp", type=float, default=80.0, metavar="C",
+    parser.add_argument("--max-temp", type=float, default=DEFAULT_LIMIT_C, metavar="C",
                         help="pause the engine for part of the time whenever the CPU package or the GPU reaches this many "
-                             "degrees Celsius (default 80, 0 turns the limit off)")
+                             f"degrees Celsius (default {DEFAULT_LIMIT_C:g}, 0 turns the limit off)")
     parser.add_argument("--cpu-max-mhz", type=float, default=None, metavar="MHZ",
                         help="hold the highest CPU frequency at this many MHz while the server runs and put it back at exit "
                              f"(default {DEFAULT_CPU_MAX_MHZ:g} with the auto profile, with {CAPPED_WORKERS} workers and no pool spin; 0 turns the "
@@ -567,8 +617,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--spec-sampling", action="store_true",
                         help="requests with a temperature or penalties use the MTP drafts too, with the exact rejection rule (off by default)")
     parser.add_argument("--iq3s-4bit", action="store_true",
-                        help="repack the IQ3_S gate/up matrices into 4-bit codes at start for the CPU kernel (same values, +2 GiB of RAM; mapped experts only, "
-                             "so not with --expert-prefetch; off by default)")
+                        help="repack the IQ3_S gate/up matrices into 4-bit codes at start for the CPU kernel (same values, about 10.6 GiB of RAM; mapped experts "
+                             "only, so not with --expert-prefetch; the default fast set turns it on where the memory allows)")
     parser.add_argument("--strict", action="store_true",
                         help="an expert gives the same bits on the CPU and in VRAM, so the output does not depend on the slots or the prefetch guesses: "
                              "the GPU runs kernels with the CPU's arithmetic (IQ3_S gate/up, IQ4_XS down, iq kernels on); for other formats the engine "
@@ -600,17 +650,16 @@ def build_parser() -> argparse.ArgumentParser:
                         help="with --iq3s-4bit, drop the original gate/up pages from the page cache after the repack (saves about 10 GiB of cache; "
                              "a prompt chunk reads them again from the disk; off by default)")
     parser.add_argument("--fast50", action="store_true",
-                        help="the default since 13 November 2026, kept as a flag for old command lines: the measured set for a sustained 50 tok/s at a "
-                             "small cost in quality (54 tok/s on average over requests back to back, HumanEval 149 of 164 against 153): the dense Q4_K "
-                             "file, 7 experts, prefetch 3, lazy K/V, warm experts, adaptive draft depth, chained drafts, n-gram drafts and the draft "
-                             "token list; every flag given explicitly wins (--experts-used 8: about 50 on average with dips to 43; "
-                             "--experts-used 6: 58 on a short request, HumanEval 146)")
+                        help="the default since 13 November 2026, kept as a flag for old command lines: the measured fast set (docs/LOSSLESS_BACKLOG.md): the "
+                             "dense Q4_K file, lazy K/V, adaptive draft depth, chained drafts, n-gram drafts and the draft token list, and one of two "
+                             "families by the free memory: the 4-bit repack of the gate/up matrices with all 8 experts and no prefetch (needs about "
+                             "the model's size in free memory), else prefetch 3 with 7 experts; every flag given explicitly wins")
     parser.add_argument("--no-fast50", action="store_true",
                         help="start without the 50 tok/s set: the dense Q5_K file, 7 experts and prefetch 3 only (the default before 13 November 2026)")
     parser.add_argument("--mtp-adapt", action="store_true",
                         help="after a step whose first draft was rejected, verify one draft only in the next step (the text is unchanged; off by default)")
     parser.add_argument("--cpu-adaptive", action="store_true",
-                        help="let a controller move the CPU frequency cap between 1800 and 2600 MHz so that the hottest sensor stays near 77 C "
+                        help="let a controller move the CPU frequency cap between 1800 and 2600 MHz so that the hottest sensor stays 3 C under the temperature limit "
                              "(the cap above is its starting value; off by default, the fixed cap stays), see the frequency cap in docs/TUNING.md")
     parser.add_argument("--experts-used", type=int, default=None, metavar="K",
                         help=f"route every token to K experts instead of the model's {MODEL_EXPERTS_USED} (1 to {MODEL_EXPERTS_USED}): fewer expert products per "
@@ -654,13 +703,8 @@ def main() -> int:
     if args.fast50:
         if args.model is None and DENSE_Q4K_FILE.exists():
             args.model = DENSE_Q4K_FILE
-        if args.experts_used is None:
-            args.experts_used = FAST50_EXPERTS
-        if args.expert_prefetch is None:
-            args.expert_prefetch = FAST50_PREFETCH
         if args.parallel == 1:   # the lazy K/V cache serves one session
             args.kv_lazy = args.kv_lazy or FAST50_KV_TIER
-        args.warm_experts = args.warm_experts or FAST50_WARM_KIB
         args.mtp_adapt = True
         args.chain_device = True
         args.ngram = args.ngram or FAST50_NGRAM
@@ -729,6 +773,12 @@ def main() -> int:
         budget_bytes = None if args.no_limit or not profile["ram"] else parse_size(profile["ram"])
     except ValueError:
         budget_bytes = None
+    if args.fast50:
+        family, family_notes = choose_fast_family(args.expert_prefetch, args.iq3s_4bit, args.profile, model_size, available, budget_bytes,
+                                                  bool(args.overlap), bool(args.igpu_experts))
+        apply_fast_family(args, family)
+        for note in family_notes:
+            print(f"strata-launch: {note}", file=sys.stderr)
     experts_used, expert_prefetch, stack_notes = resolve_stack(args.experts_used, args.expert_prefetch, args.profile, model_size, available,
                                                                budget_bytes, bool(args.overlap), bool(args.igpu_experts))
     for note in stack_notes:

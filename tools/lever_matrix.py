@@ -22,6 +22,7 @@ TOOLS = Path(__file__).resolve().parent
 ENGINE_ROOT = TOOLS.parent
 LEVERS_DIR = TOOLS / "levers.d"
 QUANT_BENCH = TOOLS / "quant_bench.py"
+DEFAULT_MAX_TEMP_C = 70.0
 DEFAULT_MODEL = Path("models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp.gguf")
 OUT_ROOT = Path("run/experiments/levers")
 RAW_DIR = "raw"
@@ -724,7 +725,7 @@ def build_parser() -> argparse.ArgumentParser:
     selection.add_argument("--max-tokens", type=int, default=900)
     selection.add_argument("--cpu-max-mhz", type=float, default=2200.0)
     selection.add_argument("--workers", type=int, default=6)
-    selection.add_argument("--max-temp", type=float, default=80.0)
+    selection.add_argument("--max-temp", type=float, default=DEFAULT_MAX_TEMP_C)
     selection.add_argument("--cool", type=float, default=55.0, help="start every run and every request with the package at or below this many degrees")
     selection.add_argument("--cool-timeout", type=float, default=900.0)
     selection.add_argument("--max-load", type=float, default=1.5, help="load average below which the next run may start")

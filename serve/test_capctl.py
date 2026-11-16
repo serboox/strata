@@ -93,6 +93,23 @@ class CreateTests(unittest.TestCase):
                 capctl.create({"cpu_adaptive": block}, FakeCap(2100), lambda: {})
 
 
+class DefaultTargetTests(unittest.TestCase):
+    def test_the_target_follows_the_pause_limit_of_the_same_config(self):
+        self.assertEqual(capctl.default_target_c({"max_temp_c": 70}), 67.0)
+        self.assertEqual(capctl.default_target_c({"max_temp_c": 80.0}), 77.0)
+
+    def test_without_a_usable_limit_the_old_target_stays(self):
+        for block in ({}, {"max_temp_c": 0}, {"max_temp_c": True}, {"max_temp_c": "70"}, {"max_temp_c": 2.0}):
+            self.assertEqual(capctl.default_target_c(block), capctl.DEFAULT_TARGET_C)
+
+    def test_create_aims_under_the_limit_unless_told_otherwise(self):
+        cap = FakeCap(2100)
+        controller = capctl.create({"max_temp_c": 70, "cpu_adaptive": True}, cap, lambda: {})
+        self.assertEqual(controller.target_c, 67.0)
+        controller = capctl.create({"max_temp_c": 70, "cpu_adaptive": {"target_c": 65}}, cap, lambda: {})
+        self.assertEqual(controller.target_c, 65.0)
+
+
 class SetMhzTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()

@@ -21,7 +21,7 @@ import quant_bench
 from serve import cpucap, thermal
 
 DEFAULT_PORT = 8091
-DEFAULT_MAX_TEMP_C = 80.0
+DEFAULT_MAX_TEMP_C = thermal.DEFAULT_LIMIT_C
 DEFAULT_CPU_MAX_MHZ = 2100.0
 COOL_START_C = 55.0
 COOL_WAIT_SECONDS = 900.0

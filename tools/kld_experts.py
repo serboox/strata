@@ -19,13 +19,14 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(1, str(Path(__file__).resolve().parent))
 import quant_bench  # noqa: E402
 from serve.cpucap import MAX_MHZ, MIN_MHZ, CpuCap  # noqa: E402
+from serve.thermal import DEFAULT_LIMIT_C  # noqa: E402
 
 EXPERTS_KEY = "qwen35moe.expert_used_count"
 DEFAULT_KS = (8, 7, 6, 5, 4)
 DEFAULT_CTX = 512
 DEFAULT_CHUNKS = 24
 DEFAULT_THREADS = 6
-DEFAULT_MAX_TEMP = 80.0
+DEFAULT_MAX_TEMP = DEFAULT_LIMIT_C
 DEFAULT_RESUME_MARGIN = 10.0
 DEFAULT_COOL = 55.0
 DEFAULT_BUDGET_MINUTES = 120.0

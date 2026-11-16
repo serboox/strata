@@ -22,6 +22,7 @@ GIB = 1 << 30
 ENGINE_ROOT = Path(__file__).resolve().parents[1]
 THERMAL_ROOT = Path("/sys/class/thermal")
 PRESSURE_FILE = Path("/proc/pressure/memory")
+DEFAULT_MAX_TEMP_C = 70.0
 CGROUP_ROOT = Path("/sys/fs/cgroup")
 USER_SERVICE = CGROUP_ROOT / "user.slice" / f"user-{os.getuid()}.slice" / f"user@{os.getuid()}.service"
 PROFILE_OF_BUDGET = {"none": "auto", "22G": "max", "16G": "fast", "12G": "balanced", "8G": "lean"}
@@ -542,7 +543,7 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=18080)
     parser.add_argument("--cool", type=float, default=55.0, help="start each request with the CPU package at or below this many degrees")
     parser.add_argument("--cool-timeout", type=float, default=600.0)
-    parser.add_argument("--max-temp", type=float, default=80.0, help="the server's own temperature limit in degrees Celsius for the CPU and the GPU "
+    parser.add_argument("--max-temp", type=float, default=DEFAULT_MAX_TEMP_C, help="the server's own temperature limit in degrees Celsius for the CPU and the GPU "
                         "(0 = none); the launcher's default")
     parser.add_argument("--allow-turbo", action="store_true", help="measure although the CPU turbo boost is on")
     parser.add_argument("--save-log", type=Path, help="copy the server log (with the engine's own counters) here when the run ends (default: <out>.log)")
