@@ -3347,11 +3347,8 @@ struct Engine {
                 for (int x = ne_gpu; x < ne; ++x)
                     for (int64_t r = h_rb[x]; r < h_rb[x + 1];) {
                         C::ExpertJobMulti j;
-                        const uint8_t* gate = L.src_g + (size_t) x * L.src_gsz;
                         C::NativeFmt& f = cpu_fmt.emplace_back(H.fmt);
-                        f.up_off = (size_t) ((uintptr_t) (L.src_u + (size_t) x * L.src_gsz) - (uintptr_t) gate);
-                        f.down_off = (size_t) ((uintptr_t) (L.src_d + (size_t) x * L.src_dsz) - (uintptr_t) gate);
-                        j.blob = gate;
+                        j.blob = cpu_gate_up(L, (size_t) x, f);
                         j.fmt = &f;
                         for (; r < h_rb[x + 1] && j.nt < C::MAXT; ++r) {
                             const int t = h_ids[r];
@@ -3533,8 +3530,19 @@ struct Engine {
     bool strict_on_gpu(size_t li) const { return strict_gpu && !(li < strict_cpu_layer.size() && strict_cpu_layer[li]); }
     /// The CPU computes this layer's gate/up rows with the 4-bit kernel on repacked rows (build_jobs_glue sets gu_odd4 the same way)
     static bool layer_odd4(const Layer& L) { return L.hblobs == nullptr && L.rp_g != nullptr; }
-    /// Expert x's down matrix as the CPU path reads it: the page-locked copy when the layer has one, else the GGUF in place.
-    static const uint8_t* cpu_down(const Layer& L, size_t x) { return (L.rp_d != nullptr ? L.rp_d : L.src_d) + x * L.src_dsz; }
+    /// Expert x's down matrix: the page-locked copy when the layer has one (the CPU jobs, the slot uploads and the streamed prompt chunks all
+    /// read it: no page of the file is needed for it any more), else the GGUF in place.
+    static const uint8_t* down_of(const Layer& L, size_t x) { return (L.rp_d != nullptr ? L.rp_d : L.src_d) + x * L.src_dsz; }
+    /// Expert x's gate/up as a CPU job reads them: the repacked page-locked copies (the 4-bit kernel) or the GGUF's IQ3_S bytes in place.
+    /// Fills the format fields the choice needs; returns the gate row pointer, the job's blob.
+    static const uint8_t* cpu_gate_up(const Layer& L, size_t x, strata::kernels::cpu::NativeFmt& f) {
+        const uint8_t* gate = L.rp_g != nullptr ? L.rp_g + x * L.rp_gsz : L.src_g + x * L.src_gsz;
+        const uint8_t* up = L.rp_g != nullptr ? L.rp_u + x * L.rp_gsz : L.src_u + x * L.src_gsz;
+        f.up_off = (size_t) ((uintptr_t) up - (uintptr_t) gate);   // modular: the files' tensor order does not matter
+        f.down_off = (size_t) ((uintptr_t) down_of(L, x) - (uintptr_t) gate);
+        if (L.rp_g != nullptr) { f.gu_odd4 = true; f.gu_row = L.rp_gsz / (size_t) f.n_ff; }
+        return gate;
+    }
     int attn_ahead = 8;          // STRATA_Q36_ATTN_AHEAD: V cells loaded together by the decode attention kernel
     bool head_sub_off() const { return m->head_sub.d == nullptr; }
     int32_t draft_token(int32_t picked) const {
@@ -3717,7 +3725,7 @@ struct Engine {
         }
         CK(cudaMemcpyAsync(dst, L.src_g + (size_t) x * L.src_gsz, L.src_gsz, cudaMemcpyHostToDevice, s));
         CK(cudaMemcpyAsync(dst + L.L.up_off, L.src_u + (size_t) x * L.src_gsz, L.src_gsz, cudaMemcpyHostToDevice, s));
-        CK(cudaMemcpyAsync(dst + L.L.down_off, L.src_d + (size_t) x * L.src_dsz, L.src_dsz, cudaMemcpyHostToDevice, s));
+        CK(cudaMemcpyAsync(dst + L.L.down_off, down_of(L, (size_t) x), L.src_dsz, cudaMemcpyHostToDevice, s));
     }
     /// Experts [x0, x0 + n) of layer L into consecutive blobs, `stride` apart, at `dst`; the bytes between a blob's end
     /// and the next one's start are zero, as in the arena.
@@ -3733,7 +3741,7 @@ struct Engine {
                              cudaMemcpyHostToDevice, s));
         CK(cudaMemcpy2DAsync(dst + L.L.up_off, L.stride, L.src_u + (size_t) x0 * L.src_gsz, L.src_gsz, L.src_gsz, un,
                              cudaMemcpyHostToDevice, s));
-        CK(cudaMemcpy2DAsync(dst + L.L.down_off, L.stride, L.src_d + (size_t) x0 * L.src_dsz, L.src_dsz, L.src_dsz, un,
+        CK(cudaMemcpy2DAsync(dst + L.L.down_off, L.stride, down_of(L, (size_t) x0), L.src_dsz, L.src_dsz, un,
                              cudaMemcpyHostToDevice, s));
     }
 
@@ -3775,7 +3783,7 @@ struct Engine {
             } else {
                 part[0] = NL.src_g + (size_t) id * NL.src_gsz;
                 part[1] = NL.src_u + (size_t) id * NL.src_gsz;
-                part[2] = NL.src_d + (size_t) id * NL.src_dsz;
+                part[2] = down_of(NL, (size_t) id);
                 size[0] = std::min(bytes, NL.src_gsz);
                 size[1] = std::min(bytes, NL.src_gsz);
                 size[2] = std::min(bytes, NL.src_dsz);
@@ -3874,7 +3882,7 @@ struct Engine {
         if (L.hblobs != nullptr || reader) return;
         willneed(L.src_g + (size_t) u.e0 * L.src_gsz, (size_t) u.n * L.src_gsz);
         willneed(L.src_u + (size_t) u.e0 * L.src_gsz, (size_t) u.n * L.src_gsz);
-        willneed(L.src_d + (size_t) u.e0 * L.src_dsz, (size_t) u.n * L.src_dsz);
+        willneed(down_of(L, (size_t) u.e0), (size_t) u.n * L.src_dsz);
     }
     void stream_kick(int i) {   // the i-th unit of the sequence into staging buffer i % 2, after its last reader
         prefetch_unit(i + kPrefetchUnits);
@@ -4045,7 +4053,7 @@ struct Engine {
                     const uint8_t* up = L.rp_g != nullptr ? L.rp_u + (size_t) x * L.rp_gsz : L.src_u + (size_t) x * L.src_gsz;
                     C::NativeFmt& f = out_fmt.emplace_back(H.fmt);
                     f.up_off = (size_t) ((uintptr_t) up - (uintptr_t) gate);   // modular: the
-                    f.down_off = (size_t) ((uintptr_t) cpu_down(L, (size_t) x) - (uintptr_t) gate); // file's tensor order does not matter
+                    f.down_off = (size_t) ((uintptr_t) down_of(L, (size_t) x) - (uintptr_t) gate); // file's tensor order does not matter
                     if (L.rp_g != nullptr) { f.gu_odd4 = true; f.gu_row = L.rp_gsz / (size_t) f.n_ff; }
                     j.blob = gate;
                     j.fmt = &f;
@@ -4108,7 +4116,7 @@ struct Engine {
                     const uint8_t* up = L.rp_g != nullptr ? L.rp_u + (size_t) x * L.rp_gsz : L.src_u + (size_t) x * L.src_gsz;
                     C::NativeFmt& f = job_fmt.emplace_back(H.fmt);
                     f.up_off = (size_t) ((uintptr_t) up - (uintptr_t) gate);
-                    f.down_off = (size_t) ((uintptr_t) cpu_down(L, (size_t) x) - (uintptr_t) gate);
+                    f.down_off = (size_t) ((uintptr_t) down_of(L, (size_t) x) - (uintptr_t) gate);
                     if (L.rp_g != nullptr) { f.gu_odd4 = true; f.gu_row = L.rp_gsz / (size_t) f.n_ff; }
                     j.blob = gate;
                     j.fmt = &f;
@@ -5014,7 +5022,7 @@ void attach_igpu(Engine& E, const std::vector<Layer*>& all, int rows) {
 
 /// STRATA_IQ3S_4BIT=1: repacks the IQ3_S gate and up matrices of every layer into 4-bit codes for the CPU kernel (about 2.0 GiB more than the
 /// GGUF's own bytes, in anonymous memory); the GGUF's bytes stay for the GPU.  Only the mapped-experts path reads the copies.
-void repack_iq3s_gate_up(Model& m) {
+void repack_iq3s_gate_up(Model& m, int cpu_share_experts) {
     const char* want = std::getenv("STRATA_IQ3S_4BIT");
     if (want == nullptr || want[0] != '1') return;
     namespace C = strata::kernels::cpu;
@@ -5067,11 +5075,16 @@ void repack_iq3s_gate_up(Model& m) {
             }
             std::memcpy(L.rp_d, L.src_d, L.src_dsz * ne);
             ++done_layers;
-            if (drop_pages) {   // the CPU path no longer reads the original gate/up pages: let the page cache go (a prompt chunk reads them again from the disk)
-                for (int r = 0; r < 2; ++r) {
+            if (drop_pages) {   // pages that nothing reads any more leave the page cache: every expert's down matrix (the pinned copy serves every
+                                // reader) and the gate/up of the experts a prompt chunk gives to the CPU (the pinned 4-bit copies serve them);
+                                // the gate/up of the other experts stay cached, a prompt chunk streams them to the card from the file
+                const size_t first_cpu = ne - (size_t) cpu_share_experts;
+                for (int r = 0; r < 3; ++r) {
+                    const size_t per_expert = r < 2 ? L.src_gsz : L.src_dsz, from = r < 2 ? first_cpu : 0;
+                    if (from >= ne) continue;
                     const int fd = ::open(L.src_path[r].c_str(), O_RDONLY);
                     if (fd < 0) continue;
-                    ::posix_fadvise(fd, (off_t) L.src_off[r], (off_t) (L.src_gsz * ne), POSIX_FADV_DONTNEED);
+                    ::posix_fadvise(fd, (off_t) (L.src_off[r] + from * per_expert), (off_t) ((ne - from) * per_expert), POSIX_FADV_DONTNEED);
                     ::close(fd);
                 }
             }
@@ -6552,7 +6565,7 @@ int strata::qwen35::run(int argc, char** argv) {
         std::fprintf(stderr, "strata-q36: %s\n", err.c_str());
         return 1;
     }
-    repack_iq3s_gate_up(m);
+    repack_iq3s_gate_up(m, E.cpu_expert_count());
     setup_strict(m, E);
     E.ckpt_dir = ckpt_dir_arg;
     {

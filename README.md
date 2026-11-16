@@ -145,7 +145,9 @@ Two things are not measured cleanly. Under the **70 C limit** one run of the pre
 laptop, and `--max-temp 80` gives the figures above. The first **repack** start (16 GiB free, memory not yet page-locked) thrashed (12 to 44 tokens per
 second, a prompt of 4000 tokens took 178 s, 7 GiB in swap). With the memory page-locked one start at 21 GiB free gave 53, 59 and 61 tokens per
 second on three requests of 500 tokens with no swap use by the engine (other programs went into the swap instead: 3.9 to 6.8 GiB); no
-sustained series was run. Details in [docs/LOSSLESS_BACKLOG.md](docs/LOSSLESS_BACKLOG.md) and [docs/TPS_REPORT.md](docs/TPS_REPORT.md).
+sustained series was run. Prompts of 6800 to 7700 new tokens were read at 129, 181 and 157 tokens per second under an 80 C limit (the card's
+link is the limit, not the disk) and at 124, 86 and 72 under the 70 C limit, where the governor paused the engine up to 85 percent of the time;
+the generation right after them ran at 43 to 48 against 24 to 41 tokens per second. Details in [docs/LOSSLESS_BACKLOG.md](docs/LOSSLESS_BACKLOG.md) and [docs/TPS_REPORT.md](docs/TPS_REPORT.md).
 
 ```sh
 python3 tools/requant_dense.py models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp.gguf \
