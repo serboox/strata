@@ -139,7 +139,8 @@ tokens per second).
 
 Measured on the reference laptop (code prompt, MTP 2, 2.2 GHz cap, 80 C limit): the prefetch family gave 57 tokens per second on a short
 request and 54 on average over eight requests of 900 tokens back to back (the slowest 48), HumanEval 149 of 164 against 153 for the
-unchanged file; the dense Q4_K file has a mean KL divergence of about 0.0125 from the unchanged file and 7 experts about 0.025.
+unchanged file; the dense Q4_K file has a mean KL divergence of about 0.037 from the unchanged file (0.043 by llama.cpp's measure), 7 experts
+alone about 0.025, the two together 0.041.
 Two things are not measured cleanly. Under the **70 C limit** one run of the prefetch family, started on a package that had not cooled, averaged
 32 tokens per second (25 to 52) while the governor paused the engine 20 to 85 percent of the time: the lower limit costs sustained speed on this
 laptop, and `--max-temp 80` gives the figures above. The first **repack** start (16 GiB free, memory not yet page-locked) thrashed (12 to 44 tokens per
