@@ -82,6 +82,7 @@ flags switched off prints the same command as before. Not measured: how the mode
 | `--workers` | 3 | CPU expert threads besides the main one; 4 is slower, 7 is half the speed |
 | `--mtp` | 2 | drafts per step, about 90% accepted; 3 and 4 were not faster |
 | `--sampling` | greedy | drafting runs only for greedy requests, `card` turns it off |
+| `--no-loop-guards` | guards on | by default thinking that repeats whole passages is closed and the model answers, and a tool call sent again with the same arguments and the same result gets a note, then ends the reply (the config keys `"reasoning_loop_recovery": "wrap"` and `"repeat_call_guard": true`); the flag leaves both out. See "Loops" in [PI.md](PI.md) |
 | `--max-temp` | 70 | while the CPU package or the GPU is at this many degrees or hotter, the engine is paused for a share of every half second, a bigger share the hotter it is; 0 turns the limit off |
 | `--turbo` | off | the CPU turbo boost at start: `off`, `on` or `keep`; `tools/turbo on|off|status` switches it at any time |
 | `--priority` | background | the server and the engine yield the CPU and the disk to every other program (see "Staying in the background"); `normal` leaves the priorities alone |

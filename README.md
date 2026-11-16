@@ -135,7 +135,10 @@ tokens per second).
   free memory of at least the model's size plus 2 GiB; without it the launcher stops with `strata-launch: cannot start: ...` and a
   hint, and the engine stops with `strata-q36: cannot start: ...` if the page-locked memory cannot be allocated; neither starts a
   slower setting on its own;
-- a temperature limit of 70 C (`--max-temp`): the engine pauses for part of every half second when the CPU or the GPU nears it.
+- a temperature limit of 70 C (`--max-temp`): the engine pauses for part of every half second when the CPU or the GPU nears it;
+- two guards against a model that runs in circles (`--no-loop-guards` leaves them out): thinking that repeats whole passages is closed
+  and the model answers, and a tool call sent for the third time with the same arguments and the same result ends the reply with a
+  notice instead of one more call. Both act only when a repeat is seen; see "Loops" in [docs/PI.md](docs/PI.md).
 
 Measured on the reference laptop (code prompt, MTP 2, 2.2 GHz cap, 80 C limit): the prefetch family gave 57 tokens per second on a short
 request and 54 on average over eight requests of 900 tokens back to back (the slowest 48), HumanEval 149 of 164 against 153 for the
@@ -154,6 +157,7 @@ the generation right after them ran at 43 to 48 against 24 to 41 tokens per seco
 python3 tools/requant_dense.py models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp.gguf \
     models/qwen3.6-35b-a3b/Qwen3.6-35B-A3B-UD-IQ4_XS-mtp-d4.gguf --groups all --to q4_K     # makes the dense Q4_K file
 bin/strata-serve --max-temp 80                                                             # the earlier temperature limit
+bin/strata-serve --no-loop-guards                                                          # let the model repeat itself: no guard acts
 bin/strata-serve --iq3s-4bit --iq3s-4bit-drop --experts-used 8                             # force the repack family whatever the memory
 bin/strata-serve --experts-used 7 --expert-prefetch 3                                      # 7 experts with prefetch: needs the model's size plus 2 GiB
 bin/strata-serve --no-fast50                                                               # dense Q5_K, 7 experts, prefetch 3 only (44 to 46)

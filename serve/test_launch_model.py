@@ -68,6 +68,21 @@ class ConfigTests(unittest.TestCase):
     def test_the_config_has_no_env_unless_asked(self):
         self.assertNotIn("env", strata_launch.build_config(dict(self.profile), 8080, "greedy"))
 
+    def test_the_loop_guards_are_in_the_config_by_default(self):
+        config = strata_launch.build_config(dict(self.profile), 8080, "greedy")
+        self.assertEqual(config["reasoning_loop_recovery"], "wrap")
+        self.assertIs(config["repeat_call_guard"], True)
+
+    def test_the_loop_guards_can_be_left_out(self):
+        config = strata_launch.build_config({**self.profile, "loop_guards": False}, 8080, "greedy")
+        self.assertFalse(set(strata_launch.LOOP_GUARDS) & set(config))
+
+    def test_the_loop_guards_have_a_switch(self):
+        parser = strata_launch.build_parser()
+        self.assertFalse(parser.parse_args([]).no_loop_guards)
+        self.assertTrue(parser.parse_args(["--no-loop-guards"]).no_loop_guards)
+        self.assertTrue(parser.parse_args(strata_launch.restore_old_abbreviations(["--no-l"])).no_limit)
+
     def test_the_kernel_switch_reaches_the_engine_environment(self):
         config = strata_launch.build_config(dict(self.profile), 8080, "greedy", 80.0, strata_launch.IQ_KERNELS_ENV)
         self.assertEqual(config["env"], {"STRATA_IQ_VBMI": "1"})

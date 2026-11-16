@@ -73,6 +73,10 @@ def engine_args(profile: dict) -> list:
 # only for greedy requests (temperature 0, no penalties); the model card's sampling (temperature, presence penalty) leaves
 # the drafts unused, and a request that sets its own temperature is not greedy either.
 GREEDY_SAMPLING = {"temperature": 0, "presence_penalty": 0, "frequency_penalty": 0, "repetition_penalty": 1}
+# Greedy decoding answers the same state with the same words, so a model that starts to repeat itself never stops by
+# itself.  The server's guards act only when a repeat is seen: thinking that repeats whole passages is closed and the
+# model answers; the same tool call made again and again with the same result gets a note, then ends the reply.
+LOOP_GUARDS = {"reasoning_loop_recovery": "wrap", "repeat_call_guard": True}
 
 
 IQ_EXPERT_TYPES = ("IQ3_S", "IQ4_XS")
@@ -288,6 +292,8 @@ def build_config(profile: dict, port: int, sampling: str, max_temp: float = 0, e
               "log": str(ROOT / "logs" / "strata-qwen36.log"), "host": "127.0.0.1", "port": port}
     if sampling == "greedy":
         config["sampling"] = GREEDY_SAMPLING
+    if profile.get("loop_guards", True):
+        config.update(LOOP_GUARDS)
     if max_temp > 0:
         config["thermal"] = {"max_temp_c": max_temp}
     if profile.get("cpu_max_mhz"):
@@ -565,8 +571,8 @@ def plan_memory(protect: bool | None, prewarm: bool | None, io: str, budget: str
     return memory_low, prewarm_bytes, scope_for_prewarm, messages
 
 
-# Abbreviations that stay accepted although --protect-ram, --prewarm and their --no- forms share these prefixes.
-OLD_ABBREVIATIONS = {"--pro": "--profile", "--n": "--no-limit", "--no": "--no-limit", "--no-": "--no-limit",
+# Abbreviations that stay accepted although --protect-ram, --prewarm, their --no- forms and --no-loop-guards share these prefixes.
+OLD_ABBREVIATIONS = {"--pro": "--profile", "--n": "--no-limit", "--no": "--no-limit", "--no-": "--no-limit", "--no-l": "--no-limit",
                      "--ch": "--chunk", "--d": "--dry-run", "--dr": "--dry-run", "--mt": "--mtp", "--r": "--ram", "--s": "--sampling",
                      "--w": "--workers"}
 
@@ -605,6 +611,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--chunk", type=int, help="prompt chunk in tokens (more is faster, and takes VRAM)")
     parser.add_argument("--sampling", choices=("greedy", "card"), default="greedy",
                         help="greedy: MTP drafts speed decoding up (default); card: the model card's sampling, no drafts")
+    parser.add_argument("--no-loop-guards", action="store_true",
+                        help="do not end thinking that repeats whole passages and do not stop the same tool call made again and again with the same result (both are on by default)")
     parser.add_argument("--mtp", type=int, help="MTP drafts per speculative step (0 turns drafting off)")
     parser.add_argument("--workers", type=int, help="CPU expert worker threads (the main thread computes too)")
     parser.add_argument("--max-temp", type=float, default=DEFAULT_LIMIT_C, metavar="C",
@@ -812,6 +820,7 @@ def main() -> int:
     config_path = RUN_DIR / "qwen36.json"
     kernel_env = iq_kernel_env(args.iq_kernels, MODEL_FILE)
     lever_env = {**experts_used_env(experts_used), **(overlap_environment(args.overlap) or {}), **({"STRATA_Q36_MTP_ADAPT": "1"} if args.mtp_adapt else {}), **({"STRATA_Q36_CHAIN_DEV": "1"} if args.chain_device else {}), **({"STRATA_Q36_LEND": "1"} if args.lend_buffers else {}), **({"STRATA_Q36_KV_LAZY": "1", "STRATA_Q36_KV_TIER": str(args.kv_lazy)} if args.kv_lazy else {}), **({"STRATA_Q36_HEAD2": "1"} if args.head2 else {}), **({"STRATA_Q36_INTERLEAVE": "1"} if args.interleave else {}), **({"STRATA_Q36_STRICT": "cpu"} if args.strict_cpu else {"STRATA_Q36_STRICT": "1"} if args.strict else {}), **({"STRATA_Q36_PF_LEAD": "2"} if args.prefetch_lead2 else {}), **({"STRATA_Q36_ATTN_AHEAD": "16"} if args.attn_ahead else {}), **({"STRATA_IQ3S_4BIT": "1"} if args.iq3s_4bit else {}), **({"STRATA_IQ3S_4BIT_DROP": "1"} if args.iq3s_4bit_drop else {}), **({"STRATA_Q36_SPEC_SAMPLING": "1"} if args.spec_sampling else {}), **({"STRATA_Q36_NGRAM": str(args.ngram)} if args.ngram else {}), **({"STRATA_Q36_WARM": str(args.warm_experts)} if args.warm_experts else {}), **({"STRATA_Q36_DRAFT_LIST": str(args.draft_list)} if args.draft_list else {})}
+    profile["loop_guards"] = not args.no_loop_guards
     config = build_config(profile, args.port, args.sampling, args.max_temp,
                           with_igpu(engine_environment(kernel_env, cpu_max_mhz, lever_env), args.igpu_experts))
     config_path.write_text(json.dumps(config, indent=1) + "\n", encoding="utf-8")

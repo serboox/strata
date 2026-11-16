@@ -1,8 +1,8 @@
 """CPU-only regression for opt-in reasoning recovery: python -m unittest serve.test_reasoning_loop_recovery."""
 import threading
 import unittest
-from serve.server import (Service, ByteTokenizer, MockEngine, HIGH_EFFORT,
-                          reasoning_repeat_coverage, focused_recovery_prompt)
+from serve.server import (Service, ByteTokenizer, MockEngine, HIGH_EFFORT, REASONING_WRAP_UP,
+                          reasoning_repeat_coverage, focused_recovery_prompt, loop_breaking_sampling)
 
 
 class Tokenizer(ByteTokenizer):
@@ -219,6 +219,72 @@ class ReasoningLoopRecovery(unittest.TestCase):
         self.assertEqual(retained, self.tok.encode(self.loop)[:len(retained)])
         self.assertEqual(engine.calls[1][1], 40000 - len(retained))
         self.assertNotIn('</think>', self.tok.decode(engine.calls[1][0]))
+
+    def wrap_case(self, scripts, max_new=40000, sampling=None):
+        engine = RecordingEngine(self.tok, scripts)
+        service = Service(engine, self.tok, None)
+        service.answer_room = False      # these cases test the loop guards at the cap itself
+        service.reasoning_loop_recovery = "wrap"
+        ids = self.tok.encode('<|im_start|>user\nTask<|im_end|>\n<|im_start|>assistant\n<think>\n', parse_special=True)
+        events = list(service.run(ids, True, [], max_new, {} if sampling is None else sampling, threading.Event()))
+        return service, engine, ids, events
+
+    def test_wrap_mode_closes_the_thinking_and_the_model_answers(self):
+        """The prompt has no effort sentence ("recover" skips such a request): any client's loop is closed."""
+        service, engine, ids, events = self.wrap_case([self.loop, 'Complete solution.'])
+        self.assertEqual(len(engine.calls), 2)
+        self.assertEqual(events[-1][1]['finish'], 'stop')
+        self.assertEqual(events[-1][1]['reasoning_recoveries'], 1)
+        self.assertLess(events[-1][1]['completion_tokens'], 20000)
+        content = ''.join(e.text or '' for kind, e in events if kind == 'event' and e.kind == 'content')
+        reasoning = ''.join(e.text or '' for kind, e in events if kind == 'event' and e.kind == 'reasoning')
+        self.assertEqual(content.strip(), 'Complete solution.')
+        self.assertIn('time to give my answer', reasoning)
+        wrap = self.tok.encode(REASONING_WRAP_UP, parse_special=True)
+        second = engine.calls[1][0]
+        self.assertEqual(second[:len(ids)], ids)                 # the prompt itself is not rewritten
+        self.assertEqual(second[-len(wrap):], wrap)              # the answer starts after the closed thinking
+        self.assertEqual(second[len(ids):-len(wrap)], self.tok.encode(self.loop)[:len(second) - len(ids) - len(wrap)])
+        self.assertEqual(service.history[-1]['reasoning_recoveries'], 1)
+        self.assertGreaterEqual(service.history[-1]['reasoning_repeat_coverage'], .25)
+
+    def test_wrap_mode_samples_the_rest_of_the_reply(self):
+        request = {'temperature': 0, 'presence_penalty': 0, 'top_p': .9, 'top_k': 30}
+        _, engine, _, _ = self.wrap_case([self.loop, 'Answer.'], sampling=request)
+        self.assertEqual(engine.sampling_calls[0], request)
+        self.assertEqual((engine.sampling_calls[1]['temperature'], engine.sampling_calls[1]['presence_penalty']), (1.0, 1.5))
+        self.assertEqual((engine.sampling_calls[1]['top_p'], engine.sampling_calls[1]['top_k']), (.9, 30))
+        self.assertEqual(request, {'temperature': 0, 'presence_penalty': 0, 'top_p': .9, 'top_k': 30})
+
+    def test_wrap_mode_leaves_thinking_that_does_not_repeat_alone(self):
+        thought = ' '.join(f'step {i} gives {i * 7}' for i in range(900))
+        _, engine, _, events = self.wrap_case([thought + '\n</think>\nAnswer.'])
+        self.assertEqual(len(engine.calls), 1)
+        self.assertEqual(events[-1][1]['finish'], 'stop')
+        self.assertEqual(events[-1][1]['reasoning_recoveries'], 0)
+        self.assertNotIn('time to give my answer', ''.join(e.text or '' for kind, e in events if kind == 'event'))
+
+    def test_wrap_mode_never_extends_the_output_limit(self):
+        _, engine, _, events = self.wrap_case([self.loop, self.loop], max_new=16384)
+        self.assertEqual(len(engine.calls), 2)
+        self.assertEqual(events[-1][1]['finish'], 'length')
+        self.assertEqual(events[-1][1]['completion_tokens'], 16384)
+        self.assertEqual(events[-1][1]['reasoning_recoveries'], 1)
+
+    def test_wrap_mode_closes_a_loop_written_as_one_long_word(self):
+        _, engine, _, events = self.wrap_case(['9^104 = ' + '58747693387' * 3000, 'Answer.'])
+        self.assertEqual(len(engine.calls), 2)
+        self.assertEqual(events[-1][1]['finish'], 'stop')
+        self.assertLess(events[-1][1]['completion_tokens'], 5000)
+
+    def test_loop_breaking_sampling_raises_two_settings_only(self):
+        given = {'temperature': .2, 'top_p': .5, 'seed': 7}
+        raised = loop_breaking_sampling(given)
+        self.assertEqual(raised, {'temperature': 1.0, 'presence_penalty': 1.5, 'top_p': .5, 'seed': 7})
+        self.assertEqual(given, {'temperature': .2, 'top_p': .5, 'seed': 7})
+        already = {'temperature': 1.2, 'presence_penalty': 2.0}
+        self.assertIs(loop_breaking_sampling(already), already)
+        self.assertEqual(loop_breaking_sampling(None), {'temperature': 1.0, 'presence_penalty': 1.5})
 
 
 if __name__ == '__main__':

@@ -270,6 +270,23 @@ If you start a plain `pi` while the local model is its default in
 - **Greedy decoding.** The launcher sets greedy sampling for requests that give none, which lets the model's MTP block
   draft ahead (about 90% of the drafts are accepted). A request that sets its own temperature or penalties is decoded
   without drafts. `bin/strata-serve --sampling card` uses the model card's sampling for everything instead.
+- **Loops.** Greedy decoding answers the same state with the same words, so a model that starts to repeat itself does
+  not stop by itself. Two guards of the server are on (`bin/strata-serve --no-loop-guards` leaves both out), and each
+  acts only when it sees a repeat:
+  - *Thinking that repeats whole passages* (a quarter of its last 2,000 words stand in 12-word passages written three
+    times) is closed with a short wrap-up sentence and the model answers; the rest of that reply is sampled with a
+    temperature and a presence penalty, so the answer does not walk back into the same passage.
+  - *The same tool call sent again*: when a call comes back for the second time with the same arguments and the same
+    result (also a block of two or three calls that repeats), its result carries a `[strata]` note that says so and the
+    reply is sampled; after the third time the server does not generate again and answers with a `[strata]` notice and
+    no call, which ends the agent's turn (the notice keeps to `max_tokens`; a request that asks for a JSON reply gets
+    a 400 with the same text). A result that differs is progress and never counts, a request without tools is left
+    alone, and a new message from the user starts the count again.
+
+  The guards bound a loop, they do not solve the task: after a stop, say what should be done differently. In a recorded
+  session of 16 November 2026 (thinking on) the same `edit` with equal old and new text was sent 13 times in 50 minutes,
+  each time after a reply of 4,000 to 6,700 tokens that was mostly repeated thinking; replayed through the guards, the
+  note comes after the second call, the stop after the third, and the thinking is closed at about 2,500 to 3,000 tokens.
 
 ## The Strata extension for pi
 
@@ -343,3 +360,5 @@ Checks: `cd tools/pi-strata && node --test test/*.test.ts` (unit tests), `node s
 | a 503 from the manager, "already taken" or "ended with code" | port 8081 is used by another program, or the server of the model failed to start: see `server.log` |
 | empty reply, 400 in the server log | the request is larger than the window, see context files above |
 | first reply after a long pause is slow | the page cache lost the experts; speed returns after a few requests |
+| a reply that starts with `[strata] The reply was stopped to end a loop` | the model sent the same tool call three times and got the same result each time, so the server ended the turn (see "Loops" above); tell the model what to do differently |
+| the thinking ends with "I have thought about this long enough; time to give my answer." | the server closed the thinking: it reached its budget (about three quarters of `max_tokens`), or it repeated whole passages; `server.log` says which |

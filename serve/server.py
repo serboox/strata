@@ -211,7 +211,8 @@ REASONING_CLOSE = "\n</think>\n\n"
 REASONING_WRAP_UP = "\n\nI have thought about this long enough; time to give my answer.\n</think>\n\n"
 # #728: opt-in handling of reasoning that repeats whole passages (which the single-token guard above cannot see).
 # "reasoning_loop_recovery": "stop" ends the reply there; "recover" (or true) goes on from the same output with the
-# low-effort instruction in place of the xhigh one.  Both off by default.
+# low-effort instruction in place of the xhigh one; "wrap" closes the thinking the way the budget does (the wrap-up
+# sentence, </think>) and lets the model answer, whatever the client sent.  All off by default.
 HIGH_EFFORT = EFFORT_TEXT["xhigh"]
 LOW_EFFORT = EFFORT_TEXT["low"]
 LOOP_CHECK_EVERY = 512           # output tokens between two looks at the reasoning (at a clean parser boundary)
@@ -264,6 +265,141 @@ def focused_recovery_prompt(tok, ids, generated):
         if head[i:i + len(old)] == old:
             return ids[:i] + new + ids[i + len(old):] + list(generated)
     return None
+
+
+def loop_breaking_sampling(sampling):
+    """The sampling with the two settings that keep the same words coming raised: temperature to at least 1.0 and
+    the presence penalty to at least 1.5.  A client's top_p and top_k are never touched, and its dict is copied, not
+    changed; when both settings are already there, the same object comes back."""
+    now = tuple(float((sampling or {}).get(k) or 0) for k in ("temperature", "presence_penalty"))
+    want = (max(1.0, now[0]), max(1.5, now[1]))
+    return sampling if want == now else {**(sampling or {}), "temperature": want[0], "presence_penalty": want[1]}
+
+
+# Opt-in ("repeat_call_guard" in the config): an agent whose model sends the same tool call again and again and gets
+# the same result every time never ends by itself, because the client runs each call and asks again.  The server sees
+# the whole conversation in every request, so it counts the identical tool rounds at its end.
+REPEAT_NOTE_AFTER = 2            # this many identical rounds: the next reply gets a note and the loop-breaking sampling
+REPEAT_STOP_AFTER = 3            # this many: the next reply is not generated; a notice ends the agent's turn
+REPEAT_MAX_PERIOD = 3            # the repeated block is one to three rounds long (edit, read, edit, read, ...)
+REPEAT_RESULT_SHOWN = 200        # chars of the repeated result quoted in the notice
+RepeatedCalls = collections.namedtuple("RepeatedCalls", "period times names result stop")
+
+
+def repeat_call_guard_setting(value):
+    """The config's "repeat_call_guard" -> (note_after, stop_after), or None when it is off: false (the default),
+    true, or {"note_after": N, "stop_after": M} with 2 <= N <= M."""
+    if value is False or value is None:
+        return None
+    if value is True:
+        return REPEAT_NOTE_AFTER, REPEAT_STOP_AFTER
+    if isinstance(value, dict) and value and set(value) <= {"note_after", "stop_after"}:
+        note = value.get("note_after", REPEAT_NOTE_AFTER)
+        stop = value.get("stop_after", max(REPEAT_STOP_AFTER, note if isinstance(note, int) else 0))
+        if all(isinstance(x, int) and not isinstance(x, bool) for x in (note, stop)) and 2 <= note <= stop:
+            return note, stop
+    raise ValueError("\"repeat_call_guard\" must be false, true or {\"note_after\": N, \"stop_after\": M} with "
+                     f"2 <= N <= M, not {value!r}")
+
+
+def tool_rounds_tail(messages):
+    """The tool rounds that end the conversation, oldest first: (the assistant message with the calls, the tool
+    messages that answer it).  The tail starts after the last message that is neither, so a user's new instruction
+    or an answer without a call starts the count again."""
+    rounds, end = [], len(messages)
+    while end > 0:
+        start = end
+        while start > 0 and messages[start - 1].get("role") == "tool":
+            start -= 1
+        if start == end or start == 0:
+            break
+        asked = messages[start - 1]
+        if asked.get("role") != "assistant" or not asked.get("tool_calls"):
+            break
+        rounds.append((asked, messages[start:end]))
+        end = start - 1
+    rounds.reverse()
+    return rounds
+
+
+def _result_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    return "".join(p.get("text", "") for p in content or [] if isinstance(p, dict))
+
+
+def repeat_call_verdict(messages, note_after, stop_after):
+    """-> RepeatedCalls when the conversation ends with the same tool round, or the same block of up to
+    REPEAT_MAX_PERIOD rounds, at least `note_after` times in a row: the same calls with the same arguments and the
+    same results every time.  None otherwise.  A result that differs (a poll whose output changes, a file that was
+    edited) is progress, so it never counts."""
+    rounds = tool_rounds_tail(messages)
+
+    def key(asked, results):
+        calls = [[c.get("function", {}).get("name"), c.get("function", {}).get("arguments")]
+                 for c in asked["tool_calls"] if isinstance(c, dict)]
+        return json.dumps([calls, [m.get("content") for m in results]], sort_keys=True, ensure_ascii=False,
+                          default=str)
+    keys = [key(asked, results) for asked, results in rounds]
+    period, times = 0, 1
+    for p in range(1, REPEAT_MAX_PERIOD + 1):
+        if len(keys) < 2 * p:
+            break
+        block, k = keys[-p:], 1
+        while len(keys) >= (k + 1) * p and keys[len(keys) - (k + 1) * p:len(keys) - k * p] == block:
+            k += 1
+        if k > times:                               # a tie goes to the shorter block
+            period, times = p, k
+    if times < note_after:
+        return None
+    names = [str(c.get("function", {}).get("name")) for asked, _ in rounds[-period:]
+             for c in asked["tool_calls"] if isinstance(c, dict)]
+    result = "\n".join(_result_text(m.get("content")) for m in rounds[-1][1])
+    return RepeatedCalls(period, times, names, result, times >= stop_after)
+
+
+def _repeated_what(found) -> str:
+    if len(found.names) == 1:
+        return f"the same tool call ({found.names[0]})"
+    return f"the same sequence of tool calls ({', '.join(found.names)})"
+
+
+def repeat_note(found) -> str:
+    """What the model is told in the last tool result once its calls repeat."""
+    return (f"[strata] Note: {_repeated_what(found)} has now been made {found.times} times in a row and returned the "
+            "same result each time. Sending it again will not change anything. Do not repeat it: look at the current "
+            "state again, choose a different action, or tell the user what stops you.")
+
+
+def repeat_stop_text(found) -> str:
+    """The reply the client gets in place of one more generated call."""
+    shown = " ".join(found.result.split())
+    if len(shown) > REPEAT_RESULT_SHOWN:
+        shown = shown[:REPEAT_RESULT_SHOWN] + "..."
+    return (f"[strata] The reply was stopped to end a loop: the model made {_repeated_what(found)} {found.times} "
+            "times in a row and got the same result each time" + (f": \"{shown}\"" if shown else "") + ". Nothing "
+            "was generated for this turn. Tell the model what to do differently, or ask it what stops it.")
+
+
+def wants_json_reply(req) -> bool:
+    """The request asks for a JSON reply (Chat Completions' response_format, Responses' text.format), which the
+    server checks: plain text in its place is an error."""
+    if not isinstance(req, dict):
+        return False
+    text = req.get("text")
+    formats = (req.get("response_format"), text.get("format") if isinstance(text, dict) else None)
+    return any(isinstance(f, dict) and f.get("type") in ("json_object", "json_schema") for f in formats)
+
+
+def with_repeat_note(messages, note):
+    """The conversation with `note` added to its last tool result: a copy, the client's messages are not changed."""
+    last = dict(messages[-1])
+    content = last.get("content")
+    if isinstance(content, list):
+        last["content"] = content + [{"type": "text", "text": "\n\n" + note}]
+    else:
+        last["content"] = (content or "") + "\n\n" + note
+    return messages[:-1] + [last]
 
 
 LOOPBACK_NAMES = ("localhost", "127.0.0.1", "::1")
@@ -3917,6 +4053,8 @@ class Service:
         self.vision_held = False                         # an elastic encoder holds VRAM the expert cache gave it
         self.last_image_at = 0.0                         # when an image turn last ended (the elastic encoder's idle)
         self.reasoning_loop_recovery = False
+        self.repeat_call_guard = None                    # (note_after, stop_after) of "repeat_call_guard", or None: off
+        self.repeat_local = threading.local()            # prepare()'s finding for the run() that follows it in this thread
         self.reasoning_budget_configured = False         # the config named reasoning_budget_tokens (0 included): no family default
         self.reasoning_budget_tokens = 0                 # #123: the config's default thinking budget (0: none)
         self.repeat_stop_tokens = REPEAT_STOP_TOKENS     # #606: one token this many times in a row ends a reply (0: off)
@@ -4850,9 +4988,19 @@ class Service:
         """-> (ids, thinking, max_new). An unset or non-positive max_new (some clients send -1) means "unlimited":
         the rest of the context.  `force` (forced_call): without thinking the reply starts with it, so it ends the
         prompt; with thinking, Service.run writes it once the thinking is over."""
+        self.repeat_local.found = None
+        # without declared tools the reply cannot be a call, so no call can repeat
+        repeated = repeat_call_verdict(messages, *self.repeat_call_guard) if self.repeat_call_guard and tools else None
+        if repeated is not None and repeated.stop and wants_json_reply(req):
+            # the notice in place of the JSON the request asks for would fail that format's check: refuse instead
+            raise ValueError(repeat_stop_text(repeated))
         # `cancel` (#1999): set when the client hangs up; the downloads, the wait for the turn and the encodes stop
         # between pictures and raise ClientGone
         fetched = self._note_unreadable_tool_images(messages, cancel)
+        if repeated is not None and not repeated.stop:
+            # the client's next request comes without the note, so the engine reads this last turn once more from the
+            # turn's checkpoint: the price of one note
+            messages = with_repeat_note(messages, repeat_note(repeated))
         ids = encoded_ids = self.encode_prompt(messages, tools, kwargs)
         if force and kwargs.get("enable_thinking", True) is False:
             ids = ids + self.tok.encode(force, parse_special=True)
@@ -4952,6 +5100,7 @@ class Service:
                 req["strata_prefix"] = {"messages": lead}
         if req is not None and req.get("strata_prefix") is not None:
             req["strata_prefix"] = self.resolve_prefix(req["strata_prefix"], messages, tools, kwargs, ids, bool(images))
+        self.repeat_local.found = repeated              # set last: a request refused above leaves nothing behind
         return ids, kwargs.get("enable_thinking", True) is not False, max_new
 
     @staticmethod
@@ -5091,6 +5240,45 @@ class Service:
                   f"{el:.0f} s", flush=True)
         return now
 
+    def _end_repeated_calls(self, found, ids, max_new, sampling) -> Iterator[tuple[str, object]]:
+        """The reply to a conversation whose tool calls only repeat (repeat_call_guard): a notice and no call.  One
+        more generated call would keep the client's loop going; a reply without a call ends it.  The engine is not
+        asked.  The notice keeps to the request's max tokens and stop strings as generated text does, and the request
+        is counted with no engine work."""
+        self.drop_embeddings()
+        tokens, finish = self.tok.encode(repeat_stop_text(found), parse_special=False), "stop"
+        if max_new and 0 < max_new < len(tokens):
+            tokens, finish = tokens[:max_new], "length"
+        detok = Detokenizer(self.tok)                   # a character cut in two by the limit is left out, not sent broken
+        text = "".join(detok.push(t) for t in tokens)
+        done = {"finish": finish, "completion_tokens": len(tokens), "reused": 0, "timings": None,
+                "reasoning_tokens": 0, "reasoning_recoveries": 0}
+        stop_list = stop_strings(sampling)
+        if stop_list:
+            stops = StopMatcher(stop_list)
+            text = stops.push(text)
+            if stops.hit is None:
+                text += stops.flush()
+            else:
+                done.update(finish="stop", stop_sequence=stops.hit)
+        print(f"[strata] {_repeated_what(found)} came back {found.times} times in a row with the same result: the "
+              "reply ends the loop without generating (repeat_call_guard in strata-<model>.json)", flush=True)
+        now = time.time()
+        with self.status_lock:
+            self.history.append({
+                "id": uuid.uuid4().hex[:12], "projection": None, "time": now, "duration_s": 0.0,
+                "finish": done["finish"], "prompt_tokens": 0, "reused": None, "output_tokens": len(tokens),
+                "first_engine_token_s": None, "prompt_total": len(ids), "prompt_read": 0, "reasoning_recoveries": 0,
+                "reasoning_repeat_coverage": 0.0, "engine_generated": 0, "prompt_ms": None, "decode_ms": None,
+                "decode_tok_s": None, "hit_rate": None, "pcie_share": None, "ram_blobs": None, "file_blobs": None,
+                "file_mb": None, "drafts_offered": None, "drafts_accepted": None, "repeated_calls": found.times})
+            self.totals["requests"] += 1
+            self.totals["output_tokens"] += len(tokens)
+            self.last_request_at = now
+        if text:
+            yield "event", Event("content", text)
+        yield "done", done
+
     def run(self, ids, thinking, tools, max_new, sampling, cancel, force=None,
             declared_only=False) -> Iterator[tuple[str, object]]:
         """The request's events (see _run); with "prevent_sleep" in the config, the PC stays awake while it runs or waits."""
@@ -5107,12 +5295,23 @@ class Service:
              declared_only=False) -> Iterator[tuple[str, object]]:
         """Yields ("event", Event) as text arrives, then ("done", {"finish": .., "completion_tokens": ..}).
         `force` (forced_call): the opening of the call the reply must make - see prepare()."""
+        repeated, self.repeat_local.found = getattr(self.repeat_local, "found", None), None
+        if repeated is not None and repeated.stop:
+            yield from self._end_repeated_calls(repeated, ids, max_new, sampling)
+            return
         # the model card's sampling for this thinking state, then the config's block, then the Chat settings shared with
         # apps; the request's own fields win over all of them
         defaults = {**model_card_sampling(self.model_arch, thinking), **self.sampling_defaults, **self.shared}
         if defaults:                   # the request's own fields win (explicit 0 stays greedy)
             req_values = {k: v for k, v in (sampling or {}).items() if v is not None}
             sampling = {**defaults, **req_values}
+        if repeated is not None:
+            # greedy decoding answers the same prompt with the same call: this reply is sampled, and prepare() put a
+            # note into its last tool result
+            sampling = loop_breaking_sampling(sampling)
+            print(f"[strata] {_repeated_what(repeated)} came back {repeated.times} times in a row with the same "
+                  "result: this reply carries a note about it and is sampled with a temperature and a presence "
+                  "penalty (repeat_call_guard)", flush=True)
         # #123: read after the merge, so a budget shared through POST /settings is seen like the other keys
         budget = self.reasoning_budget(sampling) if thinking else None
         if thinking and not budget and self.answer_room and max_new and max_new >= ANSWER_ROOM_MIN_CAP:
@@ -5291,6 +5490,7 @@ class Service:
                             else self.engine.generate(prompt, max_new - n, sampling, cancel)
                         recover_prompt = None
                         seg, wrap, leaving = [], False, False   # this pass's tokens; the budget is reached; closed
+                        loop_wrap = False               # the thinking is closed because it repeats, not for its budget
                         nonfinite = False               # #879: the engine ended this pass on non-finite logits
                         opens = False                   # the thinking is over: write the forced call's opening
                         try:
@@ -5358,6 +5558,9 @@ class Service:
                                     if repeat_coverage >= LOOP_COVERAGE:
                                         if self.reasoning_loop_recovery == "stop":
                                             looped = True        # #728: end the reply here, as for a repeated token
+                                            break
+                                        if self.reasoning_loop_recovery == "wrap":
+                                            wrap = loop_wrap = True     # close the thinking as its budget would
                                             break
                                         if not emb:              # "recover": not for a request with pictures
                                             recover_prompt = focused_recovery_prompt(self.tok, ids, raw_ids)
@@ -5429,14 +5632,7 @@ class Service:
                             break
                         if recover_prompt is not None and not cancel.is_set() and n < max_new:
                             recovery_count += 1
-                            # Only the two settings that keep the same words coming are raised (temperature to at
-                            # least 1.0, presence penalty to at least 1.5): a client's top_p and top_k are never
-                            # touched, and its own request dict is copied, not changed.
-                            want = (max(1.0, float((sampling or {}).get("temperature") or 0)),
-                                    max(1.5, float((sampling or {}).get("presence_penalty") or 0)))
-                            if want != tuple(float((sampling or {}).get(k) or 0)
-                                             for k in ("temperature", "presence_penalty")):
-                                sampling = {**(sampling or {}), "temperature": want[0], "presence_penalty": want[1]}
+                            sampling = loop_breaking_sampling(sampling)
                             prompt = recover_prompt
                             with self.status_lock:
                                 st["reasoning_recoveries"] = recovery_count
@@ -5485,7 +5681,20 @@ class Service:
                         extra = self.tok.encode(text, parse_special=True)
                         if max_new - n - len(extra) < 1:
                             break                       # no room left to answer: "length", as without a budget
-                        if wrap:
+                        if loop_wrap:
+                            # greedy decoding would walk the answer back into the passage the thinking kept writing:
+                            # the rest of the reply is sampled
+                            recovery_count += 1
+                            sampling = loop_breaking_sampling(sampling)
+                            with self.status_lock:
+                                st["reasoning_recoveries"] = recovery_count
+                            if trace is not None:
+                                trace["reasoning_recoveries"] = recovery_count
+                                trace["reasoning_repeat_coverage"] = round(repeat_coverage, 3)
+                            print(f"[strata] the thinking repeated the same passages (coverage={repeat_coverage:.3f}) "
+                                  f"at {n} tokens: wrapping up the thinking; the rest of the reply is sampled with a "
+                                  "temperature and a presence penalty (reasoning_loop_recovery: \"wrap\")", flush=True)
+                        elif wrap:
                             print(f"[strata] thinking budget reached ({thought} tokens): wrapping up the thinking",
                                   flush=True)
                         for t in extra:
@@ -8625,13 +8834,22 @@ def main(argv=None, *, lifecycle_event=None, interrupt_exit_code: int = 0) -> in
         if budget:
             print(f"[strata] thinking budget: {budget} tokens (reasoning_budget_tokens; a request can set its own)",
                   flush=True)
-    recovery = cfg.get("reasoning_loop_recovery", False)   # #728: false (default) | "stop" | "recover" (true)
+    recovery = cfg.get("reasoning_loop_recovery", False)   # #728: false (default) | "stop" | "recover" (true) | "wrap"
     if recovery is True:
         recovery = "recover"
-    if recovery is not False and recovery not in ("stop", "recover"):
-        raise SystemExit("[strata] config \"reasoning_loop_recovery\" must be false, \"stop\" or \"recover\", "
-                         f"not {recovery!r}")
+    if recovery is not False and recovery not in ("stop", "recover", "wrap"):
+        raise SystemExit("[strata] config \"reasoning_loop_recovery\" must be false, \"stop\", \"recover\" or "
+                         f"\"wrap\", not {recovery!r}")
     svc.reasoning_loop_recovery = recovery
+    try:
+        svc.repeat_call_guard = repeat_call_guard_setting(cfg.get("repeat_call_guard", False))
+    except ValueError as e:
+        raise SystemExit(f"[strata] config {e}")
+    if recovery or svc.repeat_call_guard:
+        said = ([f"thinking that repeats whole passages is handled as \"{recovery}\""] if recovery else []) + (
+            ["the same tool call with the same result gets a note after {} times and ends the reply after {}".format(
+                *svc.repeat_call_guard)] if svc.repeat_call_guard else [])
+        print(f"[strata] loop guards: {'; '.join(said)}", flush=True)
     svc.gpu_index = (gpu_list(cfg) or [0])[0]           # the Monitor reads the card the engine runs on (issue #51)
     svc.gpu_indices = gpu_list(cfg)                     # ... or every card of a layer split (issue #112)
     if a.engine == "strata" and groups:                 # replicas: every card of every group
