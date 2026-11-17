@@ -244,6 +244,9 @@ SPI_PRIORITY=normal spi                # pi and its commands at the normal prior
 SPI_WEB_VPN=block spi                  # also refuse the wide public ranges that a VPN routes (see the proxy section)
 ```
 
+`SPI_RO`, `SPI_RW` and the two list files take folders and files, never the whole file system: `/` in any spelling (`//`, `/.`, a link
+to it) ends `spi` with a message, because it would open every key and token of the machine to the model.
+
 What it does not stop: the model can still delete or rewrite everything in the folder you started it in, so commit or stash
 first and look at the diff afterwards (files it leaves there, such as a `Makefile` or a script, run later on the host if you
 run them); the names of the directories on the way down and the read-only system under `/usr` stay visible; inside the folder

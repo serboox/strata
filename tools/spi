@@ -184,9 +184,15 @@ read_path_list() {
         line=${line#"${line%%[![:space:]]*}"}
         line=${line%"${line##*[![:space:]]}"}
         line=${line/#\~\//$HOME/}
-        [ -n "$line" ] && printf '%s\n' "${line%/}"
+        [ -n "$line" ] || continue
+        [ "$line" = / ] || line=${line%/}
+        printf '%s\n' "$line"
     done < "$1"
     return 0
+}
+# "/" in any spelling ("//", "/.", a link to it) would open every key and token of the machine to the model
+refuse_root_path() {
+    [ "$(realpath -m -- "$1")" != / ] || { echo "spi: the $2 path $1 is the whole file system: list the folders the task needs" >&2; exit 1; }
 }
 # More files and folders outside the project, read-only (toolchains the project needs, folders to read): SPI_RO=/path/a:/path/b for one
 # run, and one path per line in $AGENT_DIR/ro-paths for every run. A path that does not exist is skipped with a warning.
@@ -195,6 +201,7 @@ RO_PATHS=()
 mapfile -t -O "${#RO_PATHS[@]}" RO_PATHS < <(read_path_list "$AGENT_DIR/ro-paths")
 for path in "${RO_PATHS[@]}"; do
     case "$path" in /*) ;; *) echo "spi: a read-only path must be absolute, not $path" >&2; exit 1 ;; esac
+    refuse_root_path "$path" read-only
     if [ -e "$path" ]; then ARGS+=(--ro-bind "$path" "$path"); else echo "spi: warning: the read-only path $path does not exist, skipped" >&2; fi
 done
 # the home folder's .prompt is outside the project: the sandbox sees it read-only unless a writable path below names it
@@ -207,6 +214,7 @@ RW_PATHS=()
 mapfile -t -O "${#RW_PATHS[@]}" RW_PATHS < <(read_path_list "$AGENT_DIR/rw-paths")
 for path in "${RW_PATHS[@]}"; do
     case "$path" in /*) ;; *) echo "spi: a writable path must be absolute, not $path" >&2; exit 1 ;; esac
+    refuse_root_path "$path" writable
     [ -e "$path" ] || { echo "spi: the writable path $path does not exist (create it first)" >&2; exit 1; }
     ARGS+=(--bind "$path" "$path")
 done
