@@ -146,8 +146,9 @@ def default_model_file() -> Path:
 
 def resolve_stack(experts_used: int | None, expert_prefetch: int | None, profile_name: str, model_size: int, available: int | None,
                   budget: int | None, overlap: bool, igpu_experts: bool) -> tuple:
-    """The experts per token and the prefetch the server starts with, as (experts, prefetch or 0 for off, notes). Nothing asked means
-    the measured stack: 7 experts, and a prefetch of 3 where it can run, which needs the memory for the page-locked experts both free
+    """The experts per token and the prefetch the server starts with, as (experts, prefetch or 0 for off, notes). The default fast set
+    has chosen its experts before this runs (apply_fast_family), so no experts asked happens with --no-fast50 only and means that
+    stack's 7. No prefetch asked means 3 where it can run, which needs the memory for the page-locked experts both free
     (`available`) and inside the server's cgroup limit (`budget`, None for no limit). An explicit value wins."""
     experts = DEFAULT_EXPERTS_USED if experts_used is None else experts_used
     if expert_prefetch is not None:
@@ -639,7 +640,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="requests with a temperature or penalties use the MTP drafts too, with the exact rejection rule (off by default)")
     parser.add_argument("--iq3s-4bit", action="store_true",
                         help="repack the IQ3_S gate/up matrices into 4-bit codes at start for the CPU kernel (same values, about 10.6 GiB of RAM; mapped experts "
-                             "only, so not with --expert-prefetch; the default fast set turns it on where the memory allows)")
+                             "only, so not with --expert-prefetch; the default fast set always turns it on and refuses to start when the memory for it is not free)")
     parser.add_argument("--strict", action="store_true",
                         help="an expert gives the same bits on the CPU and in VRAM, so the output does not depend on the slots or the prefetch guesses: "
                              "the GPU runs kernels with the CPU's arithmetic (IQ3_S gate/up, IQ4_XS down, iq kernels on); for other formats the engine "
@@ -668,8 +669,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="lock the GPU clocks (MHz) while the server runs so that the dense weights are read at full speed from the first step; needs root (sudo -A), "
                              "put back by --gpu-clocks reset; the card heats the shared cooler more")
     parser.add_argument("--iq3s-4bit-drop", action="store_true",
-                        help="with --iq3s-4bit, drop the original gate/up pages from the page cache after the repack (saves about 10 GiB of cache; "
-                             "a prompt chunk reads them again from the disk; off by default)")
+                        help="with --iq3s-4bit, drop from the page cache the original pages that nothing reads after the repack: the down matrices and the "
+                             "gate/up matrices of the experts a prompt chunk gives to the CPU (the page-locked copies serve them); on with the default fast set")
     parser.add_argument("--fast50", action="store_true",
                         help="the default since 13 November 2026, kept as a flag for old command lines: the measured fast set (docs/LOSSLESS_BACKLOG.md): the "
                              "dense Q4_K file, lazy K/V, adaptive draft depth, chained drafts, n-gram drafts and the draft token list, the 4-bit "
@@ -685,13 +686,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--experts-used", type=int, default=None, metavar="K",
                         help=f"route every token to K experts instead of the model's {MODEL_EXPERTS_USED} (1 to {MODEL_EXPERTS_USED}): fewer expert products per "
                              "token, so a faster and cooler decode at some cost in quality, which tools/kld_experts.py measures; "
-                             f"default: {DEFAULT_EXPERTS_USED}, the measured stack (mean KLD about 0.025); {MODEL_EXPERTS_USED} gives the model's own count")
+                             f"default: all {FAST50_EXPERTS_REPACK} with the default fast set; {DEFAULT_EXPERTS_USED} (mean KLD about 0.025) only with --no-fast50, with "
+                             "--expert-prefetch and where the 4-bit repack cannot run (--overlap, --igpu-experts, the memory-capped profiles)")
     parser.add_argument("--expert-prefetch", type=int, default=None, metavar="P",
                         help=f"copy P (1 to {MAX_EXPERT_PREFETCH}) guessed experts of the next layer to the GPU while the CPU computes the current layer, so the GPU "
                              "takes part of the expert work; keeps all the experts page-locked in RAM (--experts pinned, about 15 GiB), "
                              "see the expert prefetch section of docs/TUNING.md; 0 turns it off; "
-                             f"default: {DEFAULT_EXPERT_PREFETCH} on the {'/'.join(PREFETCH_DEFAULT_PROFILES)} profile when the memory is free for the experts "
-                             "and neither --overlap nor --igpu-experts is used, else off")
+                             f"default: off with the default fast set; with --no-fast50, {DEFAULT_EXPERT_PREFETCH} on the {'/'.join(PREFETCH_DEFAULT_PROFILES)} profile "
+                             "when the memory is free for the experts and neither --overlap nor --igpu-experts is used")
     parser.add_argument("--vram-reserve", type=int, default=None, metavar="MIB",
                         help="the VRAM the expert placement leaves free, in MiB (the engine's default is 768); a smaller value leaves room for "
                              "resident experts or guess slots at a long context, with less margin for other programs")

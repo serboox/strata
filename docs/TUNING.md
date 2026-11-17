@@ -541,8 +541,9 @@ data. Judge the file by the perplexity of the llama.cpp perplexity tool on the s
 The model routes every token to 8 of its 256 experts. Each expert costs the CPU a dequantizing dot product per layer, and the
 routed experts are 52 of the 75 ms of a decode step, so fewer experts per token make a step shorter and the package cooler.
 The price is quality: the model was trained with 8, and the answer changes. The engine's own default is the file's count and changes
-nothing; the launcher (`bin/strata-serve`) passes 7 unless `--experts-used` says otherwise (`--experts-used 8` gives the model's
-count back).
+nothing, and so does the launcher's default start (`bin/strata-serve`: all 8 with the 4-bit repack). The launcher passes 7 only
+with `--no-fast50`, with `--expert-prefetch`, and where the repack cannot run (`--overlap`, `--igpu-experts`, the memory-limited
+profiles); `--experts-used 8` gives the model's count back there.
 
 - On: `strata_launch.py --experts-used K`, or `STRATA_Q36_EXPERTS_USED=K` in the engine's environment. K is an integer from 1
   to the file's `expert_used_count` (8). A larger value or anything that is not an integer stops the engine with a message; it

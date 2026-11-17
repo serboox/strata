@@ -164,10 +164,12 @@ bin/strata-serve --no-fast50                                                    
 bin/strata-serve --no-fast50 --experts-used 8 --expert-prefetch 0                          # the model's own routing, no prefetch
 ```
 
-The prefetch keeps all the experts page-locked in RAM (about 15 GiB) and the server takes about a minute to start. The launcher
-leaves the prefetch off by itself, with a line on stderr, when less memory is free than the file plus 2 GiB, or when `--overlap`
-or `--igpu-experts` is used, and on the memory-limited profiles (`lean`, `balanced`, `fast`, `max`); `--expert-prefetch P` asks for
-it explicitly. The 7 experts apply to every profile. See "Expert prefetch over PCIe" and "Fewer experts per token" in
+The default start always routes every token to all 8 experts, and it has no prefetch. Seven experts are used only when asked for or
+where the 4-bit repack cannot run: with `--experts-used 7`, with `--expert-prefetch P` (the prefetch keeps all the experts
+page-locked in RAM, about 15 GiB, and the server takes about a minute to start), with `--no-fast50` (the earlier stack, whose
+prefetch the launcher leaves off by itself, with a line on stderr, when less memory is free than the file plus 2 GiB), with
+`--overlap` or `--igpu-experts`, and on the memory-limited profiles (`lean`, `balanced`, `fast`, `max`). `--experts-used 8` gives
+the model's own count back in each of these. See "Expert prefetch over PCIe" and "Fewer experts per token" in
 [docs/TUNING.md](docs/TUNING.md).
 
 ## What it needs
